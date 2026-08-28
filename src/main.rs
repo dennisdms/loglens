@@ -1791,7 +1791,7 @@ impl LogLens {
 
         let row1 = container(
             row![
-                text_input("query string \u{2014} empty matches all", &tab.query_draft)
+                text_input("Lucene Query", &tab.query_draft)
                     .on_input(move |v| Message::ResultQueryDraft(run_id, v))
                     .on_submit(Message::ResultQuerySubmit(run_id))
                     .size(12.0)
