@@ -14,7 +14,8 @@ use iced::widget::{
     scrollable, space, stack, text, text_editor, text_input,
 };
 use iced::{
-    Border, Color, Element, Fill, Font, Length, Padding, Subscription, Task, Theme,
+    Border, Color, Element, Fill, Font, Length, Padding, Point, Subscription, Task,
+    Theme,
 };
 
 use config::{Auth, Config, Connection};
@@ -63,6 +64,11 @@ struct LogLens {
     detail_drag: Option<DetailDrag>,
     /// The tree row whose Edit / Delete menu is open.
     tree_menu: Option<TreeMenu>,
+    /// Cursor position over the sidebar, tracked so the right-click menu can
+    /// open as a floating dropdown at the pointer.
+    sidebar_cursor: Point,
+    /// Where the open `tree_menu` dropdown is anchored (sidebar coordinates).
+    tree_menu_at: Point,
     /// A pending destructive action awaiting confirmation.
     confirm: Option<Confirm>,
 }
@@ -184,7 +190,12 @@ enum Message {
     },
     RetryPage(u64),
     // Tree item management
+    /// Pointer moved over the sidebar; tracked to anchor the right-click menu.
+    SidebarCursor(Point),
+    /// Right-click on a tree row toggles its Edit / Delete dropdown.
     TreeMenuToggle(TreeMenu),
+    /// Click outside an open tree menu closes it.
+    TreeMenuDismiss,
     EditConnection(String),
     RequestDeleteConnection(String),
     EditSearch { connection: String, search: String },
@@ -212,6 +223,8 @@ impl LogLens {
             id_seq: 0,
             detail_drag: None,
             tree_menu: None,
+            sidebar_cursor: Point::ORIGIN,
+            tree_menu_at: Point::ORIGIN,
             confirm: None,
         }
     }
@@ -658,13 +671,16 @@ impl LogLens {
             }
             Message::DetailDragEnd => self.detail_drag = None,
 
+            Message::SidebarCursor(pos) => self.sidebar_cursor = pos,
             Message::TreeMenuToggle(target) => {
                 self.tree_menu = if self.tree_menu.as_ref() == Some(&target) {
                     None
                 } else {
+                    self.tree_menu_at = self.sidebar_cursor;
                     Some(target)
                 };
             }
+            Message::TreeMenuDismiss => self.tree_menu = None,
             Message::EditConnection(id) => {
                 self.tree_menu = None;
                 if let Some(conn) = self.connection(&id) {
@@ -1333,6 +1349,9 @@ impl LogLens {
         .into();
 
         let mut layers: Vec<Element<'_, Message>> = vec![base];
+        if let Some(menu) = self.tree_menu_overlay() {
+            layers.push(menu);
+        }
         if let Some(form) = &self.connection_form {
             layers.push(self.connection_form_modal(form));
         }
@@ -1380,15 +1399,18 @@ impl LogLens {
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
-        container(
+        let panel = container(
             scrollable(column![self.es_section()].spacing(1.0).width(Fill))
                 .height(Fill),
         )
         .style(|_| style::panel(PANEL))
         .width(240.0)
         .height(Fill)
-        .padding(6.0)
-        .into()
+        .padding(6.0);
+
+        mouse_area(panel)
+            .on_move(Message::SidebarCursor)
+            .into()
     }
 
     /// The `Elasticsearch` tree root: its Connections plus a "＋" affordance.
@@ -1440,37 +1462,29 @@ impl LogLens {
         let open = self.expanded.contains(&conn.id);
         let marker = if open { "\u{25be}" } else { "\u{25b8}" };
 
-        let header = row![
-            button(
-                row![
-                    text(marker).size(11.0).color(TEXT_DIM),
-                    text(conn.name.clone()).size(13.0),
-                ]
-                .spacing(6.0),
-            )
-            .on_press(Message::ToggleFolder(conn.id.clone()))
-            .width(Fill)
-            .padding(Padding::new(4.0).left(20.0).right(4.0))
-            .style(style::picker_row(false)),
-            button(text("\u{ff0b}").size(12.0).color(TEXT_DIM))
-                .on_press(Message::NewSearch(conn.id.clone()))
-                .padding(Padding::new(4.0).left(6.0).right(6.0))
-                .style(style::bare_button()),
-            button(text("\u{22ef}").size(13.0).color(TEXT_DIM))
-                .on_press(Message::TreeMenuToggle(TreeMenu::Connection(conn.id.clone())))
-                .padding(Padding::new(4.0).left(6.0).right(6.0))
-                .style(style::bare_button()),
-        ]
-        .align_y(iced::Alignment::Center);
+        let header = mouse_area(
+            row![
+                button(
+                    row![
+                        text(marker).size(11.0).color(TEXT_DIM),
+                        text(conn.name.clone()).size(13.0),
+                    ]
+                    .spacing(6.0),
+                )
+                .on_press(Message::ToggleFolder(conn.id.clone()))
+                .width(Fill)
+                .padding(Padding::new(4.0).left(20.0).right(4.0))
+                .style(style::picker_row(false)),
+                button(text("\u{ff0b}").size(12.0).color(TEXT_DIM))
+                    .on_press(Message::NewSearch(conn.id.clone()))
+                    .padding(Padding::new(4.0).left(6.0).right(6.0))
+                    .style(style::bare_button()),
+            ]
+            .align_y(iced::Alignment::Center),
+        )
+        .on_right_press(Message::TreeMenuToggle(TreeMenu::Connection(conn.id.clone())));
 
         let mut rows: Vec<Element<'a, Message>> = vec![header.into()];
-        if self.tree_menu == Some(TreeMenu::Connection(conn.id.clone())) {
-            rows.push(tree_menu_block(
-                40.0,
-                Message::EditConnection(conn.id.clone()),
-                Message::RequestDeleteConnection(conn.id.clone()),
-            ));
-        }
         if open {
             if conn.searches.is_empty() {
                 rows.push(
@@ -1493,7 +1507,7 @@ impl LogLens {
                         search: saved.id.clone(),
                     };
                     rows.push(
-                        row![
+                        mouse_area(
                             button(text(saved.name.clone()).size(13.0))
                                 .on_press(Message::OpenSavedSearch {
                                     connection: conn.id.clone(),
@@ -1502,31 +1516,49 @@ impl LogLens {
                                 .width(Fill)
                                 .padding(Padding::new(4.0).left(40.0).right(4.0))
                                 .style(style::picker_row(active)),
-                            button(text("\u{22ef}").size(13.0).color(TEXT_DIM))
-                                .on_press(Message::TreeMenuToggle(menu_target.clone()))
-                                .padding(Padding::new(4.0).left(6.0).right(6.0))
-                                .style(style::bare_button()),
-                        ]
-                        .align_y(iced::Alignment::Center)
+                        )
+                        .on_right_press(Message::TreeMenuToggle(menu_target))
                         .into(),
                     );
-                    if self.tree_menu.as_ref() == Some(&menu_target) {
-                        rows.push(tree_menu_block(
-                            52.0,
-                            Message::EditSearch {
-                                connection: conn.id.clone(),
-                                search: saved.id.clone(),
-                            },
-                            Message::DeleteSearch {
-                                connection: conn.id.clone(),
-                                search: saved.id.clone(),
-                            },
-                        ));
-                    }
                 }
             }
         }
         column(rows).spacing(1.0).width(Fill).into()
+    }
+
+    /// The floating right-click dropdown for the open `tree_menu`, anchored at
+    /// the pointer as a stack layer so it never reflows the tree.
+    fn tree_menu_overlay(&self) -> Option<Element<'_, Message>> {
+        let (edit, delete) = match self.tree_menu.as_ref()? {
+            TreeMenu::Connection(id) => (
+                Message::EditConnection(id.clone()),
+                Message::RequestDeleteConnection(id.clone()),
+            ),
+            TreeMenu::Search { connection, search } => (
+                Message::EditSearch {
+                    connection: connection.clone(),
+                    search: search.clone(),
+                },
+                Message::DeleteSearch {
+                    connection: connection.clone(),
+                    search: search.clone(),
+                },
+            ),
+        };
+
+        let x = self.tree_menu_at.x.min(240.0 - 136.0).max(2.0);
+        let y = self.tree_menu_at.y.max(2.0);
+        let anchored = container(tree_menu_block(edit, delete))
+            .width(Fill)
+            .height(Fill)
+            .padding(Padding::new(0.0).left(x).top(y));
+
+        Some(
+            mouse_area(anchored)
+                .on_press(Message::TreeMenuDismiss)
+                .on_right_press(Message::TreeMenuDismiss)
+                .into(),
+        )
     }
 
     fn tab_bar(&self) -> Element<'_, Message> {
@@ -2380,29 +2412,26 @@ fn column_row<'a>(
     .into()
 }
 
-/// The inline Edit / Delete menu shown under a tree row, indented by `indent`.
-fn tree_menu_block<'a>(
-    indent: f32,
-    edit: Message,
-    delete: Message,
-) -> Element<'a, Message> {
+/// The floating Edit / Delete dropdown opened by right-clicking a tree row.
+fn tree_menu_block<'a>(edit: Message, delete: Message) -> Element<'a, Message> {
     container(
         column![
             button(text("Edit").size(12.0).color(TEXT))
                 .on_press(edit)
                 .width(Fill)
-                .padding(Padding::new(3.0).left(8.0))
+                .padding(Padding::new(4.0).left(10.0).right(10.0))
                 .style(style::picker_row(false)),
             button(text("Delete").size(12.0).color(ERR_RED))
                 .on_press(delete)
                 .width(Fill)
-                .padding(Padding::new(3.0).left(8.0))
+                .padding(Padding::new(4.0).left(10.0).right(10.0))
                 .style(style::picker_row(false)),
         ]
         .spacing(1.0),
     )
-    .width(Fill)
-    .padding(Padding::new(0.0).left(indent))
+    .width(130.0)
+    .padding(3.0)
+    .style(|_| style::menu_popup())
     .into()
 }
 

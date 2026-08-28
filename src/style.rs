@@ -51,6 +51,20 @@ pub fn editor(_theme: &Theme, _status: text_editor::Status) -> text_editor::Styl
     }
 }
 
+/// A floating context-menu card: raised surface, hairline border, rounded.
+pub fn menu_popup() -> container::Style {
+    container::Style {
+        background: Some(PANEL_ALT.into()),
+        text_color: Some(TEXT),
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// A file-picker row; filled when `active`, faintly lit on hover.
 pub fn picker_row(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
