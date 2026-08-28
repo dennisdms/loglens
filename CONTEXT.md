@@ -27,10 +27,6 @@ The index, data stream, or index pattern a Saved Search runs against (e.g.
 `logs-app-prod`, `logs-*`). Chosen when the Saved Search is created.
 _Avoid_: index (when a data stream or pattern may be meant), source
 
-**Sample Logs**:
-The other top-level tree root: bundled fake log files used to exercise the UI
-before real local-file browsing exists. Unrelated to Elasticsearch.
-
 ### Querying
 
 **Search** (verb):
@@ -71,7 +67,7 @@ _Avoid_: limit, max results, buffer size
 
 **Result Tab**:
 A tab in the main area showing the Hits from one Saved Search as a virtualized
-table. A distinct kind of tab from the file tabs used for Sample Logs.
+table. Distinct from the Search form tab used to compose a Saved Search.
 _Avoid_: results pane, grid, output
 
 **Column**:
