@@ -1,0 +1,57 @@
+name: loglens-dev
+
+# A throwaway Elasticsearch cluster plus a log generator, for exercising
+# Log Lens against a live cluster. See dev/README.md.
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    container_name: loglens-es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.license.self_generated.type=basic
+      - ingest.geoip.downloader.enabled=false
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+
+  generator:
+    image: python:3.12-slim
+    container_name: loglens-generator
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - ES_URL=http://elasticsearch:9200
+      - DATA_STREAM=logs-loglens
+      - RATE=20            # hits per tick
+      - INTERVAL=3         # seconds per tick
+      - BACKFILL_MINUTES=60
+    volumes:
+      - ./generator:/app:ro
+    command: ["python", "-u", "/app/generate_logs.py"]
+    restart: unless-stopped
+
+  # Optional: `docker compose --profile kibana up -d` to also get a browser UI
+  # at http://localhost:5601 for sanity-checking the data.
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    container_name: loglens-kibana
+    profiles: ["kibana"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
