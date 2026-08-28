@@ -5,6 +5,16 @@ use serde_json::Value;
 
 use crate::es::Hit;
 
+/// Fixed row height, in pixels — the table renders a windowed slice, so every
+/// row must be the same height for scroll maths to line up.
+pub const ROW_H: f32 = 22.0;
+
+/// Hard ceiling on Hits loaded into one Result Tab (ADR 0002).
+pub const RETENTION_CAP: usize = 10_000;
+
+/// Rows rendered above and below the visible viewport as scroll slack.
+const WINDOW_BUFFER: usize = 40;
+
 /// Where a Result Tab's run currently stands.
 #[derive(Debug, Clone)]
 pub enum RunState {
@@ -16,6 +26,21 @@ pub enum RunState {
     Empty,
     /// The cluster (or transport) returned an error; shown verbatim.
     Error(String),
+}
+
+/// Where paging past the first Page stands.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Paging {
+    /// Ready to fetch the next Page on scroll.
+    Idle,
+    /// A next-Page request is in flight (only ever one at a time).
+    Loading,
+    /// The cluster returned every matching Hit; nothing more to fetch.
+    Exhausted,
+    /// Stopped at the 10,000-Hit Retention cap.
+    Capped,
+    /// The last next-Page fetch failed; loaded Hits are untouched, retry resumes.
+    Failed(String),
 }
 
 /// One open Result Tab.
@@ -38,14 +63,44 @@ pub struct ResultTab {
     pub pit_id: Option<String>,
     pub hits: Vec<Hit>,
     pub state: RunState,
+    pub paging: Paging,
+    /// Latest scroll offset / viewport height, for windowed rendering.
+    pub scroll_y: f32,
+    pub viewport_h: f32,
     /// Render `@timestamp`-typed cells in UTC rather than local time.
     pub utc: bool,
 }
 
 impl ResultTab {
-    #[allow(dead_code)] // used once scroll paging lands (#4)
-    pub fn is_running(&self) -> bool {
-        matches!(self.state, RunState::Loading)
+    /// The `[start, end)` slice of `hits` to actually build widgets for,
+    /// given the current scroll offset.
+    pub fn row_window(&self) -> (usize, usize) {
+        let total = self.hits.len();
+        if total == 0 {
+            return (0, 0);
+        }
+        let first_visible = (self.scroll_y / ROW_H).floor().max(0.0) as usize;
+        let visible = (self.viewport_h / ROW_H).ceil() as usize;
+        let start = first_visible.saturating_sub(WINDOW_BUFFER);
+        let end = (first_visible + visible + WINDOW_BUFFER).min(total);
+        (start.min(end), end)
+    }
+
+    /// Whether a scroll to `offset_y` (viewport `viewport_h`, content
+    /// `content_h`) should kick off the next Page.
+    pub fn wants_more(&self, offset_y: f32, viewport_h: f32, content_h: f32) -> bool {
+        matches!(self.state, RunState::Loaded)
+            && self.paging == Paging::Idle
+            && self.hits.len() < RETENTION_CAP
+            && content_h - (offset_y + viewport_h) < 600.0
+    }
+
+    /// The `search_after` cursor for the next Page: the last Hit's sort values.
+    pub fn next_cursor(&self) -> Option<Vec<serde_json::Value>> {
+        self.hits
+            .last()
+            .map(|h| h.sort.clone())
+            .filter(|s| !s.is_empty())
     }
 }
 

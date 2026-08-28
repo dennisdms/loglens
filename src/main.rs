@@ -18,7 +18,7 @@ use iced::{Border, Color, Element, Fill, Font, Length, Padding, Task, Theme};
 
 use config::{Auth, Config, Connection};
 use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
-use results::{ResultTab, RunState};
+use results::{Paging, ResultTab, RunState, RETENTION_CAP, ROW_H};
 use sample::{LogFile, PickerNode};
 use search::{SearchForm, TimeframeMode};
 use config::TimeUnit;
@@ -120,7 +120,18 @@ enum Message {
     SearchSave,
     // Result tab run
     PitOpened { run_id: u64, result: Result<String, String> },
-    PageLoaded { run_id: u64, result: Result<es::Page, String> },
+    PageLoaded {
+        run_id: u64,
+        result: Result<es::Page, String>,
+        append: bool,
+    },
+    ResultScrolled {
+        run_id: u64,
+        offset_y: f32,
+        viewport_h: f32,
+        content_h: f32,
+    },
+    RetryPage(u64),
     // Misc
     DismissStatus,
     Ignore,
@@ -410,26 +421,34 @@ impl LogLens {
             Message::PitOpened { run_id, result } => {
                 return self.on_pit_opened(run_id, result);
             }
-            Message::PageLoaded { run_id, result } => match result {
-                Ok(page) => {
-                    if let Some(rt) = self.result_mut(run_id) {
-                        if let Some(pit) = page.pit_id {
-                            rt.pit_id = Some(pit);
-                        }
-                        rt.hits = page.hits;
-                        rt.state = if rt.hits.is_empty() {
-                            RunState::Empty
-                        } else {
-                            RunState::Loaded
-                        };
-                    }
+            Message::PageLoaded {
+                run_id,
+                result,
+                append,
+            } => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    apply_page(rt, result, append);
                 }
-                Err(err) => {
-                    if let Some(rt) = self.result_mut(run_id) {
-                        rt.state = RunState::Error(err);
-                    }
+            }
+            Message::ResultScrolled {
+                run_id,
+                offset_y,
+                viewport_h,
+                content_h,
+            } => {
+                let wants_more = self
+                    .result_mut(run_id)
+                    .map(|rt| {
+                        rt.scroll_y = offset_y;
+                        rt.viewport_h = viewport_h;
+                        rt.wants_more(offset_y, viewport_h, content_h)
+                    })
+                    .unwrap_or(false);
+                if wants_more {
+                    return self.load_more(run_id);
                 }
-            },
+            }
+            Message::RetryPage(run_id) => return self.load_more(run_id),
 
             Message::DismissStatus => self.status = None,
             Message::Ignore => {}
@@ -673,6 +692,9 @@ impl LogLens {
             pit_id: None,
             hits: Vec::new(),
             state: RunState::Loading,
+            paging: Paging::Idle,
+            scroll_y: 0.0,
+            viewport_h: 600.0,
             utc: self.config.utc_timestamps,
         };
 
@@ -696,6 +718,8 @@ impl LogLens {
             rt.state = RunState::Loading;
             rt.hits.clear();
             rt.pit_id = None;
+            rt.paging = Paging::Idle;
+            rt.scroll_y = 0.0;
             (rt.connection_id.clone(), rt.target.clone())
         }) else {
             return Task::none();
@@ -762,10 +786,60 @@ impl LogLens {
         let Some(endpoint) = self.endpoint_for(conn) else {
             return Task::none();
         };
-        Task::perform(
-            es::search(endpoint, pit, params),
-            move |result| Message::PageLoaded { run_id, result },
-        )
+        Task::perform(es::search(endpoint, pit, params), move |result| {
+            Message::PageLoaded {
+                run_id,
+                result,
+                append: false,
+            }
+        })
+    }
+
+    /// Fetches the next Page for a Result Tab via `search_after` on its PIT.
+    /// A no-op unless the tab is idle, under the cap, and has a cursor.
+    fn load_more(&mut self, run_id: u64) -> Task<Message> {
+        let Some((conn_id, pit, params)) =
+            self.result_mut(run_id).and_then(|rt| {
+                let pit = rt.pit_id.clone()?;
+                let cursor = rt.next_cursor()?;
+                let remaining = RETENTION_CAP.saturating_sub(rt.hits.len());
+                if remaining == 0 {
+                    rt.paging = Paging::Capped;
+                    return None;
+                }
+                rt.paging = Paging::Loading;
+                Some((
+                    rt.connection_id.clone(),
+                    pit,
+                    es::SearchParams {
+                        query_string: rt.query_string.clone(),
+                        timestamp_field: rt.timestamp_field.clone(),
+                        gte: rt.gte.clone(),
+                        lte: rt.lte.clone(),
+                        sort_field: rt.sort_field.clone(),
+                        sort_desc: rt.sort_desc,
+                        size: remaining.min(1000),
+                        search_after: Some(cursor),
+                    },
+                ))
+            })
+        else {
+            return Task::none();
+        };
+
+        let Some(conn) = self.connection(&conn_id) else {
+            return Task::none();
+        };
+        let Some(endpoint) = self.endpoint_for(conn) else {
+            return Task::none();
+        };
+        Task::perform(es::search(endpoint, pit, params), move |result| {
+            Message::PageLoaded {
+                run_id,
+                result,
+                append: true,
+            }
+        })
     }
 
     // --- View --------------------------------------------------------------
@@ -1325,40 +1399,114 @@ impl LogLens {
         }))
         .spacing(8.0);
 
-        let rows = column(tab.hits.iter().map(|hit| -> Element<'_, Message> {
-            container(
-                row(tab.columns.iter().map(|col| -> Element<'_, Message> {
-                    let value =
-                        results::cell(&hit.source, col, &tab.timestamp_field, tab.utc);
-                    container(
-                        text(value)
-                            .size(12.0)
-                            .font(Font::MONOSPACE)
-                            .wrapping(text::Wrapping::None),
-                    )
-                    .width(col_width(col, &tab.timestamp_field))
-                    .padding(Padding::new(3.0).left(6.0))
-                    .clip(true)
-                    .into()
-                }))
-                .spacing(8.0),
-            )
-            .width(Fill)
-            .into()
-        }))
-        .spacing(0.0);
+        // Only build widgets for the slice around the viewport; pad the rest
+        // with spacers so the scrollbar still spans every loaded Hit.
+        let (start, end) = tab.row_window();
+        let mut body: Vec<Element<'_, Message>> = Vec::with_capacity(end - start + 2);
+        if start > 0 {
+            body.push(space().height(start as f32 * ROW_H).into());
+        }
+        for hit in &tab.hits[start..end] {
+            body.push(
+                container(
+                    row(tab.columns.iter().map(|col| -> Element<'_, Message> {
+                        let value = results::cell(
+                            &hit.source,
+                            col,
+                            &tab.timestamp_field,
+                            tab.utc,
+                        );
+                        container(
+                            text(value)
+                                .size(12.0)
+                                .font(Font::MONOSPACE)
+                                .wrapping(text::Wrapping::None),
+                        )
+                        .width(col_width(col, &tab.timestamp_field))
+                        .padding(Padding::new(3.0).left(6.0))
+                        .clip(true)
+                        .into()
+                    }))
+                    .spacing(8.0),
+                )
+                .width(Fill)
+                .height(Length::Fixed(ROW_H))
+                .clip(true)
+                .into(),
+            );
+        }
+        let trailing = tab.hits.len().saturating_sub(end);
+        if trailing > 0 {
+            body.push(space().height(trailing as f32 * ROW_H).into());
+        }
 
-        column![
+        let run_id = tab.run_id;
+        let table = scrollable(column(body).width(Fill))
+            .width(Fill)
+            .height(Fill)
+            .on_scroll(move |viewport| {
+                let offset = viewport.absolute_offset();
+                Message::ResultScrolled {
+                    run_id,
+                    offset_y: offset.y,
+                    viewport_h: viewport.bounds().height,
+                    content_h: viewport.content_bounds().height,
+                }
+            });
+
+        let mut stacked = column![
             container(header)
                 .style(|_| style::panel(PANEL_ALT))
                 .width(Fill)
                 .padding(Padding::new(2.0).left(6.0)),
             rule::horizontal(1.0),
-            scrollable(rows).width(Fill).height(Fill),
+            table,
         ]
         .width(Fill)
-        .height(Fill)
-        .into()
+        .height(Fill);
+
+        if let Some(footer) = self.paging_footer(tab) {
+            stacked = stacked.push(rule::horizontal(1.0));
+            stacked = stacked.push(footer);
+        }
+
+        stacked.into()
+    }
+
+    fn paging_footer<'a>(&self, tab: &'a ResultTab) -> Option<Element<'a, Message>> {
+        let run_id = tab.run_id;
+        let content: Element<'_, Message> = match &tab.paging {
+            Paging::Idle | Paging::Exhausted => return None,
+            Paging::Loading => {
+                text("Loading more\u{2026}").size(12.0).color(TEXT_DIM).into()
+            }
+            Paging::Capped => text(format!(
+                "Showing first {RETENTION_CAP} Hits — refine your search"
+            ))
+            .size(12.0)
+            .color(TEXT_DIM)
+            .into(),
+            Paging::Failed(err) => row![
+                text(format!("Failed to load more — {err}"))
+                    .size(12.0)
+                    .color(ERR_RED),
+                button(text("Retry").size(12.0).color(TEXT))
+                    .on_press(Message::RetryPage(run_id))
+                    .padding(Padding::new(3.0).left(10.0).right(10.0))
+                    .style(style::picker_row(true)),
+            ]
+            .spacing(10.0)
+            .align_y(iced::Alignment::Center)
+            .into(),
+        };
+
+        Some(
+            container(content)
+                .style(|_| style::panel(PANEL_ALT))
+                .width(Fill)
+                .padding(Padding::new(5.0).left(12.0).right(12.0))
+                .into(),
+        )
     }
 
     // --- Modals ------------------------------------------------------
@@ -1576,6 +1724,47 @@ fn modal_card<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
             ..container::Style::default()
         })
         .into()
+}
+
+/// Folds a fetched Page into a Result Tab: replacing Hits on a first run,
+/// appending on a scroll-driven load-more, and settling the paging state.
+fn apply_page(rt: &mut ResultTab, result: Result<es::Page, String>, append: bool) {
+    match result {
+        Ok(page) => {
+            if let Some(pit) = page.pit_id {
+                rt.pit_id = Some(pit);
+            }
+            let got = page.hits.len();
+            if append {
+                rt.hits.extend(page.hits);
+            } else {
+                rt.hits = page.hits;
+            }
+
+            if !append {
+                rt.state = if rt.hits.is_empty() {
+                    RunState::Empty
+                } else {
+                    RunState::Loaded
+                };
+            }
+            rt.paging = if rt.hits.len() >= RETENTION_CAP {
+                Paging::Capped
+            } else if got < 1000 {
+                Paging::Exhausted
+            } else {
+                Paging::Idle
+            };
+        }
+        Err(err) => {
+            if append {
+                // Leave already-loaded Hits untouched; offer a retry.
+                rt.paging = Paging::Failed(err);
+            } else {
+                rt.state = RunState::Error(err);
+            }
+        }
+    }
 }
 
 fn meta<'a>(value: &str) -> Element<'a, Message> {

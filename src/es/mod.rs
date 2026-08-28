@@ -143,7 +143,6 @@ pub async fn list_targets(endpoint: Endpoint) -> Result<Vec<String>, String> {
 pub struct Hit {
     pub source: Value,
     /// The Hit's `sort` values — the `search_after` cursor for the next Page.
-    #[allow(dead_code)] // consumed when scroll paging lands (#4)
     pub sort: Vec<Value>,
 }
 
