@@ -58,6 +58,9 @@ pub struct ResultTab {
     pub saved_name: String,
     pub target: String,
     pub query_string: String,
+    /// Draft text for the Search bar's query-string input, committed to
+    /// `query_string` (and re-run) on Enter.
+    pub query_draft: String,
     pub timestamp_field: String,
     pub columns: Vec<String>,
     /// Draft text for the live "add column" control.

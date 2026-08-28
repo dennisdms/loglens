@@ -156,7 +156,9 @@ enum Message {
     SearchSortField(String),
     SearchSortDir(bool),
     SearchSave,
-    // Result tab: live columns + sort
+    // Result tab: live query string, columns + sort
+    ResultQueryDraft(u64, String),
+    ResultQuerySubmit(u64),
     ResultFieldsLoaded {
         run_id: u64,
         result: Result<es::FieldCaps, String>,
@@ -530,6 +532,25 @@ impl LogLens {
             }
             Message::SearchSave => return self.save_search_form(),
 
+            Message::ResultQueryDraft(run_id, v) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.query_draft = v;
+                }
+            }
+            Message::ResultQuerySubmit(run_id) => {
+                let changed = self
+                    .result_mut(run_id)
+                    .map(|rt| {
+                        let changed = rt.query_string != rt.query_draft;
+                        rt.query_string = rt.query_draft.clone();
+                        changed
+                    })
+                    .unwrap_or(false);
+                if changed {
+                    self.sync_saved_from_result(run_id);
+                    return self.start_run(run_id);
+                }
+            }
             Message::ResultFieldsLoaded { run_id, result } => {
                 if let Ok(caps) = result {
                     if let Some(rt) = self.result_mut(run_id) {
@@ -986,14 +1007,15 @@ impl LogLens {
         })
     }
 
-    /// Writes a Result Tab's live Column / sort choices back onto its Saved
-    /// Search and persists the config.
+    /// Writes a Result Tab's live query string / Column / sort choices back onto
+    /// its Saved Search and persists the config.
     fn sync_saved_from_result(&mut self, run_id: u64) {
-        let Some((conn_id, saved_id, columns, sort_field, sort_desc)) =
+        let Some((conn_id, saved_id, query_string, columns, sort_field, sort_desc)) =
             self.result_mut(run_id).map(|rt| {
                 (
                     rt.connection_id.clone(),
                     rt.saved_id.clone(),
+                    rt.query_string.clone(),
                     rt.columns.clone(),
                     rt.sort_field.clone(),
                     rt.sort_desc,
@@ -1004,6 +1026,7 @@ impl LogLens {
         };
         if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id) {
             if let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id) {
+                saved.query_string = query_string;
                 saved.columns = columns;
                 saved.sort_field = sort_field;
                 saved.sort_desc = sort_desc;
@@ -1098,6 +1121,7 @@ impl LogLens {
                         rt.saved_name = saved.name.clone();
                         rt.target = saved.target.clone();
                         rt.query_string = saved.query_string.clone();
+                        rt.query_draft = saved.query_string.clone();
                         rt.timestamp_field = saved.timestamp_field.clone();
                         rt.columns = saved.columns.clone();
                         rt.sort_field = saved.sort_field.clone();
@@ -1136,6 +1160,7 @@ impl LogLens {
             saved_name: saved.name.clone(),
             target: saved.target.clone(),
             query_string: saved.query_string.clone(),
+            query_draft: saved.query_string.clone(),
             timestamp_field: saved.timestamp_field.clone(),
             columns: saved.columns.clone(),
             column_draft: String::new(),
@@ -1652,12 +1677,17 @@ impl LogLens {
 
         let row1 = container(
             row![
+                text_input("query string \u{2014} empty matches all", &tab.query_draft)
+                    .on_input(move |v| Message::ResultQueryDraft(run_id, v))
+                    .on_submit(Message::ResultQuerySubmit(run_id))
+                    .size(12.0)
+                    .padding(4.0)
+                    .width(Fill),
                 text(format!("\u{b7} {}", tab.target)).size(12.0).color(TEXT_DIM),
                 button(text("Refresh").size(12.0).color(TEXT_DIM))
                     .on_press(Message::RefreshResult(run_id))
                     .padding(Padding::new(2.0).left(8.0).right(8.0))
                     .style(style::bare_button()),
-                space().width(Fill),
                 meta(&format!("{} hits", tab.hits.len())),
             ]
             .spacing(12.0)
