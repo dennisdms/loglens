@@ -1,12 +1,32 @@
 //! State for a Search form tab (compose / edit a Saved Search).
 
 use crate::config::{self, SavedSearch, TimeUnit, Timeframe};
+use crate::es::FieldCaps;
 
 /// Which Timeframe kind the form's toggle has selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeframeMode {
     Relative,
     Absolute,
+}
+
+/// Where the form's `_field_caps` lookup stands. On failure both the sort and
+/// Column pickers fall back to free-text entry.
+pub enum Fields {
+    /// No Target chosen yet, or lookup not started.
+    Idle,
+    Loading,
+    Ready(FieldCaps),
+    Failed,
+}
+
+impl Fields {
+    pub fn caps(&self) -> Option<&FieldCaps> {
+        match self {
+            Fields::Ready(caps) => Some(caps),
+            _ => None,
+        }
+    }
 }
 
 /// The editable Search form.
@@ -30,6 +50,12 @@ pub struct SearchForm {
     pub abs_to: String,
     pub timestamp_field: String,
     pub columns: Vec<String>,
+    /// Draft text for the "add column" control.
+    pub column_draft: String,
+    pub sort_field: String,
+    pub sort_desc: bool,
+    /// `_field_caps` result for the current Target.
+    pub fields: Fields,
     pub error: Option<String>,
 }
 
@@ -51,7 +77,34 @@ impl SearchForm {
             abs_to: String::new(),
             timestamp_field: config::default_timestamp_field(),
             columns: config::default_columns(),
+            column_draft: String::new(),
+            sort_field: config::default_timestamp_field(),
+            sort_desc: true,
+            fields: Fields::Idle,
             error: None,
+        }
+    }
+
+    /// Adds `field` as a Column if it isn't one already.
+    pub fn add_column(&mut self, field: &str) {
+        let field = field.trim();
+        if !field.is_empty() && !self.columns.iter().any(|c| c == field) {
+            self.columns.push(field.to_string());
+        }
+        self.column_draft.clear();
+    }
+
+    pub fn remove_column(&mut self, index: usize) {
+        if index < self.columns.len() {
+            self.columns.remove(index);
+        }
+    }
+
+    /// Moves the Column at `index` by `delta` (clamped).
+    pub fn move_column(&mut self, index: usize, delta: isize) {
+        let target = index as isize + delta;
+        if index < self.columns.len() && target >= 0 && (target as usize) < self.columns.len() {
+            self.columns.swap(index, target as usize);
         }
     }
 
@@ -65,6 +118,8 @@ impl SearchForm {
         form.query_string = saved.query_string.clone();
         form.timestamp_field = saved.timestamp_field.clone();
         form.columns = saved.columns.clone();
+        form.sort_field = saved.sort_field.clone();
+        form.sort_desc = saved.sort_desc;
         match &saved.timeframe {
             Timeframe::Relative { amount, unit } => {
                 form.mode = TimeframeMode::Relative;
@@ -116,10 +171,18 @@ impl SearchForm {
         if self.target.trim().is_empty() {
             return Err("Target is required".to_string());
         }
+        if self.columns.is_empty() {
+            return Err("Add at least one column".to_string());
+        }
         let timestamp_field = if self.timestamp_field.trim().is_empty() {
             config::default_timestamp_field()
         } else {
             self.timestamp_field.trim().to_string()
+        };
+        let sort_field = if self.sort_field.trim().is_empty() {
+            timestamp_field.clone()
+        } else {
+            self.sort_field.trim().to_string()
         };
         Ok(SavedSearch {
             id: self
@@ -132,6 +195,8 @@ impl SearchForm {
             timeframe: self.timeframe(),
             timestamp_field,
             columns: self.columns.clone(),
+            sort_field,
+            sort_desc: self.sort_desc,
         })
     }
 }

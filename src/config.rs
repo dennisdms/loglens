@@ -45,9 +45,19 @@ pub struct SavedSearch {
     /// Timestamp field the Timeframe filters on.
     #[serde(default = "default_timestamp_field")]
     pub timestamp_field: String,
-    /// Fields projected into table columns.
+    /// Fields projected into table columns, in display order.
     #[serde(default = "default_columns")]
     pub columns: Vec<String>,
+    /// Field the Hits are sorted on (`_shard_doc` is always appended after it).
+    #[serde(default = "default_timestamp_field")]
+    pub sort_field: String,
+    /// Sort direction: descending when true.
+    #[serde(default = "default_true")]
+    pub sort_desc: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// The time window a Saved Search restricts Hits to.

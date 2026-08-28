@@ -11,8 +11,8 @@ mod tab;
 use std::collections::HashSet;
 
 use iced::widget::{
-    button, checkbox, column, container, radio, row, rule, scrollable, space,
-    stack, text, text_editor, text_input,
+    button, checkbox, column, container, pick_list, radio, row, rule, scrollable,
+    space, stack, text, text_editor, text_input,
 };
 use iced::{Border, Color, Element, Fill, Font, Length, Padding, Task, Theme};
 
@@ -20,7 +20,7 @@ use config::{Auth, Config, Connection};
 use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
 use results::{Paging, ResultTab, RunState, RETENTION_CAP, ROW_H};
 use sample::{LogFile, PickerNode};
-use search::{SearchForm, TimeframeMode};
+use search::{Fields, SearchForm, TimeframeMode};
 use config::TimeUnit;
 use style::{ACCENT, BG, BORDER, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
 use tab::Tab;
@@ -117,7 +117,30 @@ enum Message {
     SearchAbsFrom(String),
     SearchAbsTo(String),
     SearchTimestampField(String),
+    SearchFieldsLoaded {
+        form_id: u64,
+        result: Result<es::FieldCaps, String>,
+    },
+    SearchColumnDraft(String),
+    SearchColumnAdd,
+    SearchColumnAddField(String),
+    SearchColumnRemove(usize),
+    SearchColumnMove(usize, isize),
+    SearchSortField(String),
+    SearchSortDir(bool),
     SearchSave,
+    // Result tab: live columns + sort
+    ResultFieldsLoaded {
+        run_id: u64,
+        result: Result<es::FieldCaps, String>,
+    },
+    ResultColumnDraft(u64, String),
+    ResultColumnAdd(u64),
+    ResultColumnAddField(u64, String),
+    ResultColumnRemove(u64, usize),
+    ResultColumnMove(u64, usize, isize),
+    ResultSortField(u64, String),
+    ResultSortDir(u64, bool),
     // Result tab run
     PitOpened { run_id: u64, result: Result<String, String> },
     PageLoaded {
@@ -352,7 +375,7 @@ impl LogLens {
 
             Message::NewSearch(conn_id) => return self.open_search_form(conn_id),
             Message::OpenSavedSearch { connection, search } => {
-                return self.open_result_tab(connection, search, None);
+                return self.open_result_tab(connection, search, None, None);
             }
             Message::SearchTargetsLoaded { form_id, result } => {
                 if let Some(f) = self.form_mut(form_id) {
@@ -380,6 +403,7 @@ impl LogLens {
                     f.target = v;
                     f.error = None;
                 }
+                return self.load_form_fields();
             }
             Message::SearchQuery(v) => {
                 if let Some(f) = self.active_form_mut() {
@@ -416,7 +440,120 @@ impl LogLens {
                     f.timestamp_field = v;
                 }
             }
+            Message::SearchFieldsLoaded { form_id, result } => {
+                if let Some(f) = self.form_mut(form_id) {
+                    f.fields = match result {
+                        Ok(caps) => Fields::Ready(caps),
+                        Err(_) => Fields::Failed,
+                    };
+                }
+            }
+            Message::SearchColumnDraft(v) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.column_draft = v;
+                }
+            }
+            Message::SearchColumnAdd => {
+                if let Some(f) = self.active_form_mut() {
+                    let draft = f.column_draft.clone();
+                    f.add_column(&draft);
+                    f.error = None;
+                }
+            }
+            Message::SearchColumnAddField(field) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.add_column(&field);
+                    f.error = None;
+                }
+            }
+            Message::SearchColumnRemove(i) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.remove_column(i);
+                }
+            }
+            Message::SearchColumnMove(i, delta) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.move_column(i, delta);
+                }
+            }
+            Message::SearchSortField(field) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.sort_field = field;
+                }
+            }
+            Message::SearchSortDir(desc) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.sort_desc = desc;
+                }
+            }
             Message::SearchSave => return self.save_search_form(),
+
+            Message::ResultFieldsLoaded { run_id, result } => {
+                if let Ok(caps) = result {
+                    if let Some(rt) = self.result_mut(run_id) {
+                        rt.all_fields = caps.all;
+                        rt.sortable_fields = caps.sortable;
+                    }
+                }
+            }
+            Message::ResultColumnDraft(run_id, v) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.column_draft = v;
+                }
+            }
+            Message::ResultColumnAdd(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    let draft = rt.column_draft.clone();
+                    rt.add_column(&draft);
+                }
+                self.sync_saved_from_result(run_id);
+            }
+            Message::ResultColumnAddField(run_id, field) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.add_column(&field);
+                }
+                self.sync_saved_from_result(run_id);
+            }
+            Message::ResultColumnRemove(run_id, i) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.remove_column(i);
+                }
+                self.sync_saved_from_result(run_id);
+            }
+            Message::ResultColumnMove(run_id, i, delta) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.move_column(i, delta);
+                }
+                self.sync_saved_from_result(run_id);
+            }
+            Message::ResultSortField(run_id, field) => {
+                let changed = self
+                    .result_mut(run_id)
+                    .map(|rt| {
+                        let changed = rt.sort_field != field;
+                        rt.sort_field = field;
+                        changed
+                    })
+                    .unwrap_or(false);
+                if changed {
+                    self.sync_saved_from_result(run_id);
+                    return self.start_run(run_id);
+                }
+            }
+            Message::ResultSortDir(run_id, desc) => {
+                let changed = self
+                    .result_mut(run_id)
+                    .map(|rt| {
+                        let changed = rt.sort_desc != desc;
+                        rt.sort_desc = desc;
+                        changed
+                    })
+                    .unwrap_or(false);
+                if changed {
+                    self.sync_saved_from_result(run_id);
+                    return self.start_run(run_id);
+                }
+            }
 
             Message::PitOpened { run_id, result } => {
                 return self.on_pit_opened(run_id, result);
@@ -587,7 +724,7 @@ impl LogLens {
         self.active_tab = Some(self.open_tabs.len() - 1);
         self.expanded.insert(conn_id.clone());
 
-        match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
+        let targets = match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
             Some(endpoint) => Task::perform(
                 es::list_targets(endpoint),
                 move |result| Message::SearchTargetsLoaded { form_id, result },
@@ -598,6 +735,61 @@ impl LogLens {
                 }
                 Task::none()
             }
+        };
+        // `from_saved` forms open with a Target already set — load its fields.
+        Task::batch([targets, self.load_form_fields()])
+    }
+
+    /// Fetches `_field_caps` for the active Search form's Target, if it has one.
+    fn load_form_fields(&mut self) -> Task<Message> {
+        let Some((form_id, conn_id, target)) = self.active_form_mut().map(|f| {
+            (f.form_id, f.connection_id.clone(), f.target.trim().to_string())
+        }) else {
+            return Task::none();
+        };
+        if target.is_empty() {
+            return Task::none();
+        }
+        if let Some(f) = self.form_mut(form_id) {
+            f.fields = Fields::Loading;
+        }
+        let Some(endpoint) = self.connection(&conn_id).and_then(|c| self.endpoint_for(c))
+        else {
+            if let Some(f) = self.form_mut(form_id) {
+                f.fields = Fields::Failed;
+            }
+            return Task::none();
+        };
+        Task::perform(es::field_caps(endpoint, target), move |result| {
+            Message::SearchFieldsLoaded { form_id, result }
+        })
+    }
+
+    /// Writes a Result Tab's live Column / sort choices back onto its Saved
+    /// Search and persists the config.
+    fn sync_saved_from_result(&mut self, run_id: u64) {
+        let Some((conn_id, saved_id, columns, sort_field, sort_desc)) =
+            self.result_mut(run_id).map(|rt| {
+                (
+                    rt.connection_id.clone(),
+                    rt.saved_id.clone(),
+                    rt.columns.clone(),
+                    rt.sort_field.clone(),
+                    rt.sort_desc,
+                )
+            })
+        else {
+            return;
+        };
+        if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id) {
+            if let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id) {
+                saved.columns = columns;
+                saved.sort_field = sort_field;
+                saved.sort_desc = sort_desc;
+            }
+        }
+        if let Err(err) = config::save(&self.config) {
+            self.status = Some(format!("Could not save config: {err}"));
         }
     }
 
@@ -638,7 +830,12 @@ impl LogLens {
         }
         self.expanded.insert(conn_id.clone());
 
-        self.open_result_tab(conn_id, saved.id, Some(idx))
+        // Carry the form's already-fetched fields into the Result Tab.
+        let caps = match self.open_tabs.get(idx) {
+            Some(Tab::SearchForm(f)) => f.fields.caps().cloned(),
+            _ => None,
+        };
+        self.open_result_tab(conn_id, saved.id, Some(idx), caps)
     }
 
     // --- Result tab / run -------------------------------------------
@@ -650,6 +847,7 @@ impl LogLens {
         conn_id: String,
         saved_id: String,
         replace: Option<usize>,
+        caps: Option<es::FieldCaps>,
     ) -> Task<Message> {
         if let Some(existing) = self.open_tabs.iter().position(|t| {
             matches!(t, Tab::Result(rt) if rt.saved_id == saved_id)
@@ -676,17 +874,23 @@ impl LogLens {
 
         let run_id = self.next_id();
         let (gte, lte) = saved.timeframe.bounds();
+        let (all_fields, sortable_fields) = caps
+            .map(|c| (c.all, c.sortable))
+            .unwrap_or_default();
         let tab = ResultTab {
             run_id,
-            connection_id: conn_id,
+            connection_id: conn_id.clone(),
             saved_id,
             saved_name: saved.name.clone(),
             target: saved.target.clone(),
             query_string: saved.query_string.clone(),
             timestamp_field: saved.timestamp_field.clone(),
             columns: saved.columns.clone(),
-            sort_field: config::default_timestamp_field(),
-            sort_desc: true,
+            column_draft: String::new(),
+            sort_field: saved.sort_field.clone(),
+            sort_desc: saved.sort_desc,
+            all_fields,
+            sortable_fields,
             gte,
             lte,
             pit_id: None,
@@ -697,6 +901,8 @@ impl LogLens {
             viewport_h: 600.0,
             utc: self.config.utc_timestamps,
         };
+        let need_fields = tab.all_fields.is_empty();
+        let target = tab.target.clone();
 
         match replace {
             Some(i) if i < self.open_tabs.len() => {
@@ -709,18 +915,31 @@ impl LogLens {
             }
         }
 
-        self.start_run(run_id)
+        let fetch_fields: Task<Message> = if need_fields {
+            match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
+                Some(endpoint) => Task::perform(
+                    es::field_caps(endpoint, target),
+                    move |result| Message::ResultFieldsLoaded { run_id, result },
+                ),
+                None => Task::none(),
+            }
+        } else {
+            Task::none()
+        };
+
+        Task::batch([fetch_fields, self.start_run(run_id)])
     }
 
-    /// Freshens the range, opens a PIT, and (on success) fetches the first Page.
+    /// Freshens the range, discards any prior PIT, opens a new one, and (on
+    /// success) fetches the first Page.
     fn start_run(&mut self, run_id: u64) -> Task<Message> {
-        let Some((conn_id, target)) = self.result_mut(run_id).map(|rt| {
+        let Some((conn_id, target, old_pit)) = self.result_mut(run_id).map(|rt| {
             rt.state = RunState::Loading;
             rt.hits.clear();
-            rt.pit_id = None;
             rt.paging = Paging::Idle;
             rt.scroll_y = 0.0;
-            (rt.connection_id.clone(), rt.target.clone())
+            let old_pit = rt.pit_id.take();
+            (rt.connection_id.clone(), rt.target.clone(), old_pit)
         }) else {
             return Task::none();
         };
@@ -728,11 +947,21 @@ impl LogLens {
         let Some(conn) = self.connection(&conn_id) else {
             return Task::none();
         };
-        match self.endpoint_for(conn) {
-            Some(endpoint) => Task::perform(
-                es::open_pit(endpoint, target),
-                move |result| Message::PitOpened { run_id, result },
+        let close_old: Task<Message> = match (&old_pit, self.endpoint_for(conn)) {
+            (Some(pit), Some(endpoint)) => Task::perform(
+                es::close_pit(endpoint, pit.clone()),
+                |_| Message::Ignore,
             ),
+            _ => Task::none(),
+        };
+
+        match self.endpoint_for(conn) {
+            Some(endpoint) => Task::batch([
+                close_old,
+                Task::perform(es::open_pit(endpoint, target), move |result| {
+                    Message::PitOpened { run_id, result }
+                }),
+            ]),
             None => {
                 let name = conn.name.clone();
                 self.secret_prompt = Some(SecretPrompt {
@@ -1309,10 +1538,70 @@ impl LogLens {
                 .on_input(Message::SearchTimestampField)
                 .padding(6.0),
         );
+        // --- Sort ---
+        col = col.push(field_label("Sort field"));
+        let sortable = form.fields.caps().map(|c| c.sortable.as_slice());
+        let sort_ctl: Element<'_, Message> = match sortable {
+            Some(options) if !options.is_empty() => pick_list(
+                options,
+                Some(form.sort_field.clone()),
+                Message::SearchSortField,
+            )
+            .text_size(12.0)
+            .padding(4.0)
+            .width(Fill)
+            .into(),
+            _ => text_input("@timestamp", &form.sort_field)
+                .on_input(Message::SearchSortField)
+                .padding(6.0)
+                .into(),
+        };
+        col = col.push(sort_ctl);
         col = col.push(
-            text("Sort: @timestamp descending")
-                .size(11.0)
-                .color(TEXT_DIM),
+            row![
+                radio("Descending", true, Some(form.sort_desc), Message::SearchSortDir)
+                    .size(14.0),
+                radio("Ascending", false, Some(form.sort_desc), Message::SearchSortDir)
+                    .size(14.0),
+            ]
+            .spacing(16.0),
+        );
+
+        // --- Columns ---
+        col = col.push(field_label("Columns"));
+        for (i, name) in form.columns.iter().enumerate() {
+            col = col.push(column_row(
+                name,
+                i,
+                form.columns.len(),
+                Message::SearchColumnMove,
+                Message::SearchColumnRemove,
+            ));
+        }
+        let all_fields = form.fields.caps().map(|c| c.all.as_slice());
+        if let Some(options) = all_fields {
+            if !options.is_empty() {
+                col = col.push(
+                    pick_list(options, None::<String>, Message::SearchColumnAddField)
+                        .placeholder("Add a field\u{2026}")
+                        .text_size(12.0)
+                        .padding(4.0)
+                        .width(Fill),
+                );
+            }
+        }
+        col = col.push(
+            row![
+                text_input("field.name", &form.column_draft)
+                    .on_input(Message::SearchColumnDraft)
+                    .on_submit(Message::SearchColumnAdd)
+                    .padding(6.0),
+                button(text("Add").size(13.0).color(TEXT))
+                    .on_press(Message::SearchColumnAdd)
+                    .padding(Padding::new(6.0).left(14.0).right(14.0))
+                    .style(style::picker_row(true)),
+            ]
+            .spacing(8.0),
         );
 
         if let Some(err) = &form.error {
@@ -1384,10 +1673,121 @@ impl LogLens {
             RunState::Loaded => self.hit_table(tab),
         };
 
-        column![bar, rule::horizontal(1.0), body]
+        let mut layout = column![bar, rule::horizontal(1.0)]
             .width(Fill)
-            .height(Fill)
+            .height(Fill);
+        if matches!(tab.state, RunState::Loaded | RunState::Empty) {
+            layout = layout.push(self.result_columns_bar(tab));
+            layout = layout.push(rule::horizontal(1.0));
+        }
+        layout.push(body).into()
+    }
+
+    /// The live Column + sort editor strip above a Result Tab's table.
+    fn result_columns_bar<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
+        let run_id = tab.run_id;
+
+        let mut chips = row![text("Columns").size(11.0).color(TEXT_DIM)]
+            .spacing(6.0)
+            .align_y(iced::Alignment::Center);
+        for (i, name) in tab.columns.iter().enumerate() {
+            let mut left = button(text("\u{2039}").size(10.0).color(TEXT_DIM))
+                .padding(1.0)
+                .style(style::bare_button());
+            if i > 0 {
+                left = left.on_press(Message::ResultColumnMove(run_id, i, -1));
+            }
+            let mut right = button(text("\u{203a}").size(10.0).color(TEXT_DIM))
+                .padding(1.0)
+                .style(style::bare_button());
+            if i + 1 < tab.columns.len() {
+                right = right.on_press(Message::ResultColumnMove(run_id, i, 1));
+            }
+            chips = chips.push(
+                container(
+                    row![
+                        text(name.clone()).size(11.0).color(TEXT),
+                        left,
+                        right,
+                        button(text("\u{00d7}").size(10.0).color(TEXT_DIM))
+                            .on_press(Message::ResultColumnRemove(run_id, i))
+                            .padding(1.0)
+                            .style(style::bare_button()),
+                    ]
+                    .spacing(3.0)
+                    .align_y(iced::Alignment::Center),
+                )
+                .style(|_| style::panel(PANEL_ALT))
+                .padding(Padding::new(2.0).left(6.0).right(4.0)),
+            );
+        }
+
+        let add: Element<'_, Message> = if !tab.all_fields.is_empty() {
+            pick_list(tab.all_fields.as_slice(), None::<String>, move |f| {
+                Message::ResultColumnAddField(run_id, f)
+            })
+            .placeholder("+ field")
+            .text_size(11.0)
+            .padding(3.0)
             .into()
+        } else {
+            row![
+                text_input("+ field", &tab.column_draft)
+                    .on_input(move |v| Message::ResultColumnDraft(run_id, v))
+                    .on_submit(Message::ResultColumnAdd(run_id))
+                    .size(11.0)
+                    .padding(3.0)
+                    .width(120.0),
+                button(text("Add").size(11.0).color(TEXT))
+                    .on_press(Message::ResultColumnAdd(run_id))
+                    .padding(Padding::new(2.0).left(8.0).right(8.0))
+                    .style(style::picker_row(true)),
+            ]
+            .spacing(4.0)
+            .into()
+        };
+        chips = chips.push(add);
+
+        let sort_ctl: Element<'_, Message> = if !tab.sortable_fields.is_empty() {
+            pick_list(
+                tab.sortable_fields.as_slice(),
+                Some(tab.sort_field.clone()),
+                move |f| Message::ResultSortField(run_id, f),
+            )
+            .text_size(11.0)
+            .padding(3.0)
+            .into()
+        } else {
+            text_input("@timestamp", &tab.sort_field)
+                .on_input(move |v| Message::ResultSortField(run_id, v))
+                .size(11.0)
+                .padding(3.0)
+                .width(150.0)
+                .into()
+        };
+        let dir = button(
+            text(if tab.sort_desc { "desc \u{25be}" } else { "asc \u{25b4}" })
+                .size(11.0)
+                .color(TEXT),
+        )
+        .on_press(Message::ResultSortDir(run_id, !tab.sort_desc))
+        .padding(Padding::new(2.0).left(8.0).right(8.0))
+        .style(style::bare_button());
+
+        container(
+            row![
+                scrollable(chips).horizontal().width(Fill),
+                text("Sort").size(11.0).color(TEXT_DIM),
+                sort_ctl,
+                dir,
+            ]
+            .spacing(8.0)
+            .align_y(iced::Alignment::Center),
+        )
+        .style(|_| style::panel(PANEL))
+        .width(Fill)
+        .padding(Padding::new(4.0).left(12.0).right(12.0))
+        .into()
     }
 
     fn hit_table<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
@@ -1676,6 +2076,41 @@ fn centered<'a>(label: &'a str, color: Color) -> Element<'a, Message> {
         .width(Fill)
         .height(Fill)
         .into()
+}
+
+/// One editable Column row: name, reorder arrows, remove — used by the Search
+/// form. `on_move(index, delta)` and `on_remove(index)` build the messages.
+fn column_row<'a>(
+    name: &'a str,
+    index: usize,
+    total: usize,
+    on_move: impl Fn(usize, isize) -> Message,
+    on_remove: impl Fn(usize) -> Message,
+) -> Element<'a, Message> {
+    let mut up = button(text("\u{2191}").size(11.0).color(TEXT_DIM))
+        .padding(3.0)
+        .style(style::bare_button());
+    if index > 0 {
+        up = up.on_press(on_move(index, -1));
+    }
+    let mut down = button(text("\u{2193}").size(11.0).color(TEXT_DIM))
+        .padding(3.0)
+        .style(style::bare_button());
+    if index + 1 < total {
+        down = down.on_press(on_move(index, 1));
+    }
+    row![
+        text(name.to_string()).size(12.0).width(Fill),
+        up,
+        down,
+        button(text("\u{00d7}").size(12.0).color(TEXT_DIM))
+            .on_press(on_remove(index))
+            .padding(3.0)
+            .style(style::bare_button()),
+    ]
+    .spacing(4.0)
+    .align_y(iced::Alignment::Center)
+    .into()
 }
 
 fn col_width(col: &str, timestamp_field: &str) -> Length {

@@ -54,8 +54,14 @@ pub struct ResultTab {
     pub query_string: String,
     pub timestamp_field: String,
     pub columns: Vec<String>,
+    /// Draft text for the live "add column" control.
+    pub column_draft: String,
     pub sort_field: String,
     pub sort_desc: bool,
+    /// `_field_caps` for this tab's Target, fetched lazily; empty until it lands
+    /// (or if it failed — the pickers then fall back to free text).
+    pub all_fields: Vec<String>,
+    pub sortable_fields: Vec<String>,
     /// Range bounds frozen at the start of this run.
     pub gte: String,
     pub lte: String,
@@ -101,6 +107,27 @@ impl ResultTab {
             .last()
             .map(|h| h.sort.clone())
             .filter(|s| !s.is_empty())
+    }
+
+    pub fn add_column(&mut self, field: &str) {
+        let field = field.trim();
+        if !field.is_empty() && !self.columns.iter().any(|c| c == field) {
+            self.columns.push(field.to_string());
+        }
+        self.column_draft.clear();
+    }
+
+    pub fn remove_column(&mut self, index: usize) {
+        if index < self.columns.len() {
+            self.columns.remove(index);
+        }
+    }
+
+    pub fn move_column(&mut self, index: usize, delta: isize) {
+        let target = index as isize + delta;
+        if index < self.columns.len() && target >= 0 && (target as usize) < self.columns.len() {
+            self.columns.swap(index, target as usize);
+        }
     }
 }
 

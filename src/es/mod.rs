@@ -136,6 +136,88 @@ pub async fn list_targets(endpoint: Endpoint) -> Result<Vec<String>, String> {
     Ok(names.into_iter().collect())
 }
 
+// --- Field capabilities -------------------------------------------------
+
+/// What `_field_caps` tells us about a Target's fields.
+#[derive(Debug, Clone, Default)]
+pub struct FieldCaps {
+    /// Every field name, sorted. Any of these may be a Column.
+    pub all: Vec<String>,
+    /// The subset that can be sorted on (keyword / numeric / date / boolean /
+    /// ip — never analysed text).
+    pub sortable: Vec<String>,
+}
+
+/// Elasticsearch field types Log Lens will sort on.
+fn is_sortable_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "keyword"
+            | "constant_keyword"
+            | "wildcard"
+            | "boolean"
+            | "date"
+            | "date_nanos"
+            | "ip"
+            | "version"
+            | "long"
+            | "integer"
+            | "short"
+            | "byte"
+            | "double"
+            | "float"
+            | "half_float"
+            | "scaled_float"
+            | "unsigned_long"
+    )
+}
+
+/// `GET {target}/_field_caps?fields=*` — the fields a Search form offers.
+pub async fn field_caps(endpoint: Endpoint, target: String) -> Result<FieldCaps, String> {
+    let client = client(&endpoint)?;
+    let url = format!(
+        "{}/{}/_field_caps?fields=*",
+        base(&endpoint.url),
+        target.trim_matches('/')
+    );
+    let response = with_auth(client.get(&url), &endpoint.auth)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(extract_error(&text, status.as_u16()));
+    }
+
+    #[derive(Deserialize)]
+    struct Response {
+        fields: serde_json::Map<String, Value>,
+    }
+
+    let parsed: Response =
+        serde_json::from_str(&text).map_err(|e| format!("unexpected _field_caps response: {e}"))?;
+
+    let mut all = Vec::new();
+    let mut sortable = Vec::new();
+    for (name, types) in parsed.fields {
+        if name.starts_with('_') {
+            continue;
+        }
+        all.push(name.clone());
+        let type_names: Vec<&str> = types
+            .as_object()
+            .map(|m| m.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        if !type_names.is_empty() && type_names.iter().all(|t| is_sortable_type(t)) {
+            sortable.push(name);
+        }
+    }
+    all.sort();
+    sortable.sort();
+    Ok(FieldCaps { all, sortable })
+}
+
 // --- Paged search -------------------------------------------------------
 
 /// One Hit: its `_source` and the `sort` values that page past it.
