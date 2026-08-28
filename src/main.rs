@@ -54,6 +54,9 @@ struct LogLens {
     expanded: HashSet<String>,
     /// The Connection form, when adding or editing one.
     connection_form: Option<ConnectionForm>,
+    /// The Search settings modal, when editing an existing Saved Search's
+    /// name / Target / timestamp field.
+    search_settings: Option<SearchForm>,
     /// A prompt for a secret the keyring can't give us this session.
     secret_prompt: Option<SecretPrompt>,
     /// Transient status line (config save failures, keyring notices).
@@ -130,32 +133,24 @@ enum Message {
     SecretPromptValue(String),
     SecretPromptSubmit,
     SecretPromptCancel,
-    // Search form
+    // Search settings (create form tab + edit modal)
     NewSearch(String),
     OpenSavedSearch { connection: String, search: String },
     SearchTargetsLoaded { form_id: u64, result: Result<Vec<String>, String> },
     SearchName(String),
     SearchTargetInput(String),
     SearchTargetPicked(String),
-    SearchQuery(String),
-    SearchTimeframeMode(TimeframeMode),
-    SearchRelAmount(String),
-    SearchRelUnit(TimeUnit),
-    SearchAbsFrom(String),
-    SearchAbsTo(String),
     SearchTimestampField(String),
     SearchFieldsLoaded {
         form_id: u64,
         result: Result<es::FieldCaps, String>,
     },
-    SearchColumnDraft(String),
-    SearchColumnAdd,
-    SearchColumnAddField(String),
-    SearchColumnRemove(usize),
-    SearchColumnMove(usize, isize),
-    SearchSortField(String),
-    SearchSortDir(bool),
+    /// Save & Run the new-Saved-Search form tab.
     SearchSave,
+    /// Save the Search settings modal (re-runs an open Result Tab for it).
+    SearchSettingsSave,
+    /// Dismiss the Search settings modal without saving.
+    SearchSettingsCancel,
     // Result tab: live query string, timeframe, columns + sort
     ResultQueryDraft(u64, String),
     ResultQuerySubmit(u64),
@@ -234,6 +229,7 @@ impl LogLens {
             active_tab: None,
             expanded,
             connection_form: None,
+            search_settings: None,
             secret_prompt: None,
             status: None,
             id_seq: 0,
@@ -314,6 +310,9 @@ impl LogLens {
     }
 
     fn form_mut(&mut self, form_id: u64) -> Option<&mut SearchForm> {
+        if self.search_settings.as_ref().is_some_and(|f| f.form_id == form_id) {
+            return self.search_settings.as_mut();
+        }
         self.open_tabs.iter_mut().find_map(|t| match t {
             Tab::SearchForm(f) if f.form_id == form_id => Some(f.as_mut()),
             _ => None,
@@ -325,6 +324,15 @@ impl LogLens {
             Some(Tab::SearchForm(f)) => Some(f.as_mut()),
             _ => None,
         }
+    }
+
+    /// The Search form currently taking field edits: the Search settings modal
+    /// while it is open, otherwise the active new-Saved-Search form tab.
+    fn editing_search_form_mut(&mut self) -> Option<&mut SearchForm> {
+        if self.search_settings.is_some() {
+            return self.search_settings.as_mut();
+        }
+        self.active_form_mut()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -443,56 +451,26 @@ impl LogLens {
                 }
             }
             Message::SearchName(v) => {
-                if let Some(f) = self.active_form_mut() {
+                if let Some(f) = self.editing_search_form_mut() {
                     f.name = v;
                     f.error = None;
                 }
             }
             Message::SearchTargetInput(v) => {
-                if let Some(f) = self.active_form_mut() {
+                if let Some(f) = self.editing_search_form_mut() {
                     f.target = v;
                     f.error = None;
                 }
             }
             Message::SearchTargetPicked(v) => {
-                if let Some(f) = self.active_form_mut() {
+                if let Some(f) = self.editing_search_form_mut() {
                     f.target = v;
                     f.error = None;
                 }
                 return self.load_form_fields();
             }
-            Message::SearchQuery(v) => {
-                if let Some(f) = self.active_form_mut() {
-                    f.query_string = v;
-                }
-            }
-            Message::SearchTimeframeMode(mode) => {
-                if let Some(f) = self.active_form_mut() {
-                    f.mode = mode;
-                }
-            }
-            Message::SearchRelAmount(v) => {
-                if let Some(f) = self.active_form_mut() {
-                    f.rel_amount = v;
-                }
-            }
-            Message::SearchRelUnit(u) => {
-                if let Some(f) = self.active_form_mut() {
-                    f.rel_unit = u;
-                }
-            }
-            Message::SearchAbsFrom(v) => {
-                if let Some(f) = self.active_form_mut() {
-                    f.abs_from = v;
-                }
-            }
-            Message::SearchAbsTo(v) => {
-                if let Some(f) = self.active_form_mut() {
-                    f.abs_to = v;
-                }
-            }
             Message::SearchTimestampField(v) => {
-                if let Some(f) = self.active_form_mut() {
+                if let Some(f) = self.editing_search_form_mut() {
                     f.timestamp_field = v;
                 }
             }
@@ -504,45 +482,9 @@ impl LogLens {
                     };
                 }
             }
-            Message::SearchColumnDraft(v) => {
-                if let Some(f) = self.active_form_mut() {
-                    f.column_draft = v;
-                }
-            }
-            Message::SearchColumnAdd => {
-                if let Some(f) = self.active_form_mut() {
-                    let draft = f.column_draft.clone();
-                    f.add_column(&draft);
-                    f.error = None;
-                }
-            }
-            Message::SearchColumnAddField(field) => {
-                if let Some(f) = self.active_form_mut() {
-                    f.add_column(&field);
-                    f.error = None;
-                }
-            }
-            Message::SearchColumnRemove(i) => {
-                if let Some(f) = self.active_form_mut() {
-                    f.remove_column(i);
-                }
-            }
-            Message::SearchColumnMove(i, delta) => {
-                if let Some(f) = self.active_form_mut() {
-                    f.move_column(i, delta);
-                }
-            }
-            Message::SearchSortField(field) => {
-                if let Some(f) = self.active_form_mut() {
-                    f.sort_field = field;
-                }
-            }
-            Message::SearchSortDir(desc) => {
-                if let Some(f) = self.active_form_mut() {
-                    f.sort_desc = desc;
-                }
-            }
             Message::SearchSave => return self.save_search_form(),
+            Message::SearchSettingsSave => return self.save_search_settings(),
+            Message::SearchSettingsCancel => self.search_settings = None,
 
             Message::ResultQueryDraft(run_id, v) => {
                 if let Some(rt) = self.result_mut(run_id) {
@@ -805,7 +747,7 @@ impl LogLens {
             }
             Message::EditSearch { connection, search } => {
                 self.tree_menu = None;
-                return self.open_search_form_for_edit(connection, search);
+                return self.open_search_settings(connection, search);
             }
             Message::DeleteSearch { connection, search } => {
                 self.tree_menu = None;
@@ -970,12 +912,13 @@ impl LogLens {
                 Task::none()
             }
         };
-        // `from_saved` forms open with a Target already set — load its fields.
+        // A fresh form has no Target yet, so `load_form_fields` is a no-op
+        // here; it fires once the user picks one.
         Task::batch([targets, self.load_form_fields()])
     }
 
-    /// Opens a Search form tab pre-filled from an existing Saved Search.
-    fn open_search_form_for_edit(
+    /// Opens the Search settings modal pre-filled from an existing Saved Search.
+    fn open_search_settings(
         &mut self,
         conn_id: String,
         search_id: String,
@@ -988,19 +931,9 @@ impl LogLens {
             return Task::none();
         };
 
-        // Focus an already-open editor for this search rather than a duplicate.
-        if let Some(pos) = self.open_tabs.iter().position(|t| {
-            matches!(t, Tab::SearchForm(f) if f.saved_id.as_deref() == Some(search_id.as_str()))
-        }) {
-            self.active_tab = Some(pos);
-            return Task::none();
-        }
-
         let form_id = self.next_id();
-        let form = SearchForm::from_saved(form_id, conn_id.clone(), &saved);
-        self.open_tabs.push(Tab::SearchForm(Box::new(form)));
-        self.active_tab = Some(self.open_tabs.len() - 1);
-        self.expanded.insert(conn_id.clone());
+        self.search_settings =
+            Some(SearchForm::from_saved(form_id, conn_id.clone(), &saved));
 
         let targets = match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
             Some(endpoint) => Task::perform(
@@ -1023,7 +956,13 @@ impl LogLens {
         search_id: String,
     ) -> Task<Message> {
         let mut tasks: Vec<Task<Message>> = Vec::new();
-        // Close an open Result Tab or editor for this search.
+        // Close the Search settings modal if it targets this search.
+        if self.search_settings.as_ref().and_then(|f| f.saved_id.as_deref())
+            == Some(search_id.as_str())
+        {
+            self.search_settings = None;
+        }
+        // Close an open Result Tab or form for this search.
         while let Some(pos) = self.open_tabs.iter().position(|t| match t {
             Tab::Result(rt) => rt.saved_id == search_id,
             Tab::SearchForm(f) => f.saved_id.as_deref() == Some(search_id.as_str()),
@@ -1041,6 +980,11 @@ impl LogLens {
     }
 
     fn delete_connection(&mut self, conn_id: String) -> Task<Message> {
+        if self.search_settings.as_ref().map(|f| f.connection_id.as_str())
+            == Some(conn_id.as_str())
+        {
+            self.search_settings = None;
+        }
         let close = self.close_connection_tabs(&conn_id);
 
         self.config.connections.retain(|c| c.id != conn_id);
@@ -1065,9 +1009,9 @@ impl LogLens {
         Task::batch(tasks)
     }
 
-    /// Fetches `_field_caps` for the active Search form's Target, if it has one.
+    /// Fetches `_field_caps` for the Search form's Target, if it has one.
     fn load_form_fields(&mut self) -> Task<Message> {
-        let Some((form_id, conn_id, target)) = self.active_form_mut().map(|f| {
+        let Some((form_id, conn_id, target)) = self.editing_search_form_mut().map(|f| {
             (f.form_id, f.connection_id.clone(), f.target.trim().to_string())
         }) else {
             return Task::none();
@@ -1174,6 +1118,53 @@ impl LogLens {
         self.open_result_tab(conn_id, saved.id, Some(idx), caps, editing)
     }
 
+    /// Persists the Search settings modal's three fields onto the Saved Search
+    /// and, if a Result Tab for it is open, re-runs that tab.
+    fn save_search_settings(&mut self) -> Task<Message> {
+        let Some(form) = &self.search_settings else {
+            return Task::none();
+        };
+        if let Err(err) = form.validate() {
+            if let Some(f) = &mut self.search_settings {
+                f.error = Some(err);
+            }
+            return Task::none();
+        }
+
+        let form = self.search_settings.take().unwrap();
+        let Some(saved_id) = form.saved_id.clone() else {
+            return Task::none();
+        };
+        let conn_id = form.connection_id.clone();
+        let name = form.name.trim().to_string();
+        let target = form.target.trim().to_string();
+        let timestamp_field = form.resolved_timestamp_field();
+
+        if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id)
+        {
+            if let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id) {
+                saved.name = name;
+                saved.target = target;
+                saved.timestamp_field = timestamp_field;
+            }
+        }
+        if let Err(err) = config::save(&self.config) {
+            self.status = Some(format!("Could not save config: {err}"));
+        }
+
+        // Re-run an open Result Tab for this Saved Search; do nothing if none
+        // is open (editing settings never opens a tab).
+        let has_tab = self.open_tabs.iter().any(|t| {
+            matches!(t, Tab::Result(rt) if rt.saved_id == saved_id)
+        });
+        if has_tab {
+            let caps = form.fields.caps().cloned();
+            self.open_result_tab(conn_id, saved_id, None, caps, true)
+        } else {
+            Task::none()
+        }
+    }
+
     // --- Result tab / run -------------------------------------------
 
     /// Opens (or focuses) the Result Tab for a Saved Search and starts its run.
@@ -1209,26 +1200,59 @@ impl LogLens {
                         .cloned(),
                 ) {
                     let (gte, lte) = saved.timeframe.bounds();
-                    if let Some(Tab::Result(rt)) = self.open_tabs.get_mut(idx) {
-                        rt.saved_name = saved.name.clone();
-                        rt.target = saved.target.clone();
-                        rt.query_string = saved.query_string.clone();
-                        rt.query_draft = saved.query_string.clone();
-                        rt.timestamp_field = saved.timestamp_field.clone();
-                        rt.columns = saved.columns.clone();
-                        rt.sort_field = saved.sort_field.clone();
-                        rt.sort_desc = saved.sort_desc;
-                        rt.timeframe = saved.timeframe.clone();
-                        rt.tf = TimeframeDraft::from_timeframe(&saved.timeframe);
-                        rt.gte = gte;
-                        rt.lte = lte;
-                        if let Some(caps) = caps {
-                            rt.all_fields = caps.all;
-                            rt.sortable_fields = caps.sortable;
+                    let target = saved.target.clone();
+                    let run_id = match self.open_tabs.get_mut(idx) {
+                        Some(Tab::Result(rt)) => {
+                            let target_changed = rt.target != saved.target;
+                            rt.saved_name = saved.name.clone();
+                            rt.target = saved.target.clone();
+                            rt.query_string = saved.query_string.clone();
+                            rt.query_draft = saved.query_string.clone();
+                            rt.timestamp_field = saved.timestamp_field.clone();
+                            rt.columns = saved.columns.clone();
+                            rt.sort_field = saved.sort_field.clone();
+                            rt.sort_desc = saved.sort_desc;
+                            rt.timeframe = saved.timeframe.clone();
+                            rt.tf = TimeframeDraft::from_timeframe(&saved.timeframe);
+                            rt.gte = gte;
+                            rt.lte = lte;
+                            match caps {
+                                Some(caps) => {
+                                    rt.all_fields = caps.all;
+                                    rt.sortable_fields = caps.sortable;
+                                }
+                                None if target_changed => {
+                                    rt.all_fields.clear();
+                                    rt.sortable_fields.clear();
+                                }
+                                None => {}
+                            }
+                            rt.run_id
                         }
-                        let run_id = rt.run_id;
-                        return self.start_run(run_id);
-                    }
+                        _ => return Task::none(),
+                    };
+                    // Refetch field caps if the new Target left us without any.
+                    let refetch: Task<Message> = if self
+                        .result_mut(run_id)
+                        .is_some_and(|rt| rt.all_fields.is_empty())
+                    {
+                        match self
+                            .connection(&conn_id)
+                            .and_then(|c| self.endpoint_for(c))
+                        {
+                            Some(endpoint) => Task::perform(
+                                es::field_caps(endpoint, target),
+                                move |result| Message::ResultFieldsLoaded {
+                                    run_id,
+                                    result,
+                                },
+                            ),
+                            None => Task::none(),
+                        }
+                    } else {
+                        Task::none()
+                    };
+                    return Task::batch([refetch, self.start_run(run_id)]);
                 }
             }
             return Task::none();
@@ -1490,6 +1514,9 @@ impl LogLens {
         }
         if let Some(form) = &self.connection_form {
             layers.push(self.connection_form_modal(form));
+        }
+        if let Some(form) = &self.search_settings {
+            layers.push(self.search_settings_modal(form));
         }
         if let Some(prompt) = &self.secret_prompt {
             layers.push(self.secret_prompt_modal(prompt));
@@ -1918,39 +1945,31 @@ impl LogLens {
         .into()
     }
 
-    // --- Search form view ----------------------------------------------
+    // --- Search settings (create form + edit modal) ------------------
 
-    fn search_form_view<'a>(&'a self, form: &'a SearchForm) -> Element<'a, Message> {
-        let cancel_idx = self.active_tab.unwrap_or(0);
-        let conn_name = self
-            .connection(&form.connection_id)
-            .map(|c| c.name.clone())
-            .unwrap_or_default();
-
-        let mut col = column![
-            text(if form.saved_id.is_some() {
-                "Edit Search"
-            } else {
-                "New Search"
-            })
-            .size(16.0)
-            .color(TEXT),
-            text(format!("on {conn_name}")).size(12.0).color(TEXT_DIM),
-            space().height(6.0),
+    /// The three structural fields shared by the new-Saved-Search form and the
+    /// Search settings modal: name, Target (with typeahead), timestamp field.
+    fn search_settings_fields<'a>(
+        &'a self,
+        form: &'a SearchForm,
+    ) -> Vec<Element<'a, Message>> {
+        let mut fields: Vec<Element<'a, Message>> = vec![
             field_label("Name"),
             text_input("checkout-errors", &form.name)
                 .on_input(Message::SearchName)
-                .padding(6.0),
+                .padding(6.0)
+                .into(),
             field_label("Target — index, data stream, or pattern"),
             text_input("logs-*", &form.target)
                 .on_input(Message::SearchTargetInput)
-                .padding(6.0),
-        ]
-        .spacing(6.0)
-        .max_width(560.0);
+                .padding(6.0)
+                .into(),
+        ];
 
         if form.targets_loading {
-            col = col.push(text("Loading indices\u{2026}").size(11.0).color(TEXT_DIM));
+            fields.push(
+                text("Loading indices\u{2026}").size(11.0).color(TEXT_DIM).into(),
+            );
         } else {
             let matches = form.target_matches();
             if !matches.is_empty() {
@@ -1964,157 +1983,49 @@ impl LogLens {
                             .style(style::picker_row(false)),
                     );
                 }
-                col = col.push(
-                    container(opts)
-                        .max_width(560.0)
-                        .style(|_| style::panel(PANEL)),
+                fields.push(
+                    container(opts).style(|_| style::panel(PANEL)).into(),
                 );
             }
         }
 
-        col = col.push(field_label("Query string (Lucene) — empty matches all"));
-        col = col.push(
-            text_input("level:ERROR AND service:checkout", &form.query_string)
-                .on_input(Message::SearchQuery)
-                .padding(6.0),
-        );
-
-        col = col.push(field_label("Timeframe"));
-        col = col.push(
-            row![
-                radio(
-                    "Relative",
-                    TimeframeMode::Relative,
-                    Some(form.mode),
-                    Message::SearchTimeframeMode,
-                )
-                .size(14.0),
-                radio(
-                    "Absolute",
-                    TimeframeMode::Absolute,
-                    Some(form.mode),
-                    Message::SearchTimeframeMode,
-                )
-                .size(14.0),
-            ]
-            .spacing(16.0),
-        );
-
-        match form.mode {
-            TimeframeMode::Relative => {
-                let units = row(TimeUnit::ALL.iter().map(|&u| {
-                    radio(u.label(), u, Some(form.rel_unit), Message::SearchRelUnit)
-                        .size(14.0)
-                        .into()
-                }))
-                .spacing(12.0);
-                col = col.push(
-                    row![
-                        text("Last").size(13.0).color(TEXT),
-                        text_input("15", &form.rel_amount)
-                            .on_input(Message::SearchRelAmount)
-                            .width(60.0)
-                            .padding(6.0),
-                        units,
-                    ]
-                    .spacing(10.0)
-                    .align_y(iced::Alignment::Center),
-                );
-            }
-            TimeframeMode::Absolute => {
-                col = col.push(
-                    row![
-                        column![
-                            field_label("From"),
-                            text_input("2026-08-28T09:00:00", &form.abs_from)
-                                .on_input(Message::SearchAbsFrom)
-                                .padding(6.0),
-                        ]
-                        .spacing(4.0),
-                        column![
-                            field_label("To"),
-                            text_input("2026-08-28T10:00:00", &form.abs_to)
-                                .on_input(Message::SearchAbsTo)
-                                .padding(6.0),
-                        ]
-                        .spacing(4.0),
-                    ]
-                    .spacing(10.0),
-                );
-            }
-        }
-
-        col = col.push(field_label("Timestamp field"));
-        col = col.push(
+        fields.push(field_label("Timestamp field"));
+        fields.push(
             text_input("@timestamp", &form.timestamp_field)
                 .on_input(Message::SearchTimestampField)
-                .padding(6.0),
-        );
-        // --- Sort ---
-        col = col.push(field_label("Sort field"));
-        let sortable = form.fields.caps().map(|c| c.sortable.as_slice());
-        let sort_ctl: Element<'_, Message> = match sortable {
-            Some(options) if !options.is_empty() => pick_list(
-                options,
-                Some(form.sort_field.clone()),
-                Message::SearchSortField,
-            )
-            .text_size(12.0)
-            .padding(4.0)
-            .width(Fill)
-            .into(),
-            _ => text_input("@timestamp", &form.sort_field)
-                .on_input(Message::SearchSortField)
                 .padding(6.0)
                 .into(),
-        };
-        col = col.push(sort_ctl);
-        col = col.push(
-            row![
-                radio("Descending", true, Some(form.sort_desc), Message::SearchSortDir)
-                    .size(14.0),
-                radio("Ascending", false, Some(form.sort_desc), Message::SearchSortDir)
-                    .size(14.0),
-            ]
-            .spacing(16.0),
         );
+        fields
+    }
 
-        // --- Columns ---
-        col = col.push(field_label("Columns"));
-        for (i, name) in form.columns.iter().enumerate() {
-            col = col.push(column_row(
-                name,
-                i,
-                form.columns.len(),
-                Message::SearchColumnMove,
-                Message::SearchColumnRemove,
-            ));
+    /// The new-Saved-Search form tab: only the structural fields. Query string,
+    /// timeframe, Columns and sort get defaults and are tuned from the Search
+    /// bar once the Result Tab opens.
+    fn search_form_view<'a>(&'a self, form: &'a SearchForm) -> Element<'a, Message> {
+        let cancel_idx = self.active_tab.unwrap_or(0);
+        let conn_name = self
+            .connection(&form.connection_id)
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+
+        let mut col = column![
+            text("New Search").size(16.0).color(TEXT),
+            text(format!("on {conn_name}")).size(12.0).color(TEXT_DIM),
+            text(
+                "Query string, timeframe, Columns and sort are tuned from the \
+                 Search bar once this opens."
+            )
+            .size(11.0)
+            .color(TEXT_DIM),
+            space().height(6.0),
+        ]
+        .spacing(6.0)
+        .max_width(560.0);
+
+        for field in self.search_settings_fields(form) {
+            col = col.push(field);
         }
-        let all_fields = form.fields.caps().map(|c| c.all.as_slice());
-        if let Some(options) = all_fields {
-            if !options.is_empty() {
-                col = col.push(
-                    pick_list(options, None::<String>, Message::SearchColumnAddField)
-                        .placeholder("Add a field\u{2026}")
-                        .text_size(12.0)
-                        .padding(4.0)
-                        .width(Fill),
-                );
-            }
-        }
-        col = col.push(
-            row![
-                text_input("field.name", &form.column_draft)
-                    .on_input(Message::SearchColumnDraft)
-                    .on_submit(Message::SearchColumnAdd)
-                    .padding(6.0),
-                button(text("Add").size(13.0).color(TEXT))
-                    .on_press(Message::SearchColumnAdd)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::picker_row(true)),
-            ]
-            .spacing(8.0),
-        );
 
         if let Some(err) = &form.error {
             col = col.push(text(err.clone()).size(12.0).color(ERR_RED));
@@ -2141,6 +2052,53 @@ impl LogLens {
             .height(Fill)
             .padding(16.0)
             .into()
+    }
+
+    /// The Search settings modal: the same three fields as the create form,
+    /// shown over the current tab rather than as a tab of its own. Saving it
+    /// re-runs an open Result Tab for the Saved Search.
+    fn search_settings_modal<'a>(
+        &'a self,
+        form: &'a SearchForm,
+    ) -> Element<'a, Message> {
+        let conn_name = self
+            .connection(&form.connection_id)
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+
+        let mut card = column![
+            text("Search settings").size(16.0).color(TEXT),
+            text(format!("on {conn_name}")).size(12.0).color(TEXT_DIM),
+            space().height(2.0),
+        ]
+        .spacing(6.0)
+        .width(Fill);
+
+        for field in self.search_settings_fields(form) {
+            card = card.push(field);
+        }
+
+        if let Some(err) = &form.error {
+            card = card.push(text(err.clone()).size(12.0).color(ERR_RED));
+        }
+
+        card = card.push(space().height(8.0));
+        card = card.push(
+            row![
+                space().width(Fill),
+                button(text("Cancel").size(13.0).color(TEXT_DIM))
+                    .on_press(Message::SearchSettingsCancel)
+                    .padding(Padding::new(6.0).left(14.0).right(14.0))
+                    .style(style::bare_button()),
+                button(text("Save").size(13.0).color(TEXT))
+                    .on_press(Message::SearchSettingsSave)
+                    .padding(Padding::new(6.0).left(14.0).right(14.0))
+                    .style(style::picker_row(true)),
+            ]
+            .spacing(8.0),
+        );
+
+        modal_card(card.into())
     }
 
     // --- Result tab view ---------------------------------------------
@@ -2662,41 +2620,6 @@ fn centered<'a>(label: &'a str, color: Color) -> Element<'a, Message> {
         .width(Fill)
         .height(Fill)
         .into()
-}
-
-/// One editable Column row: name, reorder arrows, remove — used by the Search
-/// form. `on_move(index, delta)` and `on_remove(index)` build the messages.
-fn column_row<'a>(
-    name: &'a str,
-    index: usize,
-    total: usize,
-    on_move: impl Fn(usize, isize) -> Message,
-    on_remove: impl Fn(usize) -> Message,
-) -> Element<'a, Message> {
-    let mut up = button(text("\u{2191}").size(11.0).color(TEXT_DIM))
-        .padding(3.0)
-        .style(style::bare_button());
-    if index > 0 {
-        up = up.on_press(on_move(index, -1));
-    }
-    let mut down = button(text("\u{2193}").size(11.0).color(TEXT_DIM))
-        .padding(3.0)
-        .style(style::bare_button());
-    if index + 1 < total {
-        down = down.on_press(on_move(index, 1));
-    }
-    row![
-        text(name.to_string()).size(12.0).width(Fill),
-        up,
-        down,
-        button(text("\u{00d7}").size(12.0).color(TEXT_DIM))
-            .on_press(on_remove(index))
-            .padding(3.0)
-            .style(style::bare_button()),
-    ]
-    .spacing(4.0)
-    .align_y(iced::Alignment::Center)
-    .into()
 }
 
 /// The floating Edit / Delete dropdown opened by right-clicking a tree row.

@@ -87,8 +87,9 @@ _Avoid_: results pane, grid, output
 
 **Search settings**:
 The name, Target, and timestamp field of a Saved Search — the parts set outside
-the Search bar. Edited in a form when creating a Saved Search and in a dialog when
-changing an existing one.
+the Search bar. Set in a form when creating a Saved Search and in a modal when
+changing an existing one; a new Saved Search's query string, timeframe, Columns
+and sort take defaults, tuned from the Search bar afterwards.
 _Avoid_: properties, config, options
 
 **Column**:
