@@ -1,0 +1,1 @@
+Log Lens. A cross-platform IDE for browsing logs built in Rust.
