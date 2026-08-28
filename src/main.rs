@@ -11,10 +11,12 @@ mod tab;
 use std::collections::HashSet;
 
 use iced::widget::{
-    button, checkbox, column, container, pick_list, radio, row, rule, scrollable,
-    space, stack, text, text_editor, text_input,
+    button, checkbox, column, container, mouse_area, pick_list, radio, row, rule,
+    scrollable, space, stack, text, text_editor, text_input,
 };
-use iced::{Border, Color, Element, Fill, Font, Length, Padding, Task, Theme};
+use iced::{
+    Border, Color, Element, Fill, Font, Length, Padding, Subscription, Task, Theme,
+};
 
 use config::{Auth, Config, Connection};
 use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
@@ -37,6 +39,7 @@ pub fn main() -> iced::Result {
     iced::application(LogLens::new, LogLens::update, LogLens::view)
         .title("Log Lens")
         .theme(LogLens::theme)
+        .subscription(LogLens::subscription)
         .window_size(iced::Size::new(1180.0, 760.0))
         .run()
 }
@@ -62,6 +65,15 @@ struct LogLens {
     status: Option<String>,
     /// Source of stable ids for Search forms and Result Tabs.
     id_seq: u64,
+    /// Active drag of a Hit detail panel's top edge.
+    detail_drag: Option<DetailDrag>,
+}
+
+/// In-progress resize of a Result Tab's Hit detail panel.
+struct DetailDrag {
+    run_id: u64,
+    /// Cursor y at the previous move event, for computing the delta.
+    last_y: Option<f32>,
 }
 
 /// Asks the user for a Connection secret and resumes what needed it.
@@ -141,6 +153,13 @@ enum Message {
     ResultColumnMove(u64, usize, isize),
     ResultSortField(u64, String),
     ResultSortDir(u64, bool),
+    // Hit detail panel
+    HitClicked(u64, usize),
+    CloseHitDetail,
+    DetailEdit(u64, text_editor::Action),
+    DetailDragStart(u64),
+    DetailDragTo(f32),
+    DetailDragEnd,
     // Result tab run
     PitOpened { run_id: u64, result: Result<String, String> },
     PageLoaded {
@@ -179,11 +198,40 @@ impl LogLens {
             secret_prompt: None,
             status: None,
             id_seq: 0,
+            detail_drag: None,
         }
     }
 
     fn theme(&self) -> Theme {
         Theme::Dark
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        use iced::event::Event;
+        use iced::keyboard;
+
+        let escape = iced::event::listen_with(|event, _status, _id| match event {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Escape),
+                ..
+            }) => Some(Message::CloseHitDetail),
+            _ => None,
+        });
+
+        if self.detail_drag.is_some() {
+            let drag = iced::event::listen_with(|event, _status, _id| match event {
+                Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::DetailDragTo(position.y))
+                }
+                Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::DetailDragEnd),
+                _ => None,
+            });
+            Subscription::batch([escape, drag])
+        } else {
+            escape
+        }
     }
 
     fn next_id(&mut self) -> u64 {
@@ -587,6 +635,49 @@ impl LogLens {
             }
             Message::RetryPage(run_id) => return self.load_more(run_id),
 
+            Message::HitClicked(run_id, index) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.toggle_detail(index);
+                }
+            }
+            Message::CloseHitDetail => {
+                if let Some(Tab::Result(rt)) = self
+                    .active_tab
+                    .and_then(|t| self.open_tabs.get_mut(t))
+                {
+                    rt.selected_hit = None;
+                }
+            }
+            Message::DetailEdit(run_id, action) => {
+                if !action.is_edit() {
+                    if let Some(rt) = self.result_mut(run_id) {
+                        rt.detail_content.perform(action);
+                    }
+                }
+            }
+            Message::DetailDragStart(run_id) => {
+                self.detail_drag = Some(DetailDrag {
+                    run_id,
+                    last_y: None,
+                });
+            }
+            Message::DetailDragTo(y) => {
+                if let Some(drag) = self.detail_drag.as_mut() {
+                    let run_id = drag.run_id;
+                    let delta = drag.last_y.map_or(0.0, |prev| prev - y);
+                    drag.last_y = Some(y);
+                    if delta != 0.0 {
+                        if let Some(rt) = self.result_mut(run_id) {
+                            rt.detail_height = (rt.detail_height + delta).clamp(
+                                results::DETAIL_MIN_H,
+                                results::DETAIL_MAX_H,
+                            );
+                        }
+                    }
+                }
+            }
+            Message::DetailDragEnd => self.detail_drag = None,
+
             Message::DismissStatus => self.status = None,
             Message::Ignore => {}
         }
@@ -899,6 +990,9 @@ impl LogLens {
             paging: Paging::Idle,
             scroll_y: 0.0,
             viewport_h: 600.0,
+            selected_hit: None,
+            detail_content: text_editor::Content::new(),
+            detail_height: results::DETAIL_DEFAULT_H,
             utc: self.config.utc_timestamps,
         };
         let need_fields = tab.all_fields.is_empty();
@@ -938,6 +1032,7 @@ impl LogLens {
             rt.hits.clear();
             rt.paging = Paging::Idle;
             rt.scroll_y = 0.0;
+            rt.selected_hit = None;
             let old_pit = rt.pit_id.take();
             (rt.connection_id.clone(), rt.target.clone(), old_pit)
         }) else {
@@ -1680,7 +1775,56 @@ impl LogLens {
             layout = layout.push(self.result_columns_bar(tab));
             layout = layout.push(rule::horizontal(1.0));
         }
-        layout.push(body).into()
+        layout = layout.push(body);
+        if tab.selected_hit.is_some() && matches!(tab.state, RunState::Loaded) {
+            layout = layout.push(self.hit_detail(tab));
+        }
+        layout.into()
+    }
+
+    /// The bottom panel showing the selected Hit's full `_source`, resizable by
+    /// its top edge and dismissed with Esc or a second click on the row.
+    fn hit_detail<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
+        let run_id = tab.run_id;
+        let index = tab.selected_hit.unwrap_or(0);
+
+        let grip = mouse_area(
+            container(space().height(6.0))
+                .width(Fill)
+                .style(|_| style::panel(BORDER)),
+        )
+        .on_press(Message::DetailDragStart(run_id));
+
+        let header = row![
+            text(format!("Hit {} \u{b7} _source", index + 1))
+                .size(11.0)
+                .color(TEXT_DIM),
+            space().width(Fill),
+            button(text("Close (Esc)").size(11.0).color(TEXT_DIM))
+                .on_press(Message::CloseHitDetail)
+                .padding(2.0)
+                .style(style::bare_button()),
+        ]
+        .align_y(iced::Alignment::Center);
+
+        let editor = text_editor(&tab.detail_content)
+            .on_action(move |action| Message::DetailEdit(run_id, action))
+            .font(Font::MONOSPACE)
+            .size(12.0)
+            .height(Fill)
+            .padding(Padding::new(4.0).left(8.0))
+            .style(style::editor);
+
+        column![
+            grip,
+            container(column![header, editor].spacing(4.0))
+                .width(Fill)
+                .height(Length::Fixed(tab.detail_height))
+                .style(|_| style::panel(BG))
+                .padding(Padding::new(6.0).left(10.0).right(10.0)),
+        ]
+        .width(Fill)
+        .into()
     }
 
     /// The live Column + sort editor strip above a Result Tab's table.
@@ -1801,38 +1945,51 @@ impl LogLens {
 
         // Only build widgets for the slice around the viewport; pad the rest
         // with spacers so the scrollbar still spans every loaded Hit.
+        let run_id = tab.run_id;
         let (start, end) = tab.row_window();
         let mut body: Vec<Element<'_, Message>> = Vec::with_capacity(end - start + 2);
         if start > 0 {
             body.push(space().height(start as f32 * ROW_H).into());
         }
-        for hit in &tab.hits[start..end] {
+        for (offset, hit) in tab.hits[start..end].iter().enumerate() {
+            let index = start + offset;
+            let selected = tab.selected_hit == Some(index);
+            let cells = container(
+                row(tab.columns.iter().map(|col| -> Element<'_, Message> {
+                    let value = results::cell(
+                        &hit.source,
+                        col,
+                        &tab.timestamp_field,
+                        tab.utc,
+                    );
+                    container(
+                        text(value)
+                            .size(12.0)
+                            .font(Font::MONOSPACE)
+                            .wrapping(text::Wrapping::None),
+                    )
+                    .width(col_width(col, &tab.timestamp_field))
+                    .padding(Padding::new(3.0).left(6.0))
+                    .clip(true)
+                    .into()
+                }))
+                .spacing(8.0),
+            )
+            .width(Fill)
+            .height(Length::Fixed(ROW_H))
+            .clip(true)
+            .style(move |_| {
+                if selected {
+                    style::panel(ACCENT)
+                } else {
+                    container::Style::default()
+                }
+            });
+
             body.push(
-                container(
-                    row(tab.columns.iter().map(|col| -> Element<'_, Message> {
-                        let value = results::cell(
-                            &hit.source,
-                            col,
-                            &tab.timestamp_field,
-                            tab.utc,
-                        );
-                        container(
-                            text(value)
-                                .size(12.0)
-                                .font(Font::MONOSPACE)
-                                .wrapping(text::Wrapping::None),
-                        )
-                        .width(col_width(col, &tab.timestamp_field))
-                        .padding(Padding::new(3.0).left(6.0))
-                        .clip(true)
-                        .into()
-                    }))
-                    .spacing(8.0),
-                )
-                .width(Fill)
-                .height(Length::Fixed(ROW_H))
-                .clip(true)
-                .into(),
+                mouse_area(cells)
+                    .on_press(Message::HitClicked(run_id, index))
+                    .into(),
             );
         }
         let trailing = tab.hits.len().saturating_sub(end);
@@ -1840,7 +1997,6 @@ impl LogLens {
             body.push(space().height(trailing as f32 * ROW_H).into());
         }
 
-        let run_id = tab.run_id;
         let table = scrollable(column(body).width(Fill))
             .width(Fill)
             .height(Fill)

@@ -1,9 +1,15 @@
 //! A Result Tab: the Hits from one run of a Saved Search, rendered as a table.
 
 use chrono::{DateTime, Local, TimeZone, Utc};
+use iced::widget::text_editor;
 use serde_json::Value;
 
 use crate::es::Hit;
+
+/// Default height of the Hit detail panel, in pixels.
+pub const DETAIL_DEFAULT_H: f32 = 240.0;
+pub const DETAIL_MIN_H: f32 = 90.0;
+pub const DETAIL_MAX_H: f32 = 680.0;
 
 /// Fixed row height, in pixels — the table renders a windowed slice, so every
 /// row must be the same height for scroll maths to line up.
@@ -73,6 +79,12 @@ pub struct ResultTab {
     /// Latest scroll offset / viewport height, for windowed rendering.
     pub scroll_y: f32,
     pub viewport_h: f32,
+    /// The Hit whose `_source` the bottom detail panel is showing.
+    pub selected_hit: Option<usize>,
+    /// Pretty-printed `_source` of `selected_hit`, kept selectable.
+    pub detail_content: text_editor::Content,
+    /// Detail panel height, adjustable by dragging its top edge.
+    pub detail_height: f32,
     /// Render `@timestamp`-typed cells in UTC rather than local time.
     pub utc: bool,
 }
@@ -128,6 +140,22 @@ impl ResultTab {
         if index < self.columns.len() && target >= 0 && (target as usize) < self.columns.len() {
             self.columns.swap(index, target as usize);
         }
+    }
+
+    /// Toggles the detail panel for Hit `index`: opens it (loading that Hit's
+    /// pretty-printed `_source`), swaps to it, or closes it on a repeat click.
+    pub fn toggle_detail(&mut self, index: usize) {
+        if self.selected_hit == Some(index) {
+            self.selected_hit = None;
+            return;
+        }
+        let Some(hit) = self.hits.get(index) else {
+            return;
+        };
+        let json = serde_json::to_string_pretty(&hit.source)
+            .unwrap_or_else(|_| hit.source.to_string());
+        self.detail_content = text_editor::Content::with_text(&json);
+        self.selected_hit = Some(index);
     }
 }
 
