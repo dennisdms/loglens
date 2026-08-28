@@ -12,8 +12,9 @@ On a Result Tab's first run, open a Point-in-Time (PIT) against the Target and
 hold it for the life of the tab. Page with `search_after`, using the sort
 `[<chosen field>:<dir>, _shard_doc]` — `_shard_doc` is always appended as a
 tiebreaker so paging is total-ordered and deterministic. Close the PIT when the
-tab closes. Changing the sort, hitting Refresh, or saving an edit to the Saved
-Search discards the PIT and starts a fresh one.
+tab closes. Changing the sort, editing the query string or Timeframe in the
+Search bar, hitting Refresh, or saving an edit to the Saved Search discards the
+PIT and starts a fresh one.
 
 Stop paging hard at 10,000 Hits and show a footer telling the user to narrow the
 query. Render the table as a windowed slice (~200 rows) shifted on scroll rather
@@ -38,5 +39,9 @@ than as 10,000 live widgets.
 
 - Each open Result Tab holds server-side PIT state; the client must close PITs on
   tab close and refresh `keep_alive` while paging.
+- The query string and Timeframe are editable from the Search bar, so an
+  exploratory session that tweaks them repeatedly churns through a PIT and a full
+  re-run per change. Acceptable: each PIT is cheap to open and abandoned ones
+  expire on their own.
 - 10,000 Hits is a firm ceiling per tab in v1. Narrowing the Timeframe or query
   string is the only way to see beyond it.

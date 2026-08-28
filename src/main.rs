@@ -189,6 +189,8 @@ enum Message {
         content_h: f32,
     },
     RetryPage(u64),
+    /// Discard the active Result Tab's PIT and re-run it from the Search bar.
+    RefreshResult(u64),
     // Tree item management
     /// Pointer moved over the sidebar; tracked to anchor the right-click menu.
     SidebarCursor(Point),
@@ -626,6 +628,7 @@ impl LogLens {
                 }
             }
             Message::RetryPage(run_id) => return self.load_more(run_id),
+            Message::RefreshResult(run_id) => return self.start_run(run_id),
 
             Message::HitClicked(run_id, index) => {
                 if let Some(rt) = self.result_mut(run_id) {
@@ -1327,19 +1330,27 @@ impl LogLens {
     // --- View --------------------------------------------------------------
 
     fn view(&self) -> Element<'_, Message> {
+        // Right column: an optional Search bar sits above the tab strip while a
+        // Result Tab is active.
+        let mut right: Vec<Element<'_, Message>> = Vec::new();
+        if let Some(search_bar) = self.search_bar() {
+            right.push(search_bar);
+            right.push(rule::horizontal(1.0).into());
+        }
+        right.push(self.tab_bar());
+        right.push(rule::horizontal(1.0).into());
+        right.push(self.main_area());
+
         let body = row![
             self.sidebar(),
             rule::vertical(1.0),
-            column![
-                self.tab_bar(),
-                rule::horizontal(1.0),
-                self.main_area(),
-            ]
-            .width(Fill),
+            column(right).width(Fill),
         ]
         .height(Fill);
 
         let base: Element<'_, Message> = container(column![
+            self.menu_bar(),
+            rule::horizontal(1.0),
             container(body).width(Fill).height(Fill),
             self.status_bar(),
         ])
@@ -1610,6 +1621,60 @@ impl LogLens {
             .into()
     }
 
+    /// The always-present Menu bar across the top of the window. `File` and
+    /// `View` are visible but inert until dropdowns land.
+    fn menu_bar(&self) -> Element<'_, Message> {
+        container(
+            row![
+                text("File").size(13.0).color(TEXT_DIM),
+                text("View").size(13.0).color(TEXT_DIM),
+            ]
+            .spacing(18.0)
+            .align_y(iced::Alignment::Center),
+        )
+        .style(|_| style::panel(PANEL_ALT))
+        .width(Fill)
+        .padding(Padding::new(4.0).left(12.0).right(12.0))
+        .into()
+    }
+
+    /// The Search bar shown above the tab strip while a Result Tab is active:
+    /// row 1 carries the Target, a Refresh control and the loaded-Hit count;
+    /// row 2 is the live Column + sort strip moved out of the Result Tab.
+    /// Hidden for Search form tabs and when no tab is open.
+    fn search_bar(&self) -> Option<Element<'_, Message>> {
+        let Some(Tab::Result(tab)) =
+            self.active_tab.and_then(|t| self.open_tabs.get(t))
+        else {
+            return None;
+        };
+        let run_id = tab.run_id;
+
+        let row1 = container(
+            row![
+                text(format!("\u{b7} {}", tab.target)).size(12.0).color(TEXT_DIM),
+                button(text("Refresh").size(12.0).color(TEXT_DIM))
+                    .on_press(Message::RefreshResult(run_id))
+                    .padding(Padding::new(2.0).left(8.0).right(8.0))
+                    .style(style::bare_button()),
+                space().width(Fill),
+                meta(&format!("{} hits", tab.hits.len())),
+            ]
+            .spacing(12.0)
+            .align_y(iced::Alignment::Center),
+        )
+        .style(|_| style::panel(PANEL))
+        .width(Fill)
+        .padding(Padding::new(6.0).left(12.0).right(12.0));
+
+        let mut col: Vec<Element<'_, Message>> = vec![row1.into()];
+        if matches!(tab.state, RunState::Loaded | RunState::Empty) {
+            col.push(rule::horizontal(1.0).into());
+            col.push(self.result_columns_bar(tab));
+        }
+        Some(column(col).width(Fill).into())
+    }
+
     // --- Search form view ----------------------------------------------
 
     fn search_form_view<'a>(&'a self, form: &'a SearchForm) -> Element<'a, Message> {
@@ -1838,20 +1903,6 @@ impl LogLens {
     // --- Result tab view ---------------------------------------------
 
     fn result_view<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
-        let bar = container(
-            row![
-                text(tab.saved_name.clone()).size(12.0).color(TEXT),
-                text(format!("\u{b7} {}", tab.target)).size(12.0).color(TEXT_DIM),
-                space().width(Fill),
-                meta(&format!("{} hits", tab.hits.len())),
-            ]
-            .spacing(12.0)
-            .align_y(iced::Alignment::Center),
-        )
-        .style(|_| style::panel(PANEL))
-        .width(Fill)
-        .padding(Padding::new(6.0).left(12.0).right(12.0));
-
         let body: Element<'_, Message> = match &tab.state {
             RunState::Loading => centered("Running\u{2026}", TEXT_DIM),
             RunState::Empty => {
@@ -1877,14 +1928,7 @@ impl LogLens {
             RunState::Loaded => self.hit_table(tab),
         };
 
-        let mut layout = column![bar, rule::horizontal(1.0)]
-            .width(Fill)
-            .height(Fill);
-        if matches!(tab.state, RunState::Loaded | RunState::Empty) {
-            layout = layout.push(self.result_columns_bar(tab));
-            layout = layout.push(rule::horizontal(1.0));
-        }
-        layout = layout.push(body);
+        let mut layout = column![body].width(Fill).height(Fill);
         if tab.selected_hit.is_some() && matches!(tab.state, RunState::Loaded) {
             layout = layout.push(self.hit_detail(tab));
         }
