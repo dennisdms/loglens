@@ -67,6 +67,23 @@ struct LogLens {
     id_seq: u64,
     /// Active drag of a Hit detail panel's top edge.
     detail_drag: Option<DetailDrag>,
+    /// The tree row whose Edit / Delete menu is open.
+    tree_menu: Option<TreeMenu>,
+    /// A pending destructive action awaiting confirmation.
+    confirm: Option<Confirm>,
+}
+
+/// Which tree row's management menu is currently open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TreeMenu {
+    Connection(String),
+    Search { connection: String, search: String },
+}
+
+/// A destructive action shown in a confirmation modal before it runs.
+#[derive(Debug, Clone)]
+enum Confirm {
+    DeleteConnection { id: String, name: String },
 }
 
 /// In-progress resize of a Result Tab's Hit detail panel.
@@ -174,6 +191,14 @@ enum Message {
         content_h: f32,
     },
     RetryPage(u64),
+    // Tree item management
+    TreeMenuToggle(TreeMenu),
+    EditConnection(String),
+    RequestDeleteConnection(String),
+    EditSearch { connection: String, search: String },
+    DeleteSearch { connection: String, search: String },
+    ConfirmProceed,
+    ConfirmCancel,
     // Misc
     DismissStatus,
     Ignore,
@@ -199,6 +224,8 @@ impl LogLens {
             status: None,
             id_seq: 0,
             detail_drag: None,
+            tree_menu: None,
+            confirm: None,
         }
     }
 
@@ -423,7 +450,7 @@ impl LogLens {
 
             Message::NewSearch(conn_id) => return self.open_search_form(conn_id),
             Message::OpenSavedSearch { connection, search } => {
-                return self.open_result_tab(connection, search, None, None);
+                return self.open_result_tab(connection, search, None, None, false);
             }
             Message::SearchTargetsLoaded { form_id, result } => {
                 if let Some(f) = self.form_mut(form_id) {
@@ -641,6 +668,7 @@ impl LogLens {
                 }
             }
             Message::CloseHitDetail => {
+                self.tree_menu = None;
                 if let Some(Tab::Result(rt)) = self
                     .active_tab
                     .and_then(|t| self.open_tabs.get_mut(t))
@@ -677,6 +705,47 @@ impl LogLens {
                 }
             }
             Message::DetailDragEnd => self.detail_drag = None,
+
+            Message::TreeMenuToggle(target) => {
+                self.tree_menu = if self.tree_menu.as_ref() == Some(&target) {
+                    None
+                } else {
+                    Some(target)
+                };
+            }
+            Message::EditConnection(id) => {
+                self.tree_menu = None;
+                if let Some(conn) = self.connection(&id) {
+                    self.connection_form = Some(ConnectionForm::editing(conn));
+                }
+            }
+            Message::RequestDeleteConnection(id) => {
+                self.tree_menu = None;
+                if let Some(conn) = self.connection(&id) {
+                    self.confirm = Some(Confirm::DeleteConnection {
+                        id: conn.id.clone(),
+                        name: conn.name.clone(),
+                    });
+                }
+            }
+            Message::EditSearch { connection, search } => {
+                self.tree_menu = None;
+                return self.open_search_form_for_edit(connection, search);
+            }
+            Message::DeleteSearch { connection, search } => {
+                self.tree_menu = None;
+                return self.delete_search(connection, search);
+            }
+            Message::ConfirmProceed => {
+                let confirm = self.confirm.take();
+                match confirm {
+                    Some(Confirm::DeleteConnection { id, .. }) => {
+                        return self.delete_connection(id);
+                    }
+                    None => {}
+                }
+            }
+            Message::ConfirmCancel => self.confirm = None,
 
             Message::DismissStatus => self.status = None,
             Message::Ignore => {}
@@ -831,6 +900,99 @@ impl LogLens {
         Task::batch([targets, self.load_form_fields()])
     }
 
+    /// Opens a Search form tab pre-filled from an existing Saved Search.
+    fn open_search_form_for_edit(
+        &mut self,
+        conn_id: String,
+        search_id: String,
+    ) -> Task<Message> {
+        let Some(saved) = self
+            .connection(&conn_id)
+            .and_then(|c| c.searches.iter().find(|s| s.id == search_id))
+            .cloned()
+        else {
+            return Task::none();
+        };
+
+        // Focus an already-open editor for this search rather than a duplicate.
+        if let Some(pos) = self.open_tabs.iter().position(|t| {
+            matches!(t, Tab::SearchForm(f) if f.saved_id.as_deref() == Some(search_id.as_str()))
+        }) {
+            self.active_tab = Some(pos);
+            return Task::none();
+        }
+
+        let form_id = self.next_id();
+        let form = SearchForm::from_saved(form_id, conn_id.clone(), &saved);
+        self.open_tabs.push(Tab::SearchForm(Box::new(form)));
+        self.active_tab = Some(self.open_tabs.len() - 1);
+        self.expanded.insert(conn_id.clone());
+
+        let targets = match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
+            Some(endpoint) => Task::perform(
+                es::list_targets(endpoint),
+                move |result| Message::SearchTargetsLoaded { form_id, result },
+            ),
+            None => {
+                if let Some(f) = self.form_mut(form_id) {
+                    f.targets_loading = false;
+                }
+                Task::none()
+            }
+        };
+        Task::batch([targets, self.load_form_fields()])
+    }
+
+    fn delete_search(
+        &mut self,
+        conn_id: String,
+        search_id: String,
+    ) -> Task<Message> {
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        // Close an open Result Tab or editor for this search.
+        while let Some(pos) = self.open_tabs.iter().position(|t| match t {
+            Tab::Result(rt) => rt.saved_id == search_id,
+            Tab::SearchForm(f) => f.saved_id.as_deref() == Some(search_id.as_str()),
+            Tab::File { .. } => false,
+        }) {
+            tasks.push(self.close_tab(pos));
+        }
+
+        if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id) {
+            conn.searches.retain(|s| s.id != search_id);
+        }
+        if let Err(err) = config::save(&self.config) {
+            self.status = Some(format!("Could not save config: {err}"));
+        }
+        Task::batch(tasks)
+    }
+
+    fn delete_connection(&mut self, conn_id: String) -> Task<Message> {
+        let close = self.close_connection_tabs(&conn_id);
+
+        self.config.connections.retain(|c| c.id != conn_id);
+        secrets::delete(&conn_id);
+        self.expanded.remove(&conn_id);
+        if let Err(err) = config::save(&self.config) {
+            self.status = Some(format!("Could not save config: {err}"));
+        }
+        close
+    }
+
+    /// Closes every tab — Result or Search form — belonging to a Connection,
+    /// releasing any PITs.
+    fn close_connection_tabs(&mut self, conn_id: &str) -> Task<Message> {
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        while let Some(pos) = self.open_tabs.iter().position(|t| match t {
+            Tab::Result(rt) => rt.connection_id == conn_id,
+            Tab::SearchForm(f) => f.connection_id == conn_id,
+            Tab::File { .. } => false,
+        }) {
+            tasks.push(self.close_tab(pos));
+        }
+        Task::batch(tasks)
+    }
+
     /// Fetches `_field_caps` for the active Search form's Target, if it has one.
     fn load_form_fields(&mut self) -> Task<Message> {
         let Some((form_id, conn_id, target)) = self.active_form_mut().map(|f| {
@@ -922,11 +1084,11 @@ impl LogLens {
         self.expanded.insert(conn_id.clone());
 
         // Carry the form's already-fetched fields into the Result Tab.
-        let caps = match self.open_tabs.get(idx) {
-            Some(Tab::SearchForm(f)) => f.fields.caps().cloned(),
-            _ => None,
+        let (caps, editing) = match self.open_tabs.get(idx) {
+            Some(Tab::SearchForm(f)) => (f.fields.caps().cloned(), f.saved_id.is_some()),
+            _ => (None, false),
         };
-        self.open_result_tab(conn_id, saved.id, Some(idx), caps)
+        self.open_result_tab(conn_id, saved.id, Some(idx), caps, editing)
     }
 
     // --- Result tab / run -------------------------------------------
@@ -939,19 +1101,50 @@ impl LogLens {
         saved_id: String,
         replace: Option<usize>,
         caps: Option<es::FieldCaps>,
+        rerun_existing: bool,
     ) -> Task<Message> {
         if let Some(existing) = self.open_tabs.iter().position(|t| {
             matches!(t, Tab::Result(rt) if rt.saved_id == saved_id)
         }) {
-            self.active_tab = Some(existing);
             if let Some(form_idx) = replace {
                 if form_idx != existing {
                     self.open_tabs.remove(form_idx);
                 }
             }
-            self.active_tab = self.open_tabs.iter().position(|t| {
+            let existing = self.open_tabs.iter().position(|t| {
                 matches!(t, Tab::Result(rt) if rt.saved_id == saved_id)
             });
+            self.active_tab = existing;
+
+            // A saved edit refreshes the open Result Tab's parameters and
+            // re-runs it; a plain re-open just focuses it.
+            if rerun_existing {
+                if let (Some(idx), Some(saved)) = (
+                    existing,
+                    self.connection(&conn_id)
+                        .and_then(|c| c.searches.iter().find(|s| s.id == saved_id))
+                        .cloned(),
+                ) {
+                    let (gte, lte) = saved.timeframe.bounds();
+                    if let Some(Tab::Result(rt)) = self.open_tabs.get_mut(idx) {
+                        rt.saved_name = saved.name.clone();
+                        rt.target = saved.target.clone();
+                        rt.query_string = saved.query_string.clone();
+                        rt.timestamp_field = saved.timestamp_field.clone();
+                        rt.columns = saved.columns.clone();
+                        rt.sort_field = saved.sort_field.clone();
+                        rt.sort_desc = saved.sort_desc;
+                        rt.gte = gte;
+                        rt.lte = lte;
+                        if let Some(caps) = caps {
+                            rt.all_fields = caps.all;
+                            rt.sortable_fields = caps.sortable;
+                        }
+                        let run_id = rt.run_id;
+                        return self.start_run(run_id);
+                    }
+                }
+            }
             return Task::none();
         }
 
@@ -1197,6 +1390,9 @@ impl LogLens {
         if let Some(prompt) = &self.secret_prompt {
             layers.push(self.secret_prompt_modal(prompt));
         }
+        if let Some(confirm) = &self.confirm {
+            layers.push(self.confirm_modal(confirm));
+        }
 
         if layers.len() == 1 {
             layers.pop().unwrap()
@@ -1322,10 +1518,21 @@ impl LogLens {
                 .on_press(Message::NewSearch(conn.id.clone()))
                 .padding(Padding::new(4.0).left(6.0).right(6.0))
                 .style(style::bare_button()),
+            button(text("\u{22ef}").size(13.0).color(TEXT_DIM))
+                .on_press(Message::TreeMenuToggle(TreeMenu::Connection(conn.id.clone())))
+                .padding(Padding::new(4.0).left(6.0).right(6.0))
+                .style(style::bare_button()),
         ]
         .align_y(iced::Alignment::Center);
 
         let mut rows: Vec<Element<'a, Message>> = vec![header.into()];
+        if self.tree_menu == Some(TreeMenu::Connection(conn.id.clone())) {
+            rows.push(tree_menu_block(
+                40.0,
+                Message::EditConnection(conn.id.clone()),
+                Message::RequestDeleteConnection(conn.id.clone()),
+            ));
+        }
         if open {
             if conn.searches.is_empty() {
                 rows.push(
@@ -1343,17 +1550,41 @@ impl LogLens {
                         self.active_tab.and_then(|t| self.open_tabs.get(t)),
                         Some(Tab::Result(rt)) if rt.saved_id == saved.id
                     );
+                    let menu_target = TreeMenu::Search {
+                        connection: conn.id.clone(),
+                        search: saved.id.clone(),
+                    };
                     rows.push(
-                        button(text(saved.name.clone()).size(13.0))
-                            .on_press(Message::OpenSavedSearch {
+                        row![
+                            button(text(saved.name.clone()).size(13.0))
+                                .on_press(Message::OpenSavedSearch {
+                                    connection: conn.id.clone(),
+                                    search: saved.id.clone(),
+                                })
+                                .width(Fill)
+                                .padding(Padding::new(4.0).left(40.0).right(4.0))
+                                .style(style::picker_row(active)),
+                            button(text("\u{22ef}").size(13.0).color(TEXT_DIM))
+                                .on_press(Message::TreeMenuToggle(menu_target.clone()))
+                                .padding(Padding::new(4.0).left(6.0).right(6.0))
+                                .style(style::bare_button()),
+                        ]
+                        .align_y(iced::Alignment::Center)
+                        .into(),
+                    );
+                    if self.tree_menu.as_ref() == Some(&menu_target) {
+                        rows.push(tree_menu_block(
+                            52.0,
+                            Message::EditSearch {
                                 connection: conn.id.clone(),
                                 search: saved.id.clone(),
-                            })
-                            .width(Fill)
-                            .padding(Padding::new(4.0).left(40.0).right(4.0))
-                            .style(style::picker_row(active))
-                            .into(),
-                    );
+                            },
+                            Message::DeleteSearch {
+                                connection: conn.id.clone(),
+                                search: saved.id.clone(),
+                            },
+                        ));
+                    }
                 }
             }
         }
@@ -2211,6 +2442,46 @@ impl LogLens {
 
         modal_card(card.into())
     }
+
+    fn confirm_modal<'a>(&'a self, confirm: &'a Confirm) -> Element<'a, Message> {
+        let (title, body, proceed) = match confirm {
+            Confirm::DeleteConnection { name, .. } => (
+                "Delete Connection",
+                format!(
+                    "Delete \"{name}\" and all of its Saved Searches? This cannot be undone."
+                ),
+                "Delete",
+            ),
+        };
+
+        let card = column![
+            text(title).size(16.0).color(TEXT),
+            text(body).size(12.0).color(TEXT_DIM),
+            space().height(10.0),
+            row![
+                space().width(Fill),
+                button(text("Cancel").size(13.0).color(TEXT_DIM))
+                    .on_press(Message::ConfirmCancel)
+                    .padding(Padding::new(6.0).left(14.0).right(14.0))
+                    .style(style::bare_button()),
+                button(text(proceed).size(13.0).color(TEXT))
+                    .on_press(Message::ConfirmProceed)
+                    .padding(Padding::new(6.0).left(14.0).right(14.0))
+                    .style(|_theme: &Theme, status| {
+                        let base = style::picker_row(true)(_theme, status);
+                        button::Style {
+                            background: Some(ERR_RED.into()),
+                            ..base
+                        }
+                    }),
+            ]
+            .spacing(8.0),
+        ]
+        .spacing(6.0)
+        .width(Fill);
+
+        modal_card(card.into())
+    }
 }
 
 // --- Small view helpers ----------------------------------------------------
@@ -2266,6 +2537,32 @@ fn column_row<'a>(
     ]
     .spacing(4.0)
     .align_y(iced::Alignment::Center)
+    .into()
+}
+
+/// The inline Edit / Delete menu shown under a tree row, indented by `indent`.
+fn tree_menu_block<'a>(
+    indent: f32,
+    edit: Message,
+    delete: Message,
+) -> Element<'a, Message> {
+    container(
+        column![
+            button(text("Edit").size(12.0).color(TEXT))
+                .on_press(edit)
+                .width(Fill)
+                .padding(Padding::new(3.0).left(8.0))
+                .style(style::picker_row(false)),
+            button(text("Delete").size(12.0).color(ERR_RED))
+                .on_press(delete)
+                .width(Fill)
+                .padding(Padding::new(3.0).left(8.0))
+                .style(style::picker_row(false)),
+        ]
+        .spacing(1.0),
+    )
+    .width(Fill)
+    .padding(Padding::new(0.0).left(indent))
     .into()
 }
 
