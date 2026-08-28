@@ -1,5 +1,7 @@
 //! A Result Tab: the Hits from one run of a Saved Search, rendered as a table.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Local, TimeZone, Utc};
 use iced::widget::text_editor;
 use serde_json::Value;
@@ -76,6 +78,13 @@ pub const DETAIL_MAX_H: f32 = 680.0;
 /// row must be the same height for scroll maths to line up.
 pub const ROW_H: f32 = 22.0;
 
+/// Default table Column width, in pixels, and the range a drag-resize is
+/// clamped to. The timestamp Column starts wider than the rest.
+pub const COL_DEFAULT_W: f32 = 200.0;
+pub const COL_TIMESTAMP_W: f32 = 210.0;
+pub const COL_MIN_W: f32 = 60.0;
+pub const COL_MAX_W: f32 = 1200.0;
+
 /// Hard ceiling on Hits loaded into one Result Tab (ADR 0002).
 pub const RETENTION_CAP: usize = 10_000;
 
@@ -126,6 +135,9 @@ pub struct ResultTab {
     pub columns: Vec<String>,
     /// Draft text for the live "add column" control.
     pub column_draft: String,
+    /// Per-Column pixel widths set by dragging a header edge. Columns absent
+    /// here fall back to a default width (wider for the timestamp Column).
+    pub col_widths: HashMap<String, f32>,
     pub sort_field: String,
     pub sort_desc: bool,
     /// `_field_caps` for this tab's Target, fetched lazily; empty until it lands
@@ -196,6 +208,29 @@ impl ResultTab {
             self.columns.push(field.to_string());
         }
         self.column_draft.clear();
+    }
+
+    /// The current pixel width of `col`: a drag override if one is recorded,
+    /// otherwise the default for that Column.
+    pub fn col_width(&self, col: &str) -> f32 {
+        if let Some(width) = self.col_widths.get(col) {
+            return *width;
+        }
+        if col == self.timestamp_field {
+            COL_TIMESTAMP_W
+        } else {
+            COL_DEFAULT_W
+        }
+    }
+
+    /// Nudges Column `index`'s width by `delta` pixels, clamped to the resize
+    /// range, recording the result as an explicit override.
+    pub fn resize_column(&mut self, index: usize, delta: f32) {
+        let Some(col) = self.columns.get(index).cloned() else {
+            return;
+        };
+        let next = (self.col_width(&col) + delta).clamp(COL_MIN_W, COL_MAX_W);
+        self.col_widths.insert(col, next);
     }
 
     pub fn remove_column(&mut self, index: usize) {

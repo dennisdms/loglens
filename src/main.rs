@@ -7,7 +7,7 @@ mod secrets;
 mod style;
 mod tab;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use iced::widget::{
     button, checkbox, column, container, mouse_area, pick_list, radio, row, rule, scrollable,
@@ -62,6 +62,11 @@ struct LogLens {
     id_seq: u64,
     /// Active drag of a Hit detail panel's top edge.
     detail_drag: Option<DetailDrag>,
+    /// Active drag-resize of a Result Tab's table Column.
+    column_drag: Option<ColumnDrag>,
+    /// Column index whose header resize grip the pointer is currently over,
+    /// so the hairline shows only on hover.
+    grip_hover: Option<usize>,
     /// The tree row whose Edit / Delete menu is open.
     tree_menu: Option<TreeMenu>,
     /// Cursor position over the sidebar, tracked so the right-click menu can
@@ -91,6 +96,15 @@ struct DetailDrag {
     run_id: u64,
     /// Cursor y at the previous move event, for computing the delta.
     last_y: Option<f32>,
+}
+
+/// In-progress drag-resize of a Result Tab's table Column, by its header's
+/// right edge.
+struct ColumnDrag {
+    run_id: u64,
+    index: usize,
+    /// Cursor x at the previous move event, for computing the delta.
+    last_x: Option<f32>,
 }
 
 /// Asks the user for a Connection secret and resumes what needed it.
@@ -178,6 +192,12 @@ enum Message {
     ResultColumnAddField(u64, String),
     ResultColumnRemove(u64, usize),
     ResultColumnMove(u64, usize, isize),
+    /// Drag-resize of a table Column by its header's right edge.
+    ColumnDragStart(u64, usize),
+    ColumnDragTo(f32),
+    ColumnDragEnd,
+    /// Pointer entered (`Some`) or left (`None`) a header resize grip.
+    GripHover(Option<usize>),
     ResultSortField(u64, String),
     ResultSortDir(u64, bool),
     // Hit detail panel
@@ -246,6 +266,8 @@ impl LogLens {
             status: None,
             id_seq: 0,
             detail_drag: None,
+            column_drag: None,
+            grip_hover: None,
             tree_menu: None,
             sidebar_cursor: Point::ORIGIN,
             tree_menu_at: Point::ORIGIN,
@@ -279,10 +301,23 @@ impl LogLens {
                 }
                 _ => None,
             });
-            Subscription::batch([escape, drag])
-        } else {
-            escape
+            return Subscription::batch([escape, drag]);
         }
+
+        if self.column_drag.is_some() {
+            let drag = iced::event::listen_with(|event, _status, _id| match event {
+                Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::ColumnDragTo(position.x))
+                }
+                Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                    Some(Message::ColumnDragEnd)
+                }
+                _ => None,
+            });
+            return Subscription::batch([escape, drag]);
+        }
+
+        escape
     }
 
     fn next_id(&mut self) -> u64 {
@@ -729,6 +764,28 @@ impl LogLens {
                 }
             }
             Message::DetailDragEnd => self.detail_drag = None,
+
+            Message::ColumnDragStart(run_id, index) => {
+                self.column_drag = Some(ColumnDrag {
+                    run_id,
+                    index,
+                    last_x: None,
+                });
+            }
+            Message::ColumnDragTo(x) => {
+                if let Some(drag) = self.column_drag.as_mut() {
+                    let (run_id, index) = (drag.run_id, drag.index);
+                    let delta = drag.last_x.map_or(0.0, |prev| x - prev);
+                    drag.last_x = Some(x);
+                    if delta != 0.0 {
+                        if let Some(rt) = self.result_mut(run_id) {
+                            rt.resize_column(index, delta);
+                        }
+                    }
+                }
+            }
+            Message::ColumnDragEnd => self.column_drag = None,
+            Message::GripHover(v) => self.grip_hover = v,
 
             Message::SidebarCursor(pos) => self.sidebar_cursor = pos,
             Message::TreeMenuToggle(target) => {
@@ -1267,6 +1324,7 @@ impl LogLens {
             timestamp_field: saved.timestamp_field.clone(),
             columns: saved.columns.clone(),
             column_draft: String::new(),
+            col_widths: HashMap::new(),
             sort_field: saved.sort_field.clone(),
             sort_desc: saved.sort_desc,
             all_fields,
@@ -2261,17 +2319,45 @@ impl LogLens {
     }
 
     fn hit_table<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
-        let header = row(tab.columns.iter().map(|col| -> Element<'_, Message> {
-            container(text(col.clone()).size(12.0).color(TEXT_DIM))
-                .width(col_width(col, &tab.timestamp_field))
-                .padding(Padding::new(4.0).left(6.0))
-                .into()
-        }))
+        let run_id = tab.run_id;
+        let last = tab.columns.len().saturating_sub(1);
+        let header = row(tab.columns.iter().enumerate().map(
+            |(i, col)| -> Element<'_, Message> {
+                let label = container(text(col.clone()).size(12.0).color(TEXT_DIM))
+                    .width(Fill)
+                    .clip(true)
+                    .padding(Padding::new(4.0).left(6.0));
+
+                // The last Column flexes to fill the pane, so it has no edge to
+                // drag; every other Column gets a right-edge resize grip.
+                if i == last {
+                    return container(label).width(Fill).into();
+                }
+
+                // A hairline that stays invisible until the pointer is over its
+                // (wider, padded) hit area, then shows as a thin vertical rule.
+                let lit = self.grip_hover == Some(i)
+                    || matches!(&self.column_drag, Some(d) if d.run_id == run_id && d.index == i);
+                let line = container(space().width(2.0).height(14.0)).style(move |_| {
+                    style::panel(if lit { TEXT_DIM } else { Color::TRANSPARENT })
+                });
+                let grip = mouse_area(
+                    container(line).padding(Padding::new(0.0).left(4.0).right(4.0)),
+                )
+                .interaction(iced::mouse::Interaction::ResizingColumn)
+                .on_enter(Message::GripHover(Some(i)))
+                .on_exit(Message::GripHover(None))
+                .on_press(Message::ColumnDragStart(run_id, i));
+
+                container(row![label, grip].align_y(iced::Alignment::Center))
+                    .width(Length::Fixed(tab.col_width(col)))
+                    .into()
+            },
+        ))
         .spacing(8.0);
 
         // Only build widgets for the slice around the viewport; pad the rest
         // with spacers so the scrollbar still spans every loaded Hit.
-        let run_id = tab.run_id;
         let (start, end) = tab.row_window();
         let mut body: Vec<Element<'_, Message>> = Vec::with_capacity(end - start + 2);
         if start > 0 {
@@ -2281,19 +2367,27 @@ impl LogLens {
             let index = start + offset;
             let selected = tab.selected_hit == Some(index);
             let cells = container(
-                row(tab.columns.iter().map(|col| -> Element<'_, Message> {
-                    let value = results::cell(&hit.source, col, &tab.timestamp_field, tab.utc);
-                    container(
-                        text(value)
-                            .size(12.0)
-                            .font(Font::MONOSPACE)
-                            .wrapping(text::Wrapping::None),
-                    )
-                    .width(col_width(col, &tab.timestamp_field))
-                    .padding(Padding::new(3.0).left(6.0))
-                    .clip(true)
-                    .into()
-                }))
+                row(tab.columns.iter().enumerate().map(
+                    |(i, col)| -> Element<'_, Message> {
+                        let value =
+                            results::cell(&hit.source, col, &tab.timestamp_field, tab.utc);
+                        let width = if i == last {
+                            Length::Fill
+                        } else {
+                            Length::Fixed(tab.col_width(col))
+                        };
+                        container(
+                            text(value)
+                                .size(12.0)
+                                .font(Font::MONOSPACE)
+                                .wrapping(text::Wrapping::None),
+                        )
+                        .width(width)
+                        .padding(Padding::new(3.0).left(6.0))
+                        .clip(true)
+                        .into()
+                    },
+                ))
                 .spacing(8.0),
             )
             .width(Fill)
@@ -2603,14 +2697,6 @@ fn tree_menu_block<'a>(edit: Message, delete: Message) -> Element<'a, Message> {
     .padding(3.0)
     .style(|_| style::menu_popup())
     .into()
-}
-
-fn col_width(col: &str, timestamp_field: &str) -> Length {
-    if col == timestamp_field {
-        Length::Fixed(210.0)
-    } else {
-        Length::Fill
-    }
 }
 
 fn non_empty(s: &str) -> Option<&str> {
