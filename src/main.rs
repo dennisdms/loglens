@@ -20,9 +20,9 @@ use iced::{
 
 use config::{Auth, Config, Connection};
 use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
-use results::{Paging, ResultTab, RunState, RETENTION_CAP, ROW_H};
-use search::{Fields, SearchForm, TimeframeMode};
-use config::TimeUnit;
+use results::{Paging, ResultTab, RunState, TimeframeDraft, RETENTION_CAP, ROW_H};
+use search::{Fields, SearchForm};
+use config::{TimeUnit, TimeframeChoice, TimeframeMode};
 use style::{ACCENT, BG, BORDER, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
 use tab::Tab;
 
@@ -156,9 +156,21 @@ enum Message {
     SearchSortField(String),
     SearchSortDir(bool),
     SearchSave,
-    // Result tab: live query string, columns + sort
+    // Result tab: live query string, timeframe, columns + sort
     ResultQueryDraft(u64, String),
     ResultQuerySubmit(u64),
+    /// A timeframe dropdown pick: a preset applies immediately, `Custom` opens
+    /// the popover.
+    ResultTimeframeChoice(u64, TimeframeChoice),
+    ResultTfMode(u64, TimeframeMode),
+    ResultTfRelAmount(u64, String),
+    ResultTfRelUnit(u64, TimeUnit),
+    ResultTfAbsFrom(u64, String),
+    ResultTfAbsTo(u64, String),
+    /// Apply the "Custom\u{2026}" popover's draft timeframe and re-run.
+    ResultTfApply(u64),
+    /// Dismiss the popover without changing the timeframe.
+    ResultTfCancel(u64),
     ResultFieldsLoaded {
         run_id: u64,
         result: Result<es::FieldCaps, String>,
@@ -549,6 +561,77 @@ impl LogLens {
                 if changed {
                     self.sync_saved_from_result(run_id);
                     return self.start_run(run_id);
+                }
+            }
+            Message::ResultTimeframeChoice(run_id, choice) => {
+                match choice.to_timeframe() {
+                    Some(timeframe) => {
+                        let changed = self
+                            .result_mut(run_id)
+                            .map(|rt| {
+                                rt.tf.open = false;
+                                let changed = rt.timeframe != timeframe;
+                                rt.timeframe = timeframe;
+                                changed
+                            })
+                            .unwrap_or(false);
+                        if changed {
+                            self.sync_saved_from_result(run_id);
+                            return self.start_run(run_id);
+                        }
+                    }
+                    None => {
+                        if let Some(rt) = self.result_mut(run_id) {
+                            let current = rt.timeframe.clone();
+                            rt.tf.seed(&current);
+                        }
+                    }
+                }
+            }
+            Message::ResultTfMode(run_id, mode) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.tf.mode = mode;
+                }
+            }
+            Message::ResultTfRelAmount(run_id, v) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.tf.rel_amount = v;
+                }
+            }
+            Message::ResultTfRelUnit(run_id, unit) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.tf.rel_unit = unit;
+                }
+            }
+            Message::ResultTfAbsFrom(run_id, v) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.tf.abs_from = v;
+                }
+            }
+            Message::ResultTfAbsTo(run_id, v) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.tf.abs_to = v;
+                }
+            }
+            Message::ResultTfApply(run_id) => {
+                let changed = self
+                    .result_mut(run_id)
+                    .map(|rt| {
+                        let timeframe = rt.tf.to_timeframe();
+                        rt.tf.open = false;
+                        let changed = rt.timeframe != timeframe;
+                        rt.timeframe = timeframe;
+                        changed
+                    })
+                    .unwrap_or(false);
+                if changed {
+                    self.sync_saved_from_result(run_id);
+                    return self.start_run(run_id);
+                }
+            }
+            Message::ResultTfCancel(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.tf.open = false;
                 }
             }
             Message::ResultFieldsLoaded { run_id, result } => {
@@ -1007,26 +1090,35 @@ impl LogLens {
         })
     }
 
-    /// Writes a Result Tab's live query string / Column / sort choices back onto
-    /// its Saved Search and persists the config.
+    /// Writes a Result Tab's live query string / timeframe / Column / sort
+    /// choices back onto its Saved Search and persists the config.
     fn sync_saved_from_result(&mut self, run_id: u64) {
-        let Some((conn_id, saved_id, query_string, columns, sort_field, sort_desc)) =
-            self.result_mut(run_id).map(|rt| {
-                (
-                    rt.connection_id.clone(),
-                    rt.saved_id.clone(),
-                    rt.query_string.clone(),
-                    rt.columns.clone(),
-                    rt.sort_field.clone(),
-                    rt.sort_desc,
-                )
-            })
+        let Some((
+            conn_id,
+            saved_id,
+            query_string,
+            timeframe,
+            columns,
+            sort_field,
+            sort_desc,
+        )) = self.result_mut(run_id).map(|rt| {
+            (
+                rt.connection_id.clone(),
+                rt.saved_id.clone(),
+                rt.query_string.clone(),
+                rt.timeframe.clone(),
+                rt.columns.clone(),
+                rt.sort_field.clone(),
+                rt.sort_desc,
+            )
+        })
         else {
             return;
         };
         if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id) {
             if let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id) {
                 saved.query_string = query_string;
+                saved.timeframe = timeframe;
                 saved.columns = columns;
                 saved.sort_field = sort_field;
                 saved.sort_desc = sort_desc;
@@ -1126,6 +1218,8 @@ impl LogLens {
                         rt.columns = saved.columns.clone();
                         rt.sort_field = saved.sort_field.clone();
                         rt.sort_desc = saved.sort_desc;
+                        rt.timeframe = saved.timeframe.clone();
+                        rt.tf = TimeframeDraft::from_timeframe(&saved.timeframe);
                         rt.gte = gte;
                         rt.lte = lte;
                         if let Some(caps) = caps {
@@ -1168,6 +1262,8 @@ impl LogLens {
             sort_desc: saved.sort_desc,
             all_fields,
             sortable_fields,
+            timeframe: saved.timeframe.clone(),
+            tf: TimeframeDraft::from_timeframe(&saved.timeframe),
             gte,
             lte,
             pit_id: None,
@@ -1219,6 +1315,10 @@ impl LogLens {
             rt.paging = Paging::Idle;
             rt.scroll_y = 0.0;
             rt.selected_hit = None;
+            // Re-resolve the range so a relative window re-anchors to "now".
+            let (gte, lte) = rt.timeframe.bounds();
+            rt.gte = gte;
+            rt.lte = lte;
             let old_pit = rt.pit_id.take();
             (rt.connection_id.clone(), rt.target.clone(), old_pit)
         }) else {
@@ -1664,9 +1764,9 @@ impl LogLens {
     }
 
     /// The Search bar shown above the tab strip while a Result Tab is active:
-    /// row 1 carries the Target, a Refresh control and the loaded-Hit count;
-    /// row 2 is the live Column + sort strip moved out of the Result Tab.
-    /// Hidden for Search form tabs and when no tab is open.
+    /// row 1 carries the query string, timeframe, Target, a Refresh control and
+    /// the loaded-Hit count; row 2 is the live Column + sort strip moved out of
+    /// the Result Tab. Hidden for Search form tabs and when no tab is open.
     fn search_bar(&self) -> Option<Element<'_, Message>> {
         let Some(Tab::Result(tab)) =
             self.active_tab.and_then(|t| self.open_tabs.get(t))
@@ -1674,6 +1774,18 @@ impl LogLens {
             return None;
         };
         let run_id = tab.run_id;
+
+        let selected = tab
+            .timeframe
+            .matches_preset()
+            .unwrap_or(TimeframeChoice::Custom);
+        let timeframe_ctl = pick_list(
+            &TimeframeChoice::ALL[..],
+            Some(selected),
+            move |choice| Message::ResultTimeframeChoice(run_id, choice),
+        )
+        .text_size(12.0)
+        .padding(4.0);
 
         let row1 = container(
             row![
@@ -1683,6 +1795,7 @@ impl LogLens {
                     .size(12.0)
                     .padding(4.0)
                     .width(Fill),
+                timeframe_ctl,
                 text(format!("\u{b7} {}", tab.target)).size(12.0).color(TEXT_DIM),
                 button(text("Refresh").size(12.0).color(TEXT_DIM))
                     .on_press(Message::RefreshResult(run_id))
@@ -1698,11 +1811,111 @@ impl LogLens {
         .padding(Padding::new(6.0).left(12.0).right(12.0));
 
         let mut col: Vec<Element<'_, Message>> = vec![row1.into()];
+        if tab.tf.open {
+            col.push(self.timeframe_popover(tab));
+        }
         if matches!(tab.state, RunState::Loaded | RunState::Empty) {
             col.push(rule::horizontal(1.0).into());
             col.push(self.result_columns_bar(tab));
         }
         Some(column(col).width(Fill).into())
+    }
+
+    /// The "Custom\u{2026}" timeframe popover: a relative or absolute window
+    /// editor that drops out of the Search bar until applied or dismissed.
+    fn timeframe_popover<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
+        let run_id = tab.run_id;
+        let tf = &tab.tf;
+
+        let modes = row![
+            radio(
+                "Relative",
+                TimeframeMode::Relative,
+                Some(tf.mode),
+                move |m| Message::ResultTfMode(run_id, m),
+            )
+            .size(14.0),
+            radio(
+                "Absolute",
+                TimeframeMode::Absolute,
+                Some(tf.mode),
+                move |m| Message::ResultTfMode(run_id, m),
+            )
+            .size(14.0),
+        ]
+        .spacing(16.0);
+
+        let detail: Element<'_, Message> = match tf.mode {
+            TimeframeMode::Relative => {
+                let units = row(TimeUnit::ALL.iter().map(move |&u| {
+                    radio(u.label(), u, Some(tf.rel_unit), move |u| {
+                        Message::ResultTfRelUnit(run_id, u)
+                    })
+                    .size(14.0)
+                    .into()
+                }))
+                .spacing(12.0);
+                row![
+                    text("Last").size(13.0).color(TEXT),
+                    text_input("15", &tf.rel_amount)
+                        .on_input(move |v| Message::ResultTfRelAmount(run_id, v))
+                        .on_submit(Message::ResultTfApply(run_id))
+                        .width(60.0)
+                        .padding(6.0),
+                    units,
+                ]
+                .spacing(10.0)
+                .align_y(iced::Alignment::Center)
+                .into()
+            }
+            TimeframeMode::Absolute => row![
+                column![
+                    field_label("From"),
+                    text_input("2026-08-28T09:00:00", &tf.abs_from)
+                        .on_input(move |v| Message::ResultTfAbsFrom(run_id, v))
+                        .padding(6.0),
+                ]
+                .spacing(4.0),
+                column![
+                    field_label("To"),
+                    text_input("2026-08-28T10:00:00", &tf.abs_to)
+                        .on_input(move |v| Message::ResultTfAbsTo(run_id, v))
+                        .padding(6.0),
+                ]
+                .spacing(4.0),
+            ]
+            .spacing(10.0)
+            .into(),
+        };
+
+        let actions = row![
+            space().width(Fill),
+            button(text("Cancel").size(12.0).color(TEXT_DIM))
+                .on_press(Message::ResultTfCancel(run_id))
+                .padding(Padding::new(4.0).left(12.0).right(12.0))
+                .style(style::bare_button()),
+            button(text("Apply").size(12.0).color(TEXT))
+                .on_press(Message::ResultTfApply(run_id))
+                .padding(Padding::new(4.0).left(14.0).right(14.0))
+                .style(style::picker_row(true)),
+        ]
+        .spacing(8.0);
+
+        container(
+            column![modes, detail, space().height(2.0), actions].spacing(8.0),
+        )
+        .style(|_| {
+            let mut s = style::panel(PANEL);
+            s.border = Border {
+                color: BORDER,
+                width: 1.0,
+                radius: 4.0.into(),
+            };
+            s
+        })
+        .width(Fill)
+        .padding(Padding::new(10.0).left(12.0).right(12.0))
+        .into()
     }
 
     // --- Search form view ----------------------------------------------

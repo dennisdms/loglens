@@ -1,14 +1,7 @@
 //! State for a Search form tab (compose / edit a Saved Search).
 
-use crate::config::{self, SavedSearch, TimeUnit, Timeframe};
+use crate::config::{self, SavedSearch, TimeUnit, Timeframe, TimeframeMode};
 use crate::es::FieldCaps;
-
-/// Which Timeframe kind the form's toggle has selected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TimeframeMode {
-    Relative,
-    Absolute,
-}
 
 /// Where the form's `_field_caps` lookup stands. On failure both the sort and
 /// Column pickers fall back to free-text entry.

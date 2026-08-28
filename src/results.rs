@@ -4,7 +4,68 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use iced::widget::text_editor;
 use serde_json::Value;
 
+use crate::config::{TimeUnit, Timeframe, TimeframeMode};
 use crate::es::Hit;
+
+/// Draft state for the Search bar's "Custom\u{2026}" timeframe popover: an
+/// editable relative (amount + unit) or absolute (from / to) window, applied
+/// back onto the Result Tab's [`Timeframe`] when the user confirms.
+pub struct TimeframeDraft {
+    /// Whether the popover is currently shown.
+    pub open: bool,
+    pub mode: TimeframeMode,
+    pub rel_amount: String,
+    pub rel_unit: TimeUnit,
+    pub abs_from: String,
+    pub abs_to: String,
+}
+
+impl TimeframeDraft {
+    /// A closed draft pre-filled to describe `tf`.
+    pub fn from_timeframe(tf: &Timeframe) -> Self {
+        let mut draft = Self {
+            open: false,
+            mode: TimeframeMode::Relative,
+            rel_amount: "15".to_string(),
+            rel_unit: TimeUnit::Minutes,
+            abs_from: String::new(),
+            abs_to: String::new(),
+        };
+        match tf {
+            Timeframe::Relative { amount, unit } => {
+                draft.mode = TimeframeMode::Relative;
+                draft.rel_amount = amount.to_string();
+                draft.rel_unit = *unit;
+            }
+            Timeframe::Absolute { from, to } => {
+                draft.mode = TimeframeMode::Absolute;
+                draft.abs_from = from.clone();
+                draft.abs_to = to.clone();
+            }
+        }
+        draft
+    }
+
+    /// Re-fills the draft from `tf` and opens the popover.
+    pub fn seed(&mut self, tf: &Timeframe) {
+        *self = Self::from_timeframe(tf);
+        self.open = true;
+    }
+
+    /// The Timeframe the draft currently describes.
+    pub fn to_timeframe(&self) -> Timeframe {
+        match self.mode {
+            TimeframeMode::Relative => Timeframe::Relative {
+                amount: self.rel_amount.trim().parse().unwrap_or(15),
+                unit: self.rel_unit,
+            },
+            TimeframeMode::Absolute => Timeframe::Absolute {
+                from: self.abs_from.trim().to_string(),
+                to: self.abs_to.trim().to_string(),
+            },
+        }
+    }
+}
 
 /// Default height of the Hit detail panel, in pixels.
 pub const DETAIL_DEFAULT_H: f32 = 240.0;
@@ -71,6 +132,11 @@ pub struct ResultTab {
     /// (or if it failed — the pickers then fall back to free text).
     pub all_fields: Vec<String>,
     pub sortable_fields: Vec<String>,
+    /// The Timeframe this run covers. Its bounds are re-resolved into `gte` /
+    /// `lte` at the start of every run, so a relative window re-anchors to "now".
+    pub timeframe: Timeframe,
+    /// Draft state for the Search bar's "Custom\u{2026}" timeframe popover.
+    pub tf: TimeframeDraft,
     /// Range bounds frozen at the start of this run.
     pub gte: String,
     pub lte: String,

@@ -61,13 +61,68 @@ fn default_true() -> bool {
 }
 
 /// The time window a Saved Search restricts Hits to.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Timeframe {
     /// e.g. the last 15 minutes. Re-anchors to "now" on every run.
     Relative { amount: u64, unit: TimeUnit },
     /// A frozen start/end, as Elasticsearch date-math / ISO strings.
     Absolute { from: String, to: String },
+}
+
+/// Which Timeframe kind a timeframe editor's toggle has selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeframeMode {
+    Relative,
+    Absolute,
+}
+
+/// A Search bar timeframe quick-pick: one of a fixed set of relative presets, or
+/// `Custom` (which opens the popover for a bespoke relative / absolute window).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeframeChoice {
+    Preset { amount: u64, unit: TimeUnit },
+    Custom,
+}
+
+impl TimeframeChoice {
+    /// Every entry the Search bar's timeframe dropdown offers, in order.
+    pub const ALL: [TimeframeChoice; 7] = [
+        TimeframeChoice::Preset { amount: 5, unit: TimeUnit::Minutes },
+        TimeframeChoice::Preset { amount: 15, unit: TimeUnit::Minutes },
+        TimeframeChoice::Preset { amount: 1, unit: TimeUnit::Hours },
+        TimeframeChoice::Preset { amount: 6, unit: TimeUnit::Hours },
+        TimeframeChoice::Preset { amount: 24, unit: TimeUnit::Hours },
+        TimeframeChoice::Preset { amount: 7, unit: TimeUnit::Days },
+        TimeframeChoice::Custom,
+    ];
+
+    /// The Timeframe a preset stands for; `None` for `Custom`.
+    pub fn to_timeframe(self) -> Option<Timeframe> {
+        match self {
+            TimeframeChoice::Preset { amount, unit } => {
+                Some(Timeframe::Relative { amount, unit })
+            }
+            TimeframeChoice::Custom => None,
+        }
+    }
+}
+
+impl std::fmt::Display for TimeframeChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TimeframeChoice::Preset { amount, unit } => {
+                let unit = match unit {
+                    TimeUnit::Minutes => "minute",
+                    TimeUnit::Hours => "hour",
+                    TimeUnit::Days => "day",
+                };
+                let plural = if *amount == 1 { "" } else { "s" };
+                write!(f, "Last {amount} {unit}{plural}")
+            }
+            TimeframeChoice::Custom => write!(f, "Custom\u{2026}"),
+        }
+    }
 }
 
 impl Default for Timeframe {
@@ -89,6 +144,21 @@ impl Timeframe {
                 (format!("now-{amount}{}", unit.suffix()), "now".to_string())
             }
             Timeframe::Absolute { from, to } => (from.clone(), to.clone()),
+        }
+    }
+
+    /// The [`TimeframeChoice`] preset this Timeframe is exactly, if any — used to
+    /// show the Search bar dropdown's current selection.
+    pub fn matches_preset(&self) -> Option<TimeframeChoice> {
+        match self {
+            Timeframe::Relative { amount, unit } => {
+                let choice = TimeframeChoice::Preset {
+                    amount: *amount,
+                    unit: *unit,
+                };
+                TimeframeChoice::ALL.contains(&choice).then_some(choice)
+            }
+            Timeframe::Absolute { .. } => None,
         }
     }
 }
