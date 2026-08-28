@@ -28,6 +28,96 @@ pub struct Connection {
     pub auth: Auth,
     #[serde(default)]
     pub skip_tls_verify: bool,
+    #[serde(default)]
+    pub searches: Vec<SavedSearch>,
+}
+
+/// A persisted, named query belonging to one Connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedSearch {
+    pub id: String,
+    pub name: String,
+    /// Index, data stream, or pattern (e.g. `logs-*`).
+    pub target: String,
+    /// Lucene syntax, passed straight to `query_string`. Empty matches all.
+    pub query_string: String,
+    pub timeframe: Timeframe,
+    /// Timestamp field the Timeframe filters on.
+    #[serde(default = "default_timestamp_field")]
+    pub timestamp_field: String,
+    /// Fields projected into table columns.
+    #[serde(default = "default_columns")]
+    pub columns: Vec<String>,
+}
+
+/// The time window a Saved Search restricts Hits to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Timeframe {
+    /// e.g. the last 15 minutes. Re-anchors to "now" on every run.
+    Relative { amount: u64, unit: TimeUnit },
+    /// A frozen start/end, as Elasticsearch date-math / ISO strings.
+    Absolute { from: String, to: String },
+}
+
+impl Default for Timeframe {
+    fn default() -> Self {
+        Timeframe::Relative {
+            amount: 15,
+            unit: TimeUnit::Minutes,
+        }
+    }
+}
+
+impl Timeframe {
+    /// The `gte` / `lte` range bounds this Timeframe resolves to right now.
+    /// Relative frames yield Elasticsearch date-math (`now-15m` .. `now`), so
+    /// the cluster re-anchors them on every run.
+    pub fn bounds(&self) -> (String, String) {
+        match self {
+            Timeframe::Relative { amount, unit } => {
+                (format!("now-{amount}{}", unit.suffix()), "now".to_string())
+            }
+            Timeframe::Absolute { from, to } => (from.clone(), to.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeUnit {
+    Minutes,
+    Hours,
+    Days,
+}
+
+impl TimeUnit {
+    pub const ALL: [TimeUnit; 3] = [TimeUnit::Minutes, TimeUnit::Hours, TimeUnit::Days];
+
+    /// The Elasticsearch date-math suffix (`now-15m`).
+    pub fn suffix(self) -> char {
+        match self {
+            TimeUnit::Minutes => 'm',
+            TimeUnit::Hours => 'h',
+            TimeUnit::Days => 'd',
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TimeUnit::Minutes => "minutes",
+            TimeUnit::Hours => "hours",
+            TimeUnit::Days => "days",
+        }
+    }
+}
+
+pub fn default_timestamp_field() -> String {
+    "@timestamp".to_string()
+}
+
+pub fn default_columns() -> Vec<String> {
+    vec!["@timestamp".to_string(), "message".to_string()]
 }
 
 /// The auth scheme for a Connection. Carries no secret material.

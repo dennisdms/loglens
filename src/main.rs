@@ -1,7 +1,9 @@
 mod config;
 mod connection;
 mod es;
+mod results;
 mod sample;
+mod search;
 mod secrets;
 mod style;
 mod tab;
@@ -12,11 +14,14 @@ use iced::widget::{
     button, checkbox, column, container, radio, row, rule, scrollable, space,
     stack, text, text_editor, text_input,
 };
-use iced::{Border, Color, Element, Fill, Font, Padding, Task, Theme};
+use iced::{Border, Color, Element, Fill, Font, Length, Padding, Task, Theme};
 
-use config::{Config, Connection};
+use config::{Auth, Config, Connection};
 use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
+use results::{ResultTab, RunState};
 use sample::{LogFile, PickerNode};
+use search::{SearchForm, TimeframeMode};
+use config::TimeUnit;
 use style::{ACCENT, BG, BORDER, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
 use tab::Tab;
 
@@ -24,6 +29,9 @@ use tab::Tab;
 /// `expanded` set as sample-log folders. The control char keeps it from
 /// colliding with a real folder name.
 const ES_ROOT: &str = "\u{1}Elasticsearch";
+
+const OK_GREEN: Color = Color::from_rgb8(0x6c, 0xc0, 0x7a);
+const ERR_RED: Color = Color::from_rgb8(0xe0, 0x6c, 0x6c);
 
 pub fn main() -> iced::Result {
     iced::application(LogLens::new, LogLens::update, LogLens::view)
@@ -52,9 +60,11 @@ struct LogLens {
     secret_prompt: Option<SecretPrompt>,
     /// Transient status line (config save failures, keyring notices).
     status: Option<String>,
+    /// Source of stable ids for Search forms and Result Tabs.
+    id_seq: u64,
 }
 
-/// Asks the user for a Connection secret and retries what needed it.
+/// Asks the user for a Connection secret and resumes what needed it.
 struct SecretPrompt {
     connection_id: String,
     connection_name: String,
@@ -66,6 +76,7 @@ struct SecretPrompt {
 #[derive(Debug, Clone)]
 enum PendingAction {
     TestConnection,
+    RunSearch { run_id: u64 },
 }
 
 #[derive(Debug, Clone)]
@@ -92,8 +103,27 @@ enum Message {
     SecretPromptValue(String),
     SecretPromptSubmit,
     SecretPromptCancel,
+    // Search form
+    NewSearch(String),
+    OpenSavedSearch { connection: String, search: String },
+    SearchTargetsLoaded { form_id: u64, result: Result<Vec<String>, String> },
+    SearchName(String),
+    SearchTargetInput(String),
+    SearchTargetPicked(String),
+    SearchQuery(String),
+    SearchTimeframeMode(TimeframeMode),
+    SearchRelAmount(String),
+    SearchRelUnit(TimeUnit),
+    SearchAbsFrom(String),
+    SearchAbsTo(String),
+    SearchTimestampField(String),
+    SearchSave,
+    // Result tab run
+    PitOpened { run_id: u64, result: Result<String, String> },
+    PageLoaded { run_id: u64, result: Result<es::Page, String> },
     // Misc
     DismissStatus,
+    Ignore,
 }
 
 impl LogLens {
@@ -114,6 +144,7 @@ impl LogLens {
             connection_form: None,
             secret_prompt: None,
             status: None,
+            id_seq: 0,
         }
     }
 
@@ -121,10 +152,60 @@ impl LogLens {
         Theme::Dark
     }
 
+    fn next_id(&mut self) -> u64 {
+        self.id_seq += 1;
+        self.id_seq
+    }
+
     fn active_file(&self) -> Option<usize> {
         self.active_tab
             .and_then(|t| self.open_tabs.get(t))
             .and_then(Tab::file)
+    }
+
+    fn connection(&self, id: &str) -> Option<&Connection> {
+        self.config.connections.iter().find(|c| c.id == id)
+    }
+
+    /// Builds an [`es::Endpoint`] for a Connection, or `None` if its secret
+    /// isn't available this session (keyring missing, not yet re-entered).
+    fn endpoint_for(&self, conn: &Connection) -> Option<es::Endpoint> {
+        let auth = match &conn.auth {
+            Auth::None => es::AuthValue::None,
+            Auth::Basic { username } => es::AuthValue::Basic {
+                username: username.clone(),
+                password: secrets::get(&conn.id)?,
+            },
+            Auth::ApiKey => es::AuthValue::ApiKey {
+                key: secrets::get(&conn.id)?,
+            },
+        };
+        Some(es::Endpoint {
+            url: conn.url.clone(),
+            auth,
+            skip_tls_verify: conn.skip_tls_verify,
+        })
+    }
+
+    fn result_mut(&mut self, run_id: u64) -> Option<&mut ResultTab> {
+        self.open_tabs.iter_mut().find_map(|t| match t {
+            Tab::Result(rt) if rt.run_id == run_id => Some(rt.as_mut()),
+            _ => None,
+        })
+    }
+
+    fn form_mut(&mut self, form_id: u64) -> Option<&mut SearchForm> {
+        self.open_tabs.iter_mut().find_map(|t| match t {
+            Tab::SearchForm(f) if f.form_id == form_id => Some(f.as_mut()),
+            _ => None,
+        })
+    }
+
+    fn active_form_mut(&mut self) -> Option<&mut SearchForm> {
+        match self.active_tab.and_then(|t| self.open_tabs.get_mut(t)) {
+            Some(Tab::SearchForm(f)) => Some(f.as_mut()),
+            _ => None,
+        }
     }
 
     /// Rebuilds the editor buffer from whichever tab is now active.
@@ -156,21 +237,7 @@ impl LogLens {
                     self.reload_content();
                 }
             }
-            Message::CloseTab(tab) => {
-                if tab >= self.open_tabs.len() {
-                    return Task::none();
-                }
-                self.open_tabs.remove(tab);
-                self.active_tab = match self.active_tab {
-                    _ if self.open_tabs.is_empty() => None,
-                    Some(active) if active > tab => Some(active - 1),
-                    Some(active) if active == tab => {
-                        Some(tab.min(self.open_tabs.len() - 1))
-                    }
-                    other => other,
-                };
-                self.reload_content();
-            }
+            Message::CloseTab(tab) => return self.close_tab(tab),
             Message::ToggleFolder(name) => {
                 if !self.expanded.remove(&name) {
                     self.expanded.insert(name);
@@ -247,29 +314,170 @@ impl LogLens {
                 if let Some(prompt) = self.secret_prompt.take() {
                     secrets::remember_session(&prompt.connection_id, &prompt.value);
                     if let Some(f) = &mut self.connection_form {
-                        // Feed the answer back into the open form so the retry
-                        // and a later Save both see it.
                         f.secret = prompt.value.clone();
                     }
                     match prompt.then {
                         PendingAction::TestConnection => {
                             return self.start_connection_test();
                         }
+                        PendingAction::RunSearch { run_id } => {
+                            return self.start_run(run_id);
+                        }
                     }
                 }
             }
             Message::SecretPromptCancel => {
-                self.secret_prompt = None;
+                if let Some(prompt) = self.secret_prompt.take() {
+                    if let PendingAction::RunSearch { run_id } = prompt.then {
+                        if let Some(rt) = self.result_mut(run_id) {
+                            rt.state = RunState::Error(
+                                "Connection secret required to run this search"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
             }
 
+            Message::NewSearch(conn_id) => return self.open_search_form(conn_id),
+            Message::OpenSavedSearch { connection, search } => {
+                return self.open_result_tab(connection, search, None);
+            }
+            Message::SearchTargetsLoaded { form_id, result } => {
+                if let Some(f) = self.form_mut(form_id) {
+                    f.targets_loading = false;
+                    if let Ok(mut options) = result {
+                        options.sort();
+                        f.target_options = options;
+                    }
+                }
+            }
+            Message::SearchName(v) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.name = v;
+                    f.error = None;
+                }
+            }
+            Message::SearchTargetInput(v) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.target = v;
+                    f.error = None;
+                }
+            }
+            Message::SearchTargetPicked(v) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.target = v;
+                    f.error = None;
+                }
+            }
+            Message::SearchQuery(v) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.query_string = v;
+                }
+            }
+            Message::SearchTimeframeMode(mode) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.mode = mode;
+                }
+            }
+            Message::SearchRelAmount(v) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.rel_amount = v;
+                }
+            }
+            Message::SearchRelUnit(u) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.rel_unit = u;
+                }
+            }
+            Message::SearchAbsFrom(v) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.abs_from = v;
+                }
+            }
+            Message::SearchAbsTo(v) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.abs_to = v;
+                }
+            }
+            Message::SearchTimestampField(v) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.timestamp_field = v;
+                }
+            }
+            Message::SearchSave => return self.save_search_form(),
+
+            Message::PitOpened { run_id, result } => {
+                return self.on_pit_opened(run_id, result);
+            }
+            Message::PageLoaded { run_id, result } => match result {
+                Ok(page) => {
+                    if let Some(rt) = self.result_mut(run_id) {
+                        if let Some(pit) = page.pit_id {
+                            rt.pit_id = Some(pit);
+                        }
+                        rt.hits = page.hits;
+                        rt.state = if rt.hits.is_empty() {
+                            RunState::Empty
+                        } else {
+                            RunState::Loaded
+                        };
+                    }
+                }
+                Err(err) => {
+                    if let Some(rt) = self.result_mut(run_id) {
+                        rt.state = RunState::Error(err);
+                    }
+                }
+            },
+
             Message::DismissStatus => self.status = None,
+            Message::Ignore => {}
         }
 
         Task::none()
     }
 
-    /// Kicks off a `GET /` for the current Connection form, or opens a secret
-    /// prompt if the keyring can't supply the secret this session.
+    // --- Sample Logs / tabs ---------------------------------------------
+
+    fn close_tab(&mut self, tab: usize) -> Task<Message> {
+        if tab >= self.open_tabs.len() {
+            return Task::none();
+        }
+
+        // Release any server-side PIT this tab was holding.
+        let closing_pit = match &self.open_tabs[tab] {
+            Tab::Result(rt) => rt
+                .pit_id
+                .clone()
+                .map(|pit| (rt.connection_id.clone(), pit)),
+            _ => None,
+        };
+
+        self.open_tabs.remove(tab);
+        self.active_tab = match self.active_tab {
+            _ if self.open_tabs.is_empty() => None,
+            Some(active) if active > tab => Some(active - 1),
+            Some(active) if active == tab => Some(tab.min(self.open_tabs.len() - 1)),
+            other => other,
+        };
+        self.reload_content();
+
+        if let Some((conn_id, pit)) = closing_pit {
+            if let Some(conn) = self.connection(&conn_id) {
+                if let Some(endpoint) = self.endpoint_for(conn) {
+                    return Task::perform(
+                        es::close_pit(endpoint, pit),
+                        |_| Message::Ignore,
+                    );
+                }
+            }
+        }
+        Task::none()
+    }
+
+    // --- Connection form ----------------------------------------------
+
     fn start_connection_test(&mut self) -> Task<Message> {
         let Some(form) = &mut self.connection_form else {
             return Task::none();
@@ -284,13 +492,22 @@ impl LogLens {
                 Task::none()
             }
             Err(EndpointError::MissingSecret) => {
-                self.open_secret_prompt(PendingAction::TestConnection);
+                let id = form
+                    .editing_id
+                    .clone()
+                    .unwrap_or_else(|| "pending".to_string());
+                let name = non_empty(&form.name).unwrap_or("this connection").to_string();
+                self.secret_prompt = Some(SecretPrompt {
+                    connection_id: id,
+                    connection_name: name,
+                    value: String::new(),
+                    then: PendingAction::TestConnection,
+                });
                 Task::none()
             }
         }
     }
 
-    /// Validates and persists the Connection form, then closes it.
     fn save_connection_form(&mut self) -> Task<Message> {
         let Some(form) = &mut self.connection_form else {
             return Task::none();
@@ -305,10 +522,7 @@ impl LogLens {
         }
 
         let form = self.connection_form.take().unwrap();
-        let id = form
-            .editing_id
-            .clone()
-            .unwrap_or_else(config::new_id);
+        let id = form.editing_id.clone().unwrap_or_else(config::new_id);
 
         let connection = Connection {
             id: id.clone(),
@@ -316,10 +530,12 @@ impl LogLens {
             url: form.url.trim().to_string(),
             auth: form.auth(),
             skip_tls_verify: form.skip_tls_verify,
+            searches: self
+                .connection(&id)
+                .map(|c| c.searches.clone())
+                .unwrap_or_default(),
         };
 
-        // Persist the secret. A freshly typed secret is always stored; an
-        // untouched field on an edit leaves the existing secret alone.
         if form.auth_kind.needs_secret() && !form.secret.is_empty() {
             if secrets::set(&id, &form.secret) == secrets::Stored::Session {
                 self.status = Some(
@@ -343,25 +559,213 @@ impl LogLens {
         Task::none()
     }
 
-    fn open_secret_prompt(&mut self, then: PendingAction) {
-        let Some(form) = &self.connection_form else {
-            return;
+    // --- Search form -------------------------------------------------
+
+    fn open_search_form(&mut self, conn_id: String) -> Task<Message> {
+        let form_id = self.next_id();
+        let form = SearchForm::new(form_id, conn_id.clone());
+        self.open_tabs.push(Tab::SearchForm(Box::new(form)));
+        self.active_tab = Some(self.open_tabs.len() - 1);
+        self.expanded.insert(conn_id.clone());
+
+        match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
+            Some(endpoint) => Task::perform(
+                es::list_targets(endpoint),
+                move |result| Message::SearchTargetsLoaded { form_id, result },
+            ),
+            None => {
+                if let Some(f) = self.form_mut(form_id) {
+                    f.targets_loading = false;
+                }
+                Task::none()
+            }
+        }
+    }
+
+    fn save_search_form(&mut self) -> Task<Message> {
+        let Some(idx) = self.active_tab else {
+            return Task::none();
         };
-        let id = form
-            .editing_id
-            .clone()
-            .unwrap_or_else(|| "pending".to_string());
-        let name = if form.name.trim().is_empty() {
-            "this connection".to_string()
-        } else {
-            form.name.trim().to_string()
+        let Some(Tab::SearchForm(form)) = self.open_tabs.get(idx) else {
+            return Task::none();
         };
-        self.secret_prompt = Some(SecretPrompt {
-            connection_id: id,
-            connection_name: name,
-            value: String::new(),
-            then,
-        });
+
+        let saved = match form.to_saved() {
+            Ok(saved) => saved,
+            Err(err) => {
+                if let Some(f) = self.active_form_mut() {
+                    f.error = Some(err);
+                }
+                return Task::none();
+            }
+        };
+        let conn_id = form.connection_id.clone();
+
+        let Some(conn) = self
+            .config
+            .connections
+            .iter_mut()
+            .find(|c| c.id == conn_id)
+        else {
+            return Task::none();
+        };
+        match conn.searches.iter_mut().find(|s| s.id == saved.id) {
+            Some(existing) => *existing = saved.clone(),
+            None => conn.searches.push(saved.clone()),
+        }
+
+        if let Err(err) = config::save(&self.config) {
+            self.status = Some(format!("Could not save config: {err}"));
+        }
+        self.expanded.insert(conn_id.clone());
+
+        self.open_result_tab(conn_id, saved.id, Some(idx))
+    }
+
+    // --- Result tab / run -------------------------------------------
+
+    /// Opens (or focuses) the Result Tab for a Saved Search and starts its run.
+    /// `replace` is the index of a Search form tab to turn into this Result Tab.
+    fn open_result_tab(
+        &mut self,
+        conn_id: String,
+        saved_id: String,
+        replace: Option<usize>,
+    ) -> Task<Message> {
+        if let Some(existing) = self.open_tabs.iter().position(|t| {
+            matches!(t, Tab::Result(rt) if rt.saved_id == saved_id)
+        }) {
+            self.active_tab = Some(existing);
+            if let Some(form_idx) = replace {
+                if form_idx != existing {
+                    self.open_tabs.remove(form_idx);
+                }
+            }
+            self.active_tab = self.open_tabs.iter().position(|t| {
+                matches!(t, Tab::Result(rt) if rt.saved_id == saved_id)
+            });
+            return Task::none();
+        }
+
+        let Some(conn) = self.connection(&conn_id) else {
+            return Task::none();
+        };
+        let Some(saved) = conn.searches.iter().find(|s| s.id == saved_id).cloned()
+        else {
+            return Task::none();
+        };
+
+        let run_id = self.next_id();
+        let (gte, lte) = saved.timeframe.bounds();
+        let tab = ResultTab {
+            run_id,
+            connection_id: conn_id,
+            saved_id,
+            saved_name: saved.name.clone(),
+            target: saved.target.clone(),
+            query_string: saved.query_string.clone(),
+            timestamp_field: saved.timestamp_field.clone(),
+            columns: saved.columns.clone(),
+            sort_field: config::default_timestamp_field(),
+            sort_desc: true,
+            gte,
+            lte,
+            pit_id: None,
+            hits: Vec::new(),
+            state: RunState::Loading,
+            utc: self.config.utc_timestamps,
+        };
+
+        match replace {
+            Some(i) if i < self.open_tabs.len() => {
+                self.open_tabs[i] = Tab::Result(Box::new(tab));
+                self.active_tab = Some(i);
+            }
+            _ => {
+                self.open_tabs.push(Tab::Result(Box::new(tab)));
+                self.active_tab = Some(self.open_tabs.len() - 1);
+            }
+        }
+
+        self.start_run(run_id)
+    }
+
+    /// Freshens the range, opens a PIT, and (on success) fetches the first Page.
+    fn start_run(&mut self, run_id: u64) -> Task<Message> {
+        let Some((conn_id, target)) = self.result_mut(run_id).map(|rt| {
+            rt.state = RunState::Loading;
+            rt.hits.clear();
+            rt.pit_id = None;
+            (rt.connection_id.clone(), rt.target.clone())
+        }) else {
+            return Task::none();
+        };
+
+        let Some(conn) = self.connection(&conn_id) else {
+            return Task::none();
+        };
+        match self.endpoint_for(conn) {
+            Some(endpoint) => Task::perform(
+                es::open_pit(endpoint, target),
+                move |result| Message::PitOpened { run_id, result },
+            ),
+            None => {
+                let name = conn.name.clone();
+                self.secret_prompt = Some(SecretPrompt {
+                    connection_id: conn_id,
+                    connection_name: name,
+                    value: String::new(),
+                    then: PendingAction::RunSearch { run_id },
+                });
+                Task::none()
+            }
+        }
+    }
+
+    fn on_pit_opened(
+        &mut self,
+        run_id: u64,
+        result: Result<String, String>,
+    ) -> Task<Message> {
+        let pit = match result {
+            Ok(pit) => pit,
+            Err(err) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.state = RunState::Error(err);
+                }
+                return Task::none();
+            }
+        };
+
+        let Some((conn_id, params)) = self.result_mut(run_id).map(|rt| {
+            rt.pit_id = Some(pit.clone());
+            (
+                rt.connection_id.clone(),
+                es::SearchParams {
+                    query_string: rt.query_string.clone(),
+                    timestamp_field: rt.timestamp_field.clone(),
+                    gte: rt.gte.clone(),
+                    lte: rt.lte.clone(),
+                    sort_field: rt.sort_field.clone(),
+                    sort_desc: rt.sort_desc,
+                    size: 1000,
+                    search_after: None,
+                },
+            )
+        }) else {
+            return Task::none();
+        };
+
+        let Some(conn) = self.connection(&conn_id) else {
+            return Task::none();
+        };
+        let Some(endpoint) = self.endpoint_for(conn) else {
+            return Task::none();
+        };
+        Task::perform(
+            es::search(endpoint, pit, params),
+            move |result| Message::PageLoaded { run_id, result },
+        )
     }
 
     // --- View --------------------------------------------------------------
@@ -373,9 +777,7 @@ impl LogLens {
             column![
                 self.tab_bar(),
                 rule::horizontal(1.0),
-                self.toolbar(),
-                rule::horizontal(1.0),
-                self.log_view(),
+                self.main_area(),
             ]
             .width(Fill),
         ]
@@ -402,6 +804,21 @@ impl LogLens {
             layers.pop().unwrap()
         } else {
             stack(layers).width(Fill).height(Fill).into()
+        }
+    }
+
+    fn main_area(&self) -> Element<'_, Message> {
+        match self.active_tab.and_then(|t| self.open_tabs.get(t)) {
+            Some(Tab::SearchForm(form)) => self.search_form_view(form),
+            Some(Tab::Result(tab)) => self.result_view(tab),
+            _ => column![
+                self.toolbar(),
+                rule::horizontal(1.0),
+                self.log_view(),
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into(),
         }
     }
 
@@ -480,13 +897,64 @@ impl LogLens {
                 );
             } else {
                 for conn in &self.config.connections {
+                    rows.push(self.connection_node(conn));
+                }
+            }
+        }
+        column(rows).spacing(1.0).width(Fill).into()
+    }
+
+    fn connection_node<'a>(&'a self, conn: &'a Connection) -> Element<'a, Message> {
+        let open = self.expanded.contains(&conn.id);
+        let marker = if open { "\u{25be}" } else { "\u{25b8}" };
+
+        let header = row![
+            button(
+                row![
+                    text(marker).size(11.0).color(TEXT_DIM),
+                    text(conn.name.clone()).size(13.0),
+                ]
+                .spacing(6.0),
+            )
+            .on_press(Message::ToggleFolder(conn.id.clone()))
+            .width(Fill)
+            .padding(Padding::new(4.0).left(20.0).right(4.0))
+            .style(style::picker_row(false)),
+            button(text("\u{ff0b}").size(12.0).color(TEXT_DIM))
+                .on_press(Message::NewSearch(conn.id.clone()))
+                .padding(Padding::new(4.0).left(6.0).right(6.0))
+                .style(style::bare_button()),
+        ]
+        .align_y(iced::Alignment::Center);
+
+        let mut rows: Vec<Element<'a, Message>> = vec![header.into()];
+        if open {
+            if conn.searches.is_empty() {
+                rows.push(
+                    container(
+                        text("No saved searches — click ＋")
+                            .size(11.0)
+                            .color(TEXT_DIM),
+                    )
+                    .padding(Padding::new(3.0).left(40.0))
+                    .into(),
+                );
+            } else {
+                for saved in &conn.searches {
+                    let active = matches!(
+                        self.active_tab.and_then(|t| self.open_tabs.get(t)),
+                        Some(Tab::Result(rt)) if rt.saved_id == saved.id
+                    );
                     rows.push(
-                        container(
-                            text(conn.name.clone()).size(13.0).color(TEXT),
-                        )
-                        .width(Fill)
-                        .padding(Padding::new(4.0).left(26.0).right(4.0))
-                        .into(),
+                        button(text(saved.name.clone()).size(13.0))
+                            .on_press(Message::OpenSavedSearch {
+                                connection: conn.id.clone(),
+                                search: saved.id.clone(),
+                            })
+                            .width(Fill)
+                            .padding(Padding::new(4.0).left(40.0).right(4.0))
+                            .style(style::picker_row(active))
+                            .into(),
                     );
                 }
             }
@@ -545,9 +1013,7 @@ impl LogLens {
 
         let tabs = self.open_tabs.iter().enumerate().map(|(i, tab)| -> Element<'_, Message> {
             let active = self.active_tab == Some(i);
-            let name = match tab {
-                Tab::File { file } => self.files[*file].name.clone(),
-            };
+            let name = tab.title(&self.files);
 
             container(
                 row![
@@ -613,7 +1079,7 @@ impl LogLens {
     fn log_view(&self) -> Element<'_, Message> {
         if self.active_file().is_none() {
             return container(
-                text("Open a file from the picker to view logs")
+                text("Open a file or Saved Search from the picker")
                     .size(14.0)
                     .color(TEXT_DIM),
             )
@@ -637,7 +1103,265 @@ impl LogLens {
         .into()
     }
 
-    // --- Connection form modal -------------------------------------------
+    // --- Search form view ----------------------------------------------
+
+    fn search_form_view<'a>(&'a self, form: &'a SearchForm) -> Element<'a, Message> {
+        let cancel_idx = self.active_tab.unwrap_or(0);
+        let conn_name = self
+            .connection(&form.connection_id)
+            .map(|c| c.name.clone())
+            .unwrap_or_default();
+
+        let mut col = column![
+            text(if form.saved_id.is_some() {
+                "Edit Search"
+            } else {
+                "New Search"
+            })
+            .size(16.0)
+            .color(TEXT),
+            text(format!("on {conn_name}")).size(12.0).color(TEXT_DIM),
+            space().height(6.0),
+            field_label("Name"),
+            text_input("checkout-errors", &form.name)
+                .on_input(Message::SearchName)
+                .padding(6.0),
+            field_label("Target — index, data stream, or pattern"),
+            text_input("logs-*", &form.target)
+                .on_input(Message::SearchTargetInput)
+                .padding(6.0),
+        ]
+        .spacing(6.0)
+        .max_width(560.0);
+
+        if form.targets_loading {
+            col = col.push(text("Loading indices\u{2026}").size(11.0).color(TEXT_DIM));
+        } else {
+            let matches = form.target_matches();
+            if !matches.is_empty() {
+                let mut opts = column![].spacing(1.0);
+                for name in matches {
+                    opts = opts.push(
+                        button(text(name.clone()).size(12.0))
+                            .on_press(Message::SearchTargetPicked(name.clone()))
+                            .width(Fill)
+                            .padding(Padding::new(3.0).left(8.0))
+                            .style(style::picker_row(false)),
+                    );
+                }
+                col = col.push(
+                    container(opts)
+                        .max_width(560.0)
+                        .style(|_| style::panel(PANEL)),
+                );
+            }
+        }
+
+        col = col.push(field_label("Query string (Lucene) — empty matches all"));
+        col = col.push(
+            text_input("level:ERROR AND service:checkout", &form.query_string)
+                .on_input(Message::SearchQuery)
+                .padding(6.0),
+        );
+
+        col = col.push(field_label("Timeframe"));
+        col = col.push(
+            row![
+                radio(
+                    "Relative",
+                    TimeframeMode::Relative,
+                    Some(form.mode),
+                    Message::SearchTimeframeMode,
+                )
+                .size(14.0),
+                radio(
+                    "Absolute",
+                    TimeframeMode::Absolute,
+                    Some(form.mode),
+                    Message::SearchTimeframeMode,
+                )
+                .size(14.0),
+            ]
+            .spacing(16.0),
+        );
+
+        match form.mode {
+            TimeframeMode::Relative => {
+                let units = row(TimeUnit::ALL.iter().map(|&u| {
+                    radio(u.label(), u, Some(form.rel_unit), Message::SearchRelUnit)
+                        .size(14.0)
+                        .into()
+                }))
+                .spacing(12.0);
+                col = col.push(
+                    row![
+                        text("Last").size(13.0).color(TEXT),
+                        text_input("15", &form.rel_amount)
+                            .on_input(Message::SearchRelAmount)
+                            .width(60.0)
+                            .padding(6.0),
+                        units,
+                    ]
+                    .spacing(10.0)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+            TimeframeMode::Absolute => {
+                col = col.push(
+                    row![
+                        column![
+                            field_label("From"),
+                            text_input("2026-08-28T09:00:00", &form.abs_from)
+                                .on_input(Message::SearchAbsFrom)
+                                .padding(6.0),
+                        ]
+                        .spacing(4.0),
+                        column![
+                            field_label("To"),
+                            text_input("2026-08-28T10:00:00", &form.abs_to)
+                                .on_input(Message::SearchAbsTo)
+                                .padding(6.0),
+                        ]
+                        .spacing(4.0),
+                    ]
+                    .spacing(10.0),
+                );
+            }
+        }
+
+        col = col.push(field_label("Timestamp field"));
+        col = col.push(
+            text_input("@timestamp", &form.timestamp_field)
+                .on_input(Message::SearchTimestampField)
+                .padding(6.0),
+        );
+        col = col.push(
+            text("Sort: @timestamp descending")
+                .size(11.0)
+                .color(TEXT_DIM),
+        );
+
+        if let Some(err) = &form.error {
+            col = col.push(text(err.clone()).size(12.0).color(ERR_RED));
+        }
+
+        col = col.push(space().height(10.0));
+        col = col.push(
+            row![
+                button(text("Save & Run").size(13.0).color(TEXT))
+                    .on_press(Message::SearchSave)
+                    .padding(Padding::new(6.0).left(16.0).right(16.0))
+                    .style(style::picker_row(true)),
+                button(text("Cancel").size(13.0).color(TEXT_DIM))
+                    .on_press(Message::CloseTab(cancel_idx))
+                    .padding(Padding::new(6.0).left(14.0).right(14.0))
+                    .style(style::bare_button()),
+            ]
+            .spacing(8.0),
+        );
+
+        container(scrollable(col.padding(Padding::new(0.0).right(12.0))).height(Fill))
+            .style(|_| style::panel(BG))
+            .width(Fill)
+            .height(Fill)
+            .padding(16.0)
+            .into()
+    }
+
+    // --- Result tab view ---------------------------------------------
+
+    fn result_view<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
+        let bar = container(
+            row![
+                text(tab.saved_name.clone()).size(12.0).color(TEXT),
+                text(format!("\u{b7} {}", tab.target)).size(12.0).color(TEXT_DIM),
+                space().width(Fill),
+                meta(&format!("{} hits", tab.hits.len())),
+            ]
+            .spacing(12.0)
+            .align_y(iced::Alignment::Center),
+        )
+        .style(|_| style::panel(PANEL))
+        .width(Fill)
+        .padding(Padding::new(6.0).left(12.0).right(12.0));
+
+        let body: Element<'_, Message> = match &tab.state {
+            RunState::Loading => centered("Running\u{2026}", TEXT_DIM),
+            RunState::Empty => {
+                centered("No hits for this query and timeframe", TEXT_DIM)
+            }
+            RunState::Error(err) => container(
+                container(text(err.clone()).size(13.0).color(ERR_RED))
+                    .style(|_| {
+                        let mut s = style::panel(PANEL_ALT);
+                        s.border = Border {
+                            color: ERR_RED,
+                            width: 1.0,
+                            radius: 3.0.into(),
+                        };
+                        s
+                    })
+                    .padding(12.0)
+                    .width(Fill),
+            )
+            .padding(12.0)
+            .width(Fill)
+            .into(),
+            RunState::Loaded => self.hit_table(tab),
+        };
+
+        column![bar, rule::horizontal(1.0), body]
+            .width(Fill)
+            .height(Fill)
+            .into()
+    }
+
+    fn hit_table<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
+        let header = row(tab.columns.iter().map(|col| -> Element<'_, Message> {
+            container(text(col.clone()).size(12.0).color(TEXT_DIM))
+                .width(col_width(col, &tab.timestamp_field))
+                .padding(Padding::new(4.0).left(6.0))
+                .into()
+        }))
+        .spacing(8.0);
+
+        let rows = column(tab.hits.iter().map(|hit| -> Element<'_, Message> {
+            container(
+                row(tab.columns.iter().map(|col| -> Element<'_, Message> {
+                    let value =
+                        results::cell(&hit.source, col, &tab.timestamp_field, tab.utc);
+                    container(
+                        text(value)
+                            .size(12.0)
+                            .font(Font::MONOSPACE)
+                            .wrapping(text::Wrapping::None),
+                    )
+                    .width(col_width(col, &tab.timestamp_field))
+                    .padding(Padding::new(3.0).left(6.0))
+                    .clip(true)
+                    .into()
+                }))
+                .spacing(8.0),
+            )
+            .width(Fill)
+            .into()
+        }))
+        .spacing(0.0);
+
+        column![
+            container(header)
+                .style(|_| style::panel(PANEL_ALT))
+                .width(Fill)
+                .padding(Padding::new(2.0).left(6.0)),
+            rule::horizontal(1.0),
+            scrollable(rows).width(Fill).height(Fill),
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into()
+    }
+
+    // --- Modals ------------------------------------------------------
 
     fn connection_form_modal<'a>(
         &'a self,
@@ -708,7 +1432,6 @@ impl LogLens {
                 .into(),
         );
 
-        // Test row + result.
         fields.push(space().height(4.0).into());
         fields.push(
             row![
@@ -724,7 +1447,7 @@ impl LogLens {
         );
 
         if let Some(err) = &form.error {
-            fields.push(text(err.clone()).size(12.0).color(Color::from_rgb8(0xe0, 0x6c, 0x6c)).into());
+            fields.push(text(err.clone()).size(12.0).color(ERR_RED).into());
         }
 
         fields.push(space().height(8.0).into());
@@ -798,35 +1521,50 @@ fn field_label<'a>(label: &'a str) -> Element<'a, Message> {
     text(label).size(12.0).color(TEXT_DIM).into()
 }
 
+fn centered<'a>(label: &'a str, color: Color) -> Element<'a, Message> {
+    container(text(label.to_string()).size(14.0).color(color))
+        .center_x(Fill)
+        .center_y(Fill)
+        .width(Fill)
+        .height(Fill)
+        .into()
+}
+
+fn col_width(col: &str, timestamp_field: &str) -> Length {
+    if col == timestamp_field {
+        Length::Fixed(210.0)
+    } else {
+        Length::Fill
+    }
+}
+
+fn non_empty(s: &str) -> Option<&str> {
+    let t = s.trim();
+    (!t.is_empty()).then_some(t)
+}
+
 fn test_result(state: &TestState) -> Element<'_, Message> {
     match state {
         TestState::Idle => space().width(0.0).into(),
         TestState::Running => text("Testing\u{2026}").size(12.0).color(TEXT_DIM).into(),
-        TestState::Ok(msg) => text(format!("\u{2713} {msg}"))
-            .size(12.0)
-            .color(Color::from_rgb8(0x6c, 0xc0, 0x7a))
-            .into(),
-        TestState::Failed(err) => text(format!("\u{2717} {err}"))
-            .size(12.0)
-            .color(Color::from_rgb8(0xe0, 0x6c, 0x6c))
-            .into(),
+        TestState::Ok(msg) => text(format!("\u{2713} {msg}")).size(12.0).color(OK_GREEN).into(),
+        TestState::Failed(err) => {
+            text(format!("\u{2717} {err}")).size(12.0).color(ERR_RED).into()
+        }
     }
 }
 
 /// Centres `content` in a panel card over a dimmed backdrop.
 fn modal_card<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
-    let card = container(content)
-        .width(460.0)
-        .padding(20.0)
-        .style(|_| {
-            let mut s = style::panel(PANEL);
-            s.border = Border {
-                color: BORDER,
-                width: 1.0,
-                radius: 4.0.into(),
-            };
-            s
-        });
+    let card = container(content).width(460.0).padding(20.0).style(|_| {
+        let mut s = style::panel(PANEL);
+        s.border = Border {
+            color: BORDER,
+            width: 1.0,
+            radius: 4.0.into(),
+        };
+        s
+    });
 
     container(card)
         .width(Fill)

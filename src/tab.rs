@@ -1,16 +1,16 @@
 //! The main area's open tabs.
-//!
-//! Tabs used to be a bare `Vec<usize>` of file indices. They are now a list of
-//! typed [`Tab`] values so that Search forms and Result Tabs can sit alongside
-//! Sample Log files as the Elasticsearch feature lands.
+
+use crate::results::ResultTab;
+use crate::search::SearchForm;
 
 /// One open tab in the main area.
 pub enum Tab {
     /// A Sample Log file, identified by its index into `LogLens::files`.
     File { file: usize },
-    // Room for the Elasticsearch feature:
-    // SearchForm { .. } — a Saved Search being composed
-    // Result { .. }     — the Hits from a run
+    /// A Saved Search being composed or edited.
+    SearchForm(Box<SearchForm>),
+    /// The Hits from a run of one Saved Search.
+    Result(Box<ResultTab>),
 }
 
 impl Tab {
@@ -18,6 +18,22 @@ impl Tab {
     pub fn file(&self) -> Option<usize> {
         match self {
             Tab::File { file } => Some(*file),
+            _ => None,
+        }
+    }
+
+    /// The label shown on the tab strip.
+    pub fn title(&self, files: &[crate::sample::LogFile]) -> String {
+        match self {
+            Tab::File { file } => files[*file].name.clone(),
+            Tab::SearchForm(form) => {
+                if form.name.trim().is_empty() {
+                    "New Search".to_string()
+                } else {
+                    form.name.clone()
+                }
+            }
+            Tab::Result(tab) => tab.saved_name.clone(),
         }
     }
 }
