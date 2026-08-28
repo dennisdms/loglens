@@ -1,5 +1,6 @@
 mod sample;
 mod style;
+mod tab;
 
 use std::collections::HashSet;
 
@@ -10,6 +11,7 @@ use iced::{Border, Element, Fill, Font, Padding, Theme};
 
 use sample::{LogFile, PickerNode};
 use style::{ACCENT, BG, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
+use tab::Tab;
 
 pub fn main() -> iced::Result {
     iced::application(LogLens::new, LogLens::update, LogLens::view)
@@ -24,8 +26,8 @@ pub fn main() -> iced::Result {
 struct LogLens {
     files: Vec<LogFile>,
     tree: Vec<PickerNode>,
-    /// File indices, in tab order.
-    open_tabs: Vec<usize>,
+    /// Open tabs, in tab order.
+    open_tabs: Vec<Tab>,
     /// Index into `open_tabs`.
     active_tab: Option<usize>,
     expanded: HashSet<String>,
@@ -52,7 +54,7 @@ impl LogLens {
             content: text_editor::Content::with_text(&file_text(&files[0])),
             files,
             tree,
-            open_tabs: vec![0],
+            open_tabs: vec![Tab::File { file: 0 }],
             active_tab: Some(0),
             expanded,
         }
@@ -63,7 +65,9 @@ impl LogLens {
     }
 
     fn active_file(&self) -> Option<usize> {
-        self.active_tab.and_then(|t| self.open_tabs.get(t)).copied()
+        self.active_tab
+            .and_then(|t| self.open_tabs.get(t))
+            .and_then(Tab::file)
     }
 
     /// Rebuilds the editor buffer from whichever tab is now active.
@@ -81,9 +85,9 @@ impl LogLens {
                 let tab = self
                     .open_tabs
                     .iter()
-                    .position(|&f| f == file)
+                    .position(|t| t.file() == Some(file))
                     .unwrap_or_else(|| {
-                        self.open_tabs.push(file);
+                        self.open_tabs.push(Tab::File { file });
                         self.open_tabs.len() - 1
                     });
                 self.active_tab = Some(tab);
@@ -212,9 +216,11 @@ impl LogLens {
                 .into();
         }
 
-        let tabs = self.open_tabs.iter().enumerate().map(|(i, &file)| -> Element<'_, Message> {
+        let tabs = self.open_tabs.iter().enumerate().map(|(i, tab)| -> Element<'_, Message> {
             let active = self.active_tab == Some(i);
-            let name = self.files[file].name.clone();
+            let name = match tab {
+                Tab::File { file } => self.files[*file].name.clone(),
+            };
 
             container(
                 row![
