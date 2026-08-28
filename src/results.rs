@@ -221,8 +221,8 @@ impl ResultTab {
         let Some(hit) = self.hits.get(index) else {
             return;
         };
-        let json = serde_json::to_string_pretty(&hit.source)
-            .unwrap_or_else(|_| hit.source.to_string());
+        let json =
+            serde_json::to_string_pretty(&hit.source).unwrap_or_else(|_| hit.source.to_string());
         self.detail_content = text_editor::Content::with_text(&json);
         self.selected_hit = Some(index);
     }

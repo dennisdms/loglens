@@ -88,21 +88,37 @@ pub enum TimeframeChoice {
 impl TimeframeChoice {
     /// Every entry the Search bar's timeframe dropdown offers, in order.
     pub const ALL: [TimeframeChoice; 7] = [
-        TimeframeChoice::Preset { amount: 5, unit: TimeUnit::Minutes },
-        TimeframeChoice::Preset { amount: 15, unit: TimeUnit::Minutes },
-        TimeframeChoice::Preset { amount: 1, unit: TimeUnit::Hours },
-        TimeframeChoice::Preset { amount: 6, unit: TimeUnit::Hours },
-        TimeframeChoice::Preset { amount: 24, unit: TimeUnit::Hours },
-        TimeframeChoice::Preset { amount: 7, unit: TimeUnit::Days },
+        TimeframeChoice::Preset {
+            amount: 5,
+            unit: TimeUnit::Minutes,
+        },
+        TimeframeChoice::Preset {
+            amount: 15,
+            unit: TimeUnit::Minutes,
+        },
+        TimeframeChoice::Preset {
+            amount: 1,
+            unit: TimeUnit::Hours,
+        },
+        TimeframeChoice::Preset {
+            amount: 6,
+            unit: TimeUnit::Hours,
+        },
+        TimeframeChoice::Preset {
+            amount: 24,
+            unit: TimeUnit::Hours,
+        },
+        TimeframeChoice::Preset {
+            amount: 7,
+            unit: TimeUnit::Days,
+        },
         TimeframeChoice::Custom,
     ];
 
     /// The Timeframe a preset stands for; `None` for `Custom`.
     pub fn to_timeframe(self) -> Option<Timeframe> {
         match self {
-            TimeframeChoice::Preset { amount, unit } => {
-                Some(Timeframe::Relative { amount, unit })
-            }
+            TimeframeChoice::Preset { amount, unit } => Some(Timeframe::Relative { amount, unit }),
             TimeframeChoice::Custom => None,
         }
     }

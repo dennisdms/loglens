@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Everything needed to make one authenticated request to a cluster.
 #[derive(Debug, Clone)]
@@ -40,15 +40,10 @@ fn client(endpoint: &Endpoint) -> Result<reqwest::Client, String> {
     builder.build().map_err(|e| e.to_string())
 }
 
-fn with_auth(
-    request: reqwest::RequestBuilder,
-    auth: &AuthValue,
-) -> reqwest::RequestBuilder {
+fn with_auth(request: reqwest::RequestBuilder, auth: &AuthValue) -> reqwest::RequestBuilder {
     match auth {
         AuthValue::None => request,
-        AuthValue::Basic { username, password } => {
-            request.basic_auth(username, Some(password))
-        }
+        AuthValue::Basic { username, password } => request.basic_auth(username, Some(password)),
         AuthValue::ApiKey { key } => {
             request.header(reqwest::header::AUTHORIZATION, format!("ApiKey {key}"))
         }
@@ -282,10 +277,13 @@ pub async fn open_pit(endpoint: Endpoint, target: String) -> Result<String, Stri
 pub async fn close_pit(endpoint: Endpoint, pit_id: String) -> Result<(), String> {
     let client = client(&endpoint)?;
     let url = format!("{}/_pit", base(&endpoint.url));
-    with_auth(client.delete(&url).json(&json!({ "id": pit_id })), &endpoint.auth)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    with_auth(
+        client.delete(&url).json(&json!({ "id": pit_id })),
+        &endpoint.auth,
+    )
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 

@@ -64,11 +64,7 @@ impl SearchForm {
     }
 
     /// A form pre-filled from an existing Saved Search, for the edit modal.
-    pub fn from_saved(
-        form_id: u64,
-        connection_id: String,
-        saved: &SavedSearch,
-    ) -> Self {
+    pub fn from_saved(form_id: u64, connection_id: String, saved: &SavedSearch) -> Self {
         let mut form = Self::new(form_id, connection_id);
         form.saved_id = Some(saved.id.clone());
         form.name = saved.name.clone();
@@ -84,8 +80,7 @@ impl SearchForm {
         self.target_options
             .iter()
             .filter(|opt| {
-                needle.is_empty()
-                    || (opt.to_lowercase().contains(&needle) && *opt != &self.target)
+                needle.is_empty() || (opt.to_lowercase().contains(&needle) && *opt != &self.target)
             })
             .take(8)
             .collect()

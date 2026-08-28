@@ -10,19 +10,16 @@ mod tab;
 use std::collections::HashSet;
 
 use iced::widget::{
-    button, checkbox, column, container, mouse_area, pick_list, radio, row, rule,
-    scrollable, space, stack, text, text_editor, text_input,
+    button, checkbox, column, container, mouse_area, pick_list, radio, row, rule, scrollable,
+    space, stack, text, text_editor, text_input,
 };
-use iced::{
-    Border, Color, Element, Fill, Font, Length, Padding, Point, Subscription, Task,
-    Theme,
-};
+use iced::{Border, Color, Element, Fill, Font, Length, Padding, Point, Subscription, Task, Theme};
 
 use config::{Auth, Config, Connection};
-use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
-use results::{Paging, ResultTab, RunState, TimeframeDraft, RETENTION_CAP, ROW_H};
-use search::{Fields, SearchForm};
 use config::{TimeUnit, TimeframeChoice, TimeframeMode};
+use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
+use results::{Paging, RETENTION_CAP, ROW_H, ResultTab, RunState, TimeframeDraft};
+use search::{Fields, SearchForm};
 use style::{ACCENT, BG, BORDER, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
 use tab::Tab;
 
@@ -135,8 +132,14 @@ enum Message {
     SecretPromptCancel,
     // Search settings (create form tab + edit modal)
     NewSearch(String),
-    OpenSavedSearch { connection: String, search: String },
-    SearchTargetsLoaded { form_id: u64, result: Result<Vec<String>, String> },
+    OpenSavedSearch {
+        connection: String,
+        search: String,
+    },
+    SearchTargetsLoaded {
+        form_id: u64,
+        result: Result<Vec<String>, String>,
+    },
     SearchName(String),
     SearchTargetInput(String),
     SearchTargetPicked(String),
@@ -185,7 +188,10 @@ enum Message {
     DetailDragTo(f32),
     DetailDragEnd,
     // Result tab run
-    PitOpened { run_id: u64, result: Result<String, String> },
+    PitOpened {
+        run_id: u64,
+        result: Result<String, String>,
+    },
     PageLoaded {
         run_id: u64,
         result: Result<es::Page, String>,
@@ -209,8 +215,14 @@ enum Message {
     TreeMenuDismiss,
     EditConnection(String),
     RequestDeleteConnection(String),
-    EditSearch { connection: String, search: String },
-    DeleteSearch { connection: String, search: String },
+    EditSearch {
+        connection: String,
+        search: String,
+    },
+    DeleteSearch {
+        connection: String,
+        search: String,
+    },
     ConfirmProceed,
     ConfirmCancel,
     // Misc
@@ -262,9 +274,9 @@ impl LogLens {
                 Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                     Some(Message::DetailDragTo(position.y))
                 }
-                Event::Mouse(iced::mouse::Event::ButtonReleased(
-                    iced::mouse::Button::Left,
-                )) => Some(Message::DetailDragEnd),
+                Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                    Some(Message::DetailDragEnd)
+                }
                 _ => None,
             });
             Subscription::batch([escape, drag])
@@ -310,7 +322,11 @@ impl LogLens {
     }
 
     fn form_mut(&mut self, form_id: u64) -> Option<&mut SearchForm> {
-        if self.search_settings.as_ref().is_some_and(|f| f.form_id == form_id) {
+        if self
+            .search_settings
+            .as_ref()
+            .is_some_and(|f| f.form_id == form_id)
+        {
             return self.search_settings.as_mut();
         }
         self.open_tabs.iter_mut().find_map(|t| match t {
@@ -429,8 +445,7 @@ impl LogLens {
                     if let PendingAction::RunSearch { run_id } = prompt.then {
                         if let Some(rt) = self.result_mut(run_id) {
                             rt.state = RunState::Error(
-                                "Connection secret required to run this search"
-                                    .to_string(),
+                                "Connection secret required to run this search".to_string(),
                             );
                         }
                     }
@@ -505,31 +520,29 @@ impl LogLens {
                     return self.start_run(run_id);
                 }
             }
-            Message::ResultTimeframeChoice(run_id, choice) => {
-                match choice.to_timeframe() {
-                    Some(timeframe) => {
-                        let changed = self
-                            .result_mut(run_id)
-                            .map(|rt| {
-                                rt.tf.open = false;
-                                let changed = rt.timeframe != timeframe;
-                                rt.timeframe = timeframe;
-                                changed
-                            })
-                            .unwrap_or(false);
-                        if changed {
-                            self.sync_saved_from_result(run_id);
-                            return self.start_run(run_id);
-                        }
-                    }
-                    None => {
-                        if let Some(rt) = self.result_mut(run_id) {
-                            let current = rt.timeframe.clone();
-                            rt.tf.seed(&current);
-                        }
+            Message::ResultTimeframeChoice(run_id, choice) => match choice.to_timeframe() {
+                Some(timeframe) => {
+                    let changed = self
+                        .result_mut(run_id)
+                        .map(|rt| {
+                            rt.tf.open = false;
+                            let changed = rt.timeframe != timeframe;
+                            rt.timeframe = timeframe;
+                            changed
+                        })
+                        .unwrap_or(false);
+                    if changed {
+                        self.sync_saved_from_result(run_id);
+                        return self.start_run(run_id);
                     }
                 }
-            }
+                None => {
+                    if let Some(rt) = self.result_mut(run_id) {
+                        let current = rt.timeframe.clone();
+                        rt.tf.seed(&current);
+                    }
+                }
+            },
             Message::ResultTfMode(run_id, mode) => {
                 if let Some(rt) = self.result_mut(run_id) {
                     rt.tf.mode = mode;
@@ -683,9 +696,8 @@ impl LogLens {
             }
             Message::CloseHitDetail => {
                 self.tree_menu = None;
-                if let Some(Tab::Result(rt)) = self
-                    .active_tab
-                    .and_then(|t| self.open_tabs.get_mut(t))
+                if let Some(Tab::Result(rt)) =
+                    self.active_tab.and_then(|t| self.open_tabs.get_mut(t))
                 {
                     rt.selected_hit = None;
                 }
@@ -710,10 +722,8 @@ impl LogLens {
                     drag.last_y = Some(y);
                     if delta != 0.0 {
                         if let Some(rt) = self.result_mut(run_id) {
-                            rt.detail_height = (rt.detail_height + delta).clamp(
-                                results::DETAIL_MIN_H,
-                                results::DETAIL_MAX_H,
-                            );
+                            rt.detail_height = (rt.detail_height + delta)
+                                .clamp(results::DETAIL_MIN_H, results::DETAIL_MAX_H);
                         }
                     }
                 }
@@ -780,10 +790,7 @@ impl LogLens {
 
         // Release any server-side PIT this tab was holding.
         let closing_pit = match &self.open_tabs[tab] {
-            Tab::Result(rt) => rt
-                .pit_id
-                .clone()
-                .map(|pit| (rt.connection_id.clone(), pit)),
+            Tab::Result(rt) => rt.pit_id.clone().map(|pit| (rt.connection_id.clone(), pit)),
             _ => None,
         };
 
@@ -798,10 +805,7 @@ impl LogLens {
         if let Some((conn_id, pit)) = closing_pit {
             if let Some(conn) = self.connection(&conn_id) {
                 if let Some(endpoint) = self.endpoint_for(conn) {
-                    return Task::perform(
-                        es::close_pit(endpoint, pit),
-                        |_| Message::Ignore,
-                    );
+                    return Task::perform(es::close_pit(endpoint, pit), |_| Message::Ignore);
                 }
             }
         }
@@ -828,7 +832,9 @@ impl LogLens {
                     .editing_id
                     .clone()
                     .unwrap_or_else(|| "pending".to_string());
-                let name = non_empty(&form.name).unwrap_or("this connection").to_string();
+                let name = non_empty(&form.name)
+                    .unwrap_or("this connection")
+                    .to_string();
                 self.secret_prompt = Some(SecretPrompt {
                     connection_id: id,
                     connection_name: name,
@@ -870,10 +876,8 @@ impl LogLens {
 
         if form.auth_kind.needs_secret() && !form.secret.is_empty() {
             if secrets::set(&id, &form.secret) == secrets::Stored::Session {
-                self.status = Some(
-                    "Keyring unavailable — secret kept for this session only."
-                        .to_string(),
-                );
+                self.status =
+                    Some("Keyring unavailable — secret kept for this session only.".to_string());
             }
         } else if !form.auth_kind.needs_secret() {
             secrets::delete(&id);
@@ -901,10 +905,9 @@ impl LogLens {
         self.expanded.insert(conn_id.clone());
 
         let targets = match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
-            Some(endpoint) => Task::perform(
-                es::list_targets(endpoint),
-                move |result| Message::SearchTargetsLoaded { form_id, result },
-            ),
+            Some(endpoint) => Task::perform(es::list_targets(endpoint), move |result| {
+                Message::SearchTargetsLoaded { form_id, result }
+            }),
             None => {
                 if let Some(f) = self.form_mut(form_id) {
                     f.targets_loading = false;
@@ -918,11 +921,7 @@ impl LogLens {
     }
 
     /// Opens the Search settings modal pre-filled from an existing Saved Search.
-    fn open_search_settings(
-        &mut self,
-        conn_id: String,
-        search_id: String,
-    ) -> Task<Message> {
+    fn open_search_settings(&mut self, conn_id: String, search_id: String) -> Task<Message> {
         let Some(saved) = self
             .connection(&conn_id)
             .and_then(|c| c.searches.iter().find(|s| s.id == search_id))
@@ -932,14 +931,12 @@ impl LogLens {
         };
 
         let form_id = self.next_id();
-        self.search_settings =
-            Some(SearchForm::from_saved(form_id, conn_id.clone(), &saved));
+        self.search_settings = Some(SearchForm::from_saved(form_id, conn_id.clone(), &saved));
 
         let targets = match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
-            Some(endpoint) => Task::perform(
-                es::list_targets(endpoint),
-                move |result| Message::SearchTargetsLoaded { form_id, result },
-            ),
+            Some(endpoint) => Task::perform(es::list_targets(endpoint), move |result| {
+                Message::SearchTargetsLoaded { form_id, result }
+            }),
             None => {
                 if let Some(f) = self.form_mut(form_id) {
                     f.targets_loading = false;
@@ -950,14 +947,13 @@ impl LogLens {
         Task::batch([targets, self.load_form_fields()])
     }
 
-    fn delete_search(
-        &mut self,
-        conn_id: String,
-        search_id: String,
-    ) -> Task<Message> {
+    fn delete_search(&mut self, conn_id: String, search_id: String) -> Task<Message> {
         let mut tasks: Vec<Task<Message>> = Vec::new();
         // Close the Search settings modal if it targets this search.
-        if self.search_settings.as_ref().and_then(|f| f.saved_id.as_deref())
+        if self
+            .search_settings
+            .as_ref()
+            .and_then(|f| f.saved_id.as_deref())
             == Some(search_id.as_str())
         {
             self.search_settings = None;
@@ -980,7 +976,10 @@ impl LogLens {
     }
 
     fn delete_connection(&mut self, conn_id: String) -> Task<Message> {
-        if self.search_settings.as_ref().map(|f| f.connection_id.as_str())
+        if self
+            .search_settings
+            .as_ref()
+            .map(|f| f.connection_id.as_str())
             == Some(conn_id.as_str())
         {
             self.search_settings = None;
@@ -1012,7 +1011,11 @@ impl LogLens {
     /// Fetches `_field_caps` for the Search form's Target, if it has one.
     fn load_form_fields(&mut self) -> Task<Message> {
         let Some((form_id, conn_id, target)) = self.editing_search_form_mut().map(|f| {
-            (f.form_id, f.connection_id.clone(), f.target.trim().to_string())
+            (
+                f.form_id,
+                f.connection_id.clone(),
+                f.target.trim().to_string(),
+            )
         }) else {
             return Task::none();
         };
@@ -1022,8 +1025,7 @@ impl LogLens {
         if let Some(f) = self.form_mut(form_id) {
             f.fields = Fields::Loading;
         }
-        let Some(endpoint) = self.connection(&conn_id).and_then(|c| self.endpoint_for(c))
-        else {
+        let Some(endpoint) = self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) else {
             if let Some(f) = self.form_mut(form_id) {
                 f.fields = Fields::Failed;
             }
@@ -1037,25 +1039,18 @@ impl LogLens {
     /// Writes a Result Tab's live query string / timeframe / Column / sort
     /// choices back onto its Saved Search and persists the config.
     fn sync_saved_from_result(&mut self, run_id: u64) {
-        let Some((
-            conn_id,
-            saved_id,
-            query_string,
-            timeframe,
-            columns,
-            sort_field,
-            sort_desc,
-        )) = self.result_mut(run_id).map(|rt| {
-            (
-                rt.connection_id.clone(),
-                rt.saved_id.clone(),
-                rt.query_string.clone(),
-                rt.timeframe.clone(),
-                rt.columns.clone(),
-                rt.sort_field.clone(),
-                rt.sort_desc,
-            )
-        })
+        let Some((conn_id, saved_id, query_string, timeframe, columns, sort_field, sort_desc)) =
+            self.result_mut(run_id).map(|rt| {
+                (
+                    rt.connection_id.clone(),
+                    rt.saved_id.clone(),
+                    rt.query_string.clone(),
+                    rt.timeframe.clone(),
+                    rt.columns.clone(),
+                    rt.sort_field.clone(),
+                    rt.sort_desc,
+                )
+            })
         else {
             return;
         };
@@ -1092,12 +1087,7 @@ impl LogLens {
         };
         let conn_id = form.connection_id.clone();
 
-        let Some(conn) = self
-            .config
-            .connections
-            .iter_mut()
-            .find(|c| c.id == conn_id)
-        else {
+        let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id) else {
             return Task::none();
         };
         match conn.searches.iter_mut().find(|s| s.id == saved.id) {
@@ -1140,8 +1130,7 @@ impl LogLens {
         let target = form.target.trim().to_string();
         let timestamp_field = form.resolved_timestamp_field();
 
-        if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id)
-        {
+        if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id) {
             if let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id) {
                 saved.name = name;
                 saved.target = target;
@@ -1154,9 +1143,10 @@ impl LogLens {
 
         // Re-run an open Result Tab for this Saved Search; do nothing if none
         // is open (editing settings never opens a tab).
-        let has_tab = self.open_tabs.iter().any(|t| {
-            matches!(t, Tab::Result(rt) if rt.saved_id == saved_id)
-        });
+        let has_tab = self
+            .open_tabs
+            .iter()
+            .any(|t| matches!(t, Tab::Result(rt) if rt.saved_id == saved_id));
         if has_tab {
             let caps = form.fields.caps().cloned();
             self.open_result_tab(conn_id, saved_id, None, caps, true)
@@ -1177,17 +1167,20 @@ impl LogLens {
         caps: Option<es::FieldCaps>,
         rerun_existing: bool,
     ) -> Task<Message> {
-        if let Some(existing) = self.open_tabs.iter().position(|t| {
-            matches!(t, Tab::Result(rt) if rt.saved_id == saved_id)
-        }) {
+        if let Some(existing) = self
+            .open_tabs
+            .iter()
+            .position(|t| matches!(t, Tab::Result(rt) if rt.saved_id == saved_id))
+        {
             if let Some(form_idx) = replace {
                 if form_idx != existing {
                     self.open_tabs.remove(form_idx);
                 }
             }
-            let existing = self.open_tabs.iter().position(|t| {
-                matches!(t, Tab::Result(rt) if rt.saved_id == saved_id)
-            });
+            let existing = self
+                .open_tabs
+                .iter()
+                .position(|t| matches!(t, Tab::Result(rt) if rt.saved_id == saved_id));
             self.active_tab = existing;
 
             // A saved edit refreshes the open Result Tab's parameters and
@@ -1236,17 +1229,12 @@ impl LogLens {
                         .result_mut(run_id)
                         .is_some_and(|rt| rt.all_fields.is_empty())
                     {
-                        match self
-                            .connection(&conn_id)
-                            .and_then(|c| self.endpoint_for(c))
-                        {
-                            Some(endpoint) => Task::perform(
-                                es::field_caps(endpoint, target),
-                                move |result| Message::ResultFieldsLoaded {
-                                    run_id,
-                                    result,
-                                },
-                            ),
+                        match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
+                            Some(endpoint) => {
+                                Task::perform(es::field_caps(endpoint, target), move |result| {
+                                    Message::ResultFieldsLoaded { run_id, result }
+                                })
+                            }
                             None => Task::none(),
                         }
                     } else {
@@ -1261,16 +1249,13 @@ impl LogLens {
         let Some(conn) = self.connection(&conn_id) else {
             return Task::none();
         };
-        let Some(saved) = conn.searches.iter().find(|s| s.id == saved_id).cloned()
-        else {
+        let Some(saved) = conn.searches.iter().find(|s| s.id == saved_id).cloned() else {
             return Task::none();
         };
 
         let run_id = self.next_id();
         let (gte, lte) = saved.timeframe.bounds();
-        let (all_fields, sortable_fields) = caps
-            .map(|c| (c.all, c.sortable))
-            .unwrap_or_default();
+        let (all_fields, sortable_fields) = caps.map(|c| (c.all, c.sortable)).unwrap_or_default();
         let tab = ResultTab {
             run_id,
             connection_id: conn_id.clone(),
@@ -1317,10 +1302,9 @@ impl LogLens {
 
         let fetch_fields: Task<Message> = if need_fields {
             match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
-                Some(endpoint) => Task::perform(
-                    es::field_caps(endpoint, target),
-                    move |result| Message::ResultFieldsLoaded { run_id, result },
-                ),
+                Some(endpoint) => Task::perform(es::field_caps(endpoint, target), move |result| {
+                    Message::ResultFieldsLoaded { run_id, result }
+                }),
                 None => Task::none(),
             }
         } else {
@@ -1353,10 +1337,9 @@ impl LogLens {
             return Task::none();
         };
         let close_old: Task<Message> = match (&old_pit, self.endpoint_for(conn)) {
-            (Some(pit), Some(endpoint)) => Task::perform(
-                es::close_pit(endpoint, pit.clone()),
-                |_| Message::Ignore,
-            ),
+            (Some(pit), Some(endpoint)) => {
+                Task::perform(es::close_pit(endpoint, pit.clone()), |_| Message::Ignore)
+            }
             _ => Task::none(),
         };
 
@@ -1380,11 +1363,7 @@ impl LogLens {
         }
     }
 
-    fn on_pit_opened(
-        &mut self,
-        run_id: u64,
-        result: Result<String, String>,
-    ) -> Task<Message> {
+    fn on_pit_opened(&mut self, run_id: u64, result: Result<String, String>) -> Task<Message> {
         let pit = match result {
             Ok(pit) => pit,
             Err(err) => {
@@ -1432,32 +1411,30 @@ impl LogLens {
     /// Fetches the next Page for a Result Tab via `search_after` on its PIT.
     /// A no-op unless the tab is idle, under the cap, and has a cursor.
     fn load_more(&mut self, run_id: u64) -> Task<Message> {
-        let Some((conn_id, pit, params)) =
-            self.result_mut(run_id).and_then(|rt| {
-                let pit = rt.pit_id.clone()?;
-                let cursor = rt.next_cursor()?;
-                let remaining = RETENTION_CAP.saturating_sub(rt.hits.len());
-                if remaining == 0 {
-                    rt.paging = Paging::Capped;
-                    return None;
-                }
-                rt.paging = Paging::Loading;
-                Some((
-                    rt.connection_id.clone(),
-                    pit,
-                    es::SearchParams {
-                        query_string: rt.query_string.clone(),
-                        timestamp_field: rt.timestamp_field.clone(),
-                        gte: rt.gte.clone(),
-                        lte: rt.lte.clone(),
-                        sort_field: rt.sort_field.clone(),
-                        sort_desc: rt.sort_desc,
-                        size: remaining.min(1000),
-                        search_after: Some(cursor),
-                    },
-                ))
-            })
-        else {
+        let Some((conn_id, pit, params)) = self.result_mut(run_id).and_then(|rt| {
+            let pit = rt.pit_id.clone()?;
+            let cursor = rt.next_cursor()?;
+            let remaining = RETENTION_CAP.saturating_sub(rt.hits.len());
+            if remaining == 0 {
+                rt.paging = Paging::Capped;
+                return None;
+            }
+            rt.paging = Paging::Loading;
+            Some((
+                rt.connection_id.clone(),
+                pit,
+                es::SearchParams {
+                    query_string: rt.query_string.clone(),
+                    timestamp_field: rt.timestamp_field.clone(),
+                    gte: rt.gte.clone(),
+                    lte: rt.lte.clone(),
+                    sort_field: rt.sort_field.clone(),
+                    sort_desc: rt.sort_desc,
+                    size: remaining.min(1000),
+                    search_after: Some(cursor),
+                },
+            ))
+        }) else {
             return Task::none();
         };
 
@@ -1562,18 +1539,14 @@ impl LogLens {
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
-        let panel = container(
-            scrollable(column![self.es_section()].spacing(1.0).width(Fill))
-                .height(Fill),
-        )
-        .style(|_| style::panel(PANEL))
-        .width(240.0)
-        .height(Fill)
-        .padding(6.0);
+        let panel =
+            container(scrollable(column![self.es_section()].spacing(1.0).width(Fill)).height(Fill))
+                .style(|_| style::panel(PANEL))
+                .width(240.0)
+                .height(Fill)
+                .padding(6.0);
 
-        mouse_area(panel)
-            .on_move(Message::SidebarCursor)
-            .into()
+        mouse_area(panel).on_move(Message::SidebarCursor).into()
     }
 
     /// The `Elasticsearch` tree root: its Connections plus a "＋" affordance.
@@ -1645,7 +1618,9 @@ impl LogLens {
             ]
             .align_y(iced::Alignment::Center),
         )
-        .on_right_press(Message::TreeMenuToggle(TreeMenu::Connection(conn.id.clone())));
+        .on_right_press(Message::TreeMenuToggle(TreeMenu::Connection(
+            conn.id.clone(),
+        )));
 
         let mut rows: Vec<Element<'a, Message>> = vec![header.into()];
         if open {
@@ -1732,40 +1707,44 @@ impl LogLens {
                 .into();
         }
 
-        let tabs = self.open_tabs.iter().enumerate().map(|(i, tab)| -> Element<'_, Message> {
-            let active = self.active_tab == Some(i);
-            let name = tab.title();
+        let tabs = self
+            .open_tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| -> Element<'_, Message> {
+                let active = self.active_tab == Some(i);
+                let name = tab.title();
 
-            container(
-                row![
-                    button(text(name).size(13.0).color(if active {
-                        TEXT
-                    } else {
-                        TEXT_DIM
-                    }))
-                    .on_press(Message::SelectTab(i))
-                    .padding(Padding::new(6.0).left(12.0).right(6.0))
-                    .style(style::bare_button()),
-                    button(text("\u{00d7}").size(13.0).color(TEXT_DIM))
-                        .on_press(Message::CloseTab(i))
-                        .padding(Padding::new(6.0).left(2.0).right(10.0))
+                container(
+                    row![
+                        button(
+                            text(name)
+                                .size(13.0)
+                                .color(if active { TEXT } else { TEXT_DIM })
+                        )
+                        .on_press(Message::SelectTab(i))
+                        .padding(Padding::new(6.0).left(12.0).right(6.0))
                         .style(style::bare_button()),
-                ]
-                .align_y(iced::Alignment::Center),
-            )
-            .style(move |_| {
-                let mut s = style::panel(if active { BG } else { PANEL_ALT });
-                if active {
-                    s.border = Border {
-                        color: ACCENT,
-                        width: 0.0,
-                        ..Border::default()
-                    };
-                }
-                s
-            })
-            .into()
-        });
+                        button(text("\u{00d7}").size(13.0).color(TEXT_DIM))
+                            .on_press(Message::CloseTab(i))
+                            .padding(Padding::new(6.0).left(2.0).right(10.0))
+                            .style(style::bare_button()),
+                    ]
+                    .align_y(iced::Alignment::Center),
+                )
+                .style(move |_| {
+                    let mut s = style::panel(if active { BG } else { PANEL_ALT });
+                    if active {
+                        s.border = Border {
+                            color: ACCENT,
+                            width: 0.0,
+                            ..Border::default()
+                        };
+                    }
+                    s
+                })
+                .into()
+            });
 
         container(row(tabs).width(Fill))
             .style(|_| style::panel(PANEL_ALT))
@@ -1795,9 +1774,7 @@ impl LogLens {
     /// the loaded-Hit count; row 2 is the live Column + sort strip moved out of
     /// the Result Tab. Hidden for Search form tabs and when no tab is open.
     fn search_bar(&self) -> Option<Element<'_, Message>> {
-        let Some(Tab::Result(tab)) =
-            self.active_tab.and_then(|t| self.open_tabs.get(t))
-        else {
+        let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
             return None;
         };
         let run_id = tab.run_id;
@@ -1806,11 +1783,9 @@ impl LogLens {
             .timeframe
             .matches_preset()
             .unwrap_or(TimeframeChoice::Custom);
-        let timeframe_ctl = pick_list(
-            &TimeframeChoice::ALL[..],
-            Some(selected),
-            move |choice| Message::ResultTimeframeChoice(run_id, choice),
-        )
+        let timeframe_ctl = pick_list(&TimeframeChoice::ALL[..], Some(selected), move |choice| {
+            Message::ResultTimeframeChoice(run_id, choice)
+        })
         .text_size(12.0)
         .padding(4.0);
 
@@ -1823,7 +1798,9 @@ impl LogLens {
                     .padding(4.0)
                     .width(Fill),
                 timeframe_ctl,
-                text(format!("\u{b7} {}", tab.target)).size(12.0).color(TEXT_DIM),
+                text(format!("\u{b7} {}", tab.target))
+                    .size(12.0)
+                    .color(TEXT_DIM),
                 button(text("Refresh").size(12.0).color(TEXT_DIM))
                     .on_press(Message::RefreshResult(run_id))
                     .padding(Padding::new(2.0).left(8.0).right(8.0))
@@ -1928,31 +1905,26 @@ impl LogLens {
         ]
         .spacing(8.0);
 
-        container(
-            column![modes, detail, space().height(2.0), actions].spacing(8.0),
-        )
-        .style(|_| {
-            let mut s = style::panel(PANEL);
-            s.border = Border {
-                color: BORDER,
-                width: 1.0,
-                radius: 4.0.into(),
-            };
-            s
-        })
-        .width(Fill)
-        .padding(Padding::new(10.0).left(12.0).right(12.0))
-        .into()
+        container(column![modes, detail, space().height(2.0), actions].spacing(8.0))
+            .style(|_| {
+                let mut s = style::panel(PANEL);
+                s.border = Border {
+                    color: BORDER,
+                    width: 1.0,
+                    radius: 4.0.into(),
+                };
+                s
+            })
+            .width(Fill)
+            .padding(Padding::new(10.0).left(12.0).right(12.0))
+            .into()
     }
 
     // --- Search settings (create form + edit modal) ------------------
 
     /// The three structural fields shared by the new-Saved-Search form and the
     /// Search settings modal: name, Target (with typeahead), timestamp field.
-    fn search_settings_fields<'a>(
-        &'a self,
-        form: &'a SearchForm,
-    ) -> Vec<Element<'a, Message>> {
+    fn search_settings_fields<'a>(&'a self, form: &'a SearchForm) -> Vec<Element<'a, Message>> {
         let mut fields: Vec<Element<'a, Message>> = vec![
             field_label("Name"),
             text_input("checkout-errors", &form.name)
@@ -1968,7 +1940,10 @@ impl LogLens {
 
         if form.targets_loading {
             fields.push(
-                text("Loading indices\u{2026}").size(11.0).color(TEXT_DIM).into(),
+                text("Loading indices\u{2026}")
+                    .size(11.0)
+                    .color(TEXT_DIM)
+                    .into(),
             );
         } else {
             let matches = form.target_matches();
@@ -1983,9 +1958,7 @@ impl LogLens {
                             .style(style::picker_row(false)),
                     );
                 }
-                fields.push(
-                    container(opts).style(|_| style::panel(PANEL)).into(),
-                );
+                fields.push(container(opts).style(|_| style::panel(PANEL)).into());
             }
         }
 
@@ -2057,10 +2030,7 @@ impl LogLens {
     /// The Search settings modal: the same three fields as the create form,
     /// shown over the current tab rather than as a tab of its own. Saving it
     /// re-runs an open Result Tab for the Saved Search.
-    fn search_settings_modal<'a>(
-        &'a self,
-        form: &'a SearchForm,
-    ) -> Element<'a, Message> {
+    fn search_settings_modal<'a>(&'a self, form: &'a SearchForm) -> Element<'a, Message> {
         let conn_name = self
             .connection(&form.connection_id)
             .map(|c| c.name.clone())
@@ -2106,9 +2076,7 @@ impl LogLens {
     fn result_view<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
         let body: Element<'_, Message> = match &tab.state {
             RunState::Loading => centered("Running\u{2026}", TEXT_DIM),
-            RunState::Empty => {
-                centered("No hits for this query and timeframe", TEXT_DIM)
-            }
+            RunState::Empty => centered("No hits for this query and timeframe", TEXT_DIM),
             RunState::Error(err) => container(
                 container(text(err.clone()).size(13.0).color(ERR_RED))
                     .style(|_| {
@@ -2264,9 +2232,13 @@ impl LogLens {
                 .into()
         };
         let dir = button(
-            text(if tab.sort_desc { "desc \u{25be}" } else { "asc \u{25b4}" })
-                .size(11.0)
-                .color(TEXT),
+            text(if tab.sort_desc {
+                "desc \u{25be}"
+            } else {
+                "asc \u{25b4}"
+            })
+            .size(11.0)
+            .color(TEXT),
         )
         .on_press(Message::ResultSortDir(run_id, !tab.sort_desc))
         .padding(Padding::new(2.0).left(8.0).right(8.0))
@@ -2310,12 +2282,7 @@ impl LogLens {
             let selected = tab.selected_hit == Some(index);
             let cells = container(
                 row(tab.columns.iter().map(|col| -> Element<'_, Message> {
-                    let value = results::cell(
-                        &hit.source,
-                        col,
-                        &tab.timestamp_field,
-                        tab.utc,
-                    );
+                    let value = results::cell(&hit.source, col, &tab.timestamp_field, tab.utc);
                     container(
                         text(value)
                             .size(12.0)
@@ -2387,9 +2354,10 @@ impl LogLens {
         let run_id = tab.run_id;
         let content: Element<'_, Message> = match &tab.paging {
             Paging::Idle | Paging::Exhausted => return None,
-            Paging::Loading => {
-                text("Loading more\u{2026}").size(12.0).color(TEXT_DIM).into()
-            }
+            Paging::Loading => text("Loading more\u{2026}")
+                .size(12.0)
+                .color(TEXT_DIM)
+                .into(),
             Paging::Capped => text(format!(
                 "Showing first {RETENTION_CAP} Hits — refine your search"
             ))
@@ -2421,10 +2389,7 @@ impl LogLens {
 
     // --- Modals ------------------------------------------------------
 
-    fn connection_form_modal<'a>(
-        &'a self,
-        form: &'a ConnectionForm,
-    ) -> Element<'a, Message> {
+    fn connection_form_modal<'a>(&'a self, form: &'a ConnectionForm) -> Element<'a, Message> {
         let mut fields: Vec<Element<'a, Message>> = vec![
             text(form.title()).size(16.0).color(TEXT).into(),
             field_label("Name"),
@@ -2528,10 +2493,7 @@ impl LogLens {
         modal_card(column(fields).spacing(6.0).width(Fill).into())
     }
 
-    fn secret_prompt_modal<'a>(
-        &'a self,
-        prompt: &'a SecretPrompt,
-    ) -> Element<'a, Message> {
+    fn secret_prompt_modal<'a>(&'a self, prompt: &'a SecretPrompt) -> Element<'a, Message> {
         let card = column![
             text("Secret required").size(16.0).color(TEXT),
             text(format!(
@@ -2570,9 +2532,7 @@ impl LogLens {
         let (title, body, proceed) = match confirm {
             Confirm::DeleteConnection { name, .. } => (
                 "Delete Connection",
-                format!(
-                    "Delete \"{name}\" and all of its Saved Searches? This cannot be undone."
-                ),
+                format!("Delete \"{name}\" and all of its Saved Searches? This cannot be undone."),
                 "Delete",
             ),
         };
@@ -2662,10 +2622,14 @@ fn test_result(state: &TestState) -> Element<'_, Message> {
     match state {
         TestState::Idle => space().width(0.0).into(),
         TestState::Running => text("Testing\u{2026}").size(12.0).color(TEXT_DIM).into(),
-        TestState::Ok(msg) => text(format!("\u{2713} {msg}")).size(12.0).color(OK_GREEN).into(),
-        TestState::Failed(err) => {
-            text(format!("\u{2717} {err}")).size(12.0).color(ERR_RED).into()
-        }
+        TestState::Ok(msg) => text(format!("\u{2713} {msg}"))
+            .size(12.0)
+            .color(OK_GREEN)
+            .into(),
+        TestState::Failed(err) => text(format!("\u{2717} {err}"))
+            .size(12.0)
+            .color(ERR_RED)
+            .into(),
     }
 }
 
@@ -2687,7 +2651,13 @@ fn modal_card<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
         .center_x(Fill)
         .center_y(Fill)
         .style(|_| container::Style {
-            background: Some(Color { a: 0.6, ..Color::BLACK }.into()),
+            background: Some(
+                Color {
+                    a: 0.6,
+                    ..Color::BLACK
+                }
+                .into(),
+            ),
             ..container::Style::default()
         })
         .into()
