@@ -1593,6 +1593,8 @@ impl LogLens {
             rule::horizontal(1.0),
             container(body).width(Fill).height(Fill),
             self.status_bar(),
+            rule::horizontal(1.0),
+            self.info_bar(),
         ])
         .style(|_| style::panel(BG))
         .width(Fill)
@@ -1650,6 +1652,21 @@ impl LogLens {
         .width(Fill)
         .padding(Padding::new(4.0).left(12.0).right(12.0))
         .into()
+    }
+
+    /// A persistent info bar across the very bottom of the window, carrying
+    /// summary details for the active tab. Currently the loaded-Hit count for
+    /// a Result Tab; empty otherwise.
+    fn info_bar(&self) -> Element<'_, Message> {
+        let mut items: Vec<Element<'_, Message>> = Vec::new();
+        if let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) {
+            items.push(meta(&format!("{} hits", tab.hits.len())));
+        }
+        container(row(items).spacing(12.0).align_y(iced::Alignment::Center))
+            .style(|_| style::panel(PANEL_ALT))
+            .width(Fill)
+            .padding(Padding::new(4.0).left(12.0).right(12.0))
+            .into()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
@@ -1884,9 +1901,10 @@ impl LogLens {
     }
 
     /// The Search bar shown above the tab strip while a Result Tab is active:
-    /// row 1 carries the query string, timeframe, Target, a Refresh control and
-    /// the loaded-Hit count; row 2 is the live Column + sort strip moved out of
-    /// the Result Tab. Hidden for Search form tabs and when no tab is open.
+    /// row 1 carries the query string, timeframe, Target and a Refresh control;
+    /// row 2 is the live Column + sort strip moved out of the Result Tab. The
+    /// loaded-Hit count lives in the bottom info bar. Hidden for Search form
+    /// tabs and when no tab is open.
     fn search_bar(&self) -> Option<Element<'_, Message>> {
         let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
             return None;
@@ -1919,7 +1937,6 @@ impl LogLens {
                     .on_press(Message::RefreshResult(run_id))
                     .padding(Padding::new(2.0).left(8.0).right(8.0))
                     .style(style::bare_button()),
-                meta(&format!("{} hits", tab.hits.len())),
             ]
             .spacing(12.0)
             .align_y(iced::Alignment::Center),
