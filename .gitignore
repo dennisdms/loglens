@@ -1,1 +1,7 @@
 /target
+
+# VS Code — keep only the shareable project config, ignore personal/local files
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
