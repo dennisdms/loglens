@@ -10,11 +10,11 @@ mod tab;
 
 use std::collections::{HashMap, HashSet};
 
+use iced::widget::svg::Handle;
 use iced::widget::{
     button, checkbox, column, container, mouse_area, pick_list, radio, row, rule, scrollable,
     space, stack, svg, text, text_editor, text_input,
 };
-use iced::widget::svg::Handle;
 use iced::{Border, Color, Element, Fill, Font, Length, Padding, Point, Subscription, Task, Theme};
 
 use config::{Auth, Config, Connection};
@@ -496,14 +496,13 @@ impl LogLens {
                 }
             }
             Message::SecretPromptCancel => {
-                if let Some(prompt) = self.secret_prompt.take() {
-                    if let PendingAction::RunSearch { run_id } = prompt.then {
-                        if let Some(rt) = self.result_mut(run_id) {
-                            rt.state = RunState::Error(
-                                "Connection secret required to run this search".to_string(),
-                            );
-                        }
-                    }
+                if let Some(prompt) = self.secret_prompt.take()
+                    && let PendingAction::RunSearch { run_id } = prompt.then
+                    && let Some(rt) = self.result_mut(run_id)
+                {
+                    rt.state = RunState::Error(
+                        "Connection secret required to run this search".to_string(),
+                    );
                 }
             }
 
@@ -645,11 +644,11 @@ impl LogLens {
                 }
             }
             Message::ResultFieldsLoaded { run_id, result } => {
-                if let Ok(caps) = result {
-                    if let Some(rt) = self.result_mut(run_id) {
-                        rt.all_fields = caps.all;
-                        rt.sortable_fields = caps.sortable;
-                    }
+                if let Ok(caps) = result
+                    && let Some(rt) = self.result_mut(run_id)
+                {
+                    rt.all_fields = caps.all;
+                    rt.sortable_fields = caps.sortable;
                 }
             }
             Message::ResultColumnDraft(run_id, v) => {
@@ -799,10 +798,10 @@ impl LogLens {
                 }
             }
             Message::DetailEdit(run_id, action) => {
-                if !action.is_edit() {
-                    if let Some(rt) = self.result_mut(run_id) {
-                        rt.detail_content.perform(action);
-                    }
+                if !action.is_edit()
+                    && let Some(rt) = self.result_mut(run_id)
+                {
+                    rt.detail_content.perform(action);
                 }
             }
             Message::DetailDragStart(run_id) => {
@@ -816,11 +815,11 @@ impl LogLens {
                     let run_id = drag.run_id;
                     let delta = drag.last_y.map_or(0.0, |prev| prev - y);
                     drag.last_y = Some(y);
-                    if delta != 0.0 {
-                        if let Some(rt) = self.result_mut(run_id) {
-                            rt.detail_height = (rt.detail_height + delta)
-                                .clamp(results::DETAIL_MIN_H, results::DETAIL_MAX_H);
-                        }
+                    if delta != 0.0
+                        && let Some(rt) = self.result_mut(run_id)
+                    {
+                        rt.detail_height = (rt.detail_height + delta)
+                            .clamp(results::DETAIL_MIN_H, results::DETAIL_MAX_H);
                     }
                 }
             }
@@ -838,10 +837,10 @@ impl LogLens {
                     let (run_id, index) = (drag.run_id, drag.index);
                     let delta = drag.last_x.map_or(0.0, |prev| x - prev);
                     drag.last_x = Some(x);
-                    if delta != 0.0 {
-                        if let Some(rt) = self.result_mut(run_id) {
-                            rt.resize_column(index, delta);
-                        }
+                    if delta != 0.0
+                        && let Some(rt) = self.result_mut(run_id)
+                    {
+                        rt.resize_column(index, delta);
                     }
                 }
             }
@@ -921,12 +920,11 @@ impl LogLens {
             other => other,
         };
 
-        if let Some((conn_id, pit)) = closing_pit {
-            if let Some(conn) = self.connection(&conn_id) {
-                if let Some(endpoint) = self.endpoint_for(conn) {
-                    return Task::perform(es::close_pit(endpoint, pit), |_| Message::Ignore);
-                }
-            }
+        if let Some((conn_id, pit)) = closing_pit
+            && let Some(conn) = self.connection(&conn_id)
+            && let Some(endpoint) = self.endpoint_for(conn)
+        {
+            return Task::perform(es::close_pit(endpoint, pit), |_| Message::Ignore);
         }
         Task::none()
     }
@@ -1172,13 +1170,13 @@ impl LogLens {
         else {
             return;
         };
-        if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id) {
-            if let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id) {
-                saved.query_string = query_string;
-                saved.timeframe = timeframe;
-                saved.columns = columns;
-                saved.sort = sort;
-            }
+        if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id)
+            && let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id)
+        {
+            saved.query_string = query_string;
+            saved.timeframe = timeframe;
+            saved.columns = columns;
+            saved.sort = sort;
         }
         if let Err(err) = config::save(&self.config) {
             self.status = Some(format!("Could not save config: {err}"));
@@ -1247,12 +1245,12 @@ impl LogLens {
         let target = form.target.trim().to_string();
         let timestamp_field = form.resolved_timestamp_field();
 
-        if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id) {
-            if let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id) {
-                saved.name = name;
-                saved.target = target;
-                saved.timestamp_field = timestamp_field;
-            }
+        if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id)
+            && let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id)
+        {
+            saved.name = name;
+            saved.target = target;
+            saved.timestamp_field = timestamp_field;
         }
         if let Err(err) = config::save(&self.config) {
             self.status = Some(format!("Could not save config: {err}"));
@@ -1289,10 +1287,10 @@ impl LogLens {
             .iter()
             .position(|t| matches!(t, Tab::Result(rt) if rt.saved_id == saved_id))
         {
-            if let Some(form_idx) = replace {
-                if form_idx != existing {
-                    self.open_tabs.remove(form_idx);
-                }
+            if let Some(form_idx) = replace
+                && form_idx != existing
+            {
+                self.open_tabs.remove(form_idx);
             }
             let existing = self
                 .open_tabs
@@ -1302,62 +1300,62 @@ impl LogLens {
 
             // A saved edit refreshes the open Result Tab's parameters and
             // re-runs it; a plain re-open just focuses it.
-            if rerun_existing {
-                if let (Some(idx), Some(saved)) = (
+            if rerun_existing
+                && let (Some(idx), Some(saved)) = (
                     existing,
                     self.connection(&conn_id)
                         .and_then(|c| c.searches.iter().find(|s| s.id == saved_id))
                         .cloned(),
-                ) {
-                    let (gte, lte) = saved.timeframe.bounds();
-                    let target = saved.target.clone();
-                    let run_id = match self.open_tabs.get_mut(idx) {
-                        Some(Tab::Result(rt)) => {
-                            let target_changed = rt.target != saved.target;
-                            rt.saved_name = saved.name.clone();
-                            rt.target = saved.target.clone();
-                            rt.query_string = saved.query_string.clone();
-                            rt.query_draft = saved.query_string.clone();
-                            rt.timestamp_field = saved.timestamp_field.clone();
-                            rt.columns = saved.columns.clone();
-                            rt.sort = saved.sort.clone();
-                            rt.timeframe = saved.timeframe.clone();
-                            rt.tf = TimeframeDraft::from_timeframe(&saved.timeframe);
-                            rt.gte = gte;
-                            rt.lte = lte;
-                            match caps {
-                                Some(caps) => {
-                                    rt.all_fields = caps.all;
-                                    rt.sortable_fields = caps.sortable;
-                                }
-                                None if target_changed => {
-                                    rt.all_fields.clear();
-                                    rt.sortable_fields.clear();
-                                }
-                                None => {}
+                )
+            {
+                let (gte, lte) = saved.timeframe.bounds();
+                let target = saved.target.clone();
+                let run_id = match self.open_tabs.get_mut(idx) {
+                    Some(Tab::Result(rt)) => {
+                        let target_changed = rt.target != saved.target;
+                        rt.saved_name = saved.name.clone();
+                        rt.target = saved.target.clone();
+                        rt.query_string = saved.query_string.clone();
+                        rt.query_draft = saved.query_string.clone();
+                        rt.timestamp_field = saved.timestamp_field.clone();
+                        rt.columns = saved.columns.clone();
+                        rt.sort = saved.sort.clone();
+                        rt.timeframe = saved.timeframe.clone();
+                        rt.tf = TimeframeDraft::from_timeframe(&saved.timeframe);
+                        rt.gte = gte;
+                        rt.lte = lte;
+                        match caps {
+                            Some(caps) => {
+                                rt.all_fields = caps.all;
+                                rt.sortable_fields = caps.sortable;
                             }
-                            rt.run_id
-                        }
-                        _ => return Task::none(),
-                    };
-                    // Refetch field caps if the new Target left us without any.
-                    let refetch: Task<Message> = if self
-                        .result_mut(run_id)
-                        .is_some_and(|rt| rt.all_fields.is_empty())
-                    {
-                        match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
-                            Some(endpoint) => {
-                                Task::perform(es::field_caps(endpoint, target), move |result| {
-                                    Message::ResultFieldsLoaded { run_id, result }
-                                })
+                            None if target_changed => {
+                                rt.all_fields.clear();
+                                rt.sortable_fields.clear();
                             }
-                            None => Task::none(),
+                            None => {}
                         }
-                    } else {
-                        Task::none()
-                    };
-                    return Task::batch([refetch, self.start_run(run_id)]);
-                }
+                        rt.run_id
+                    }
+                    _ => return Task::none(),
+                };
+                // Refetch field caps if the new Target left us without any.
+                let refetch: Task<Message> = if self
+                    .result_mut(run_id)
+                    .is_some_and(|rt| rt.all_fields.is_empty())
+                {
+                    match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
+                        Some(endpoint) => {
+                            Task::perform(es::field_caps(endpoint, target), move |result| {
+                                Message::ResultFieldsLoaded { run_id, result }
+                            })
+                        }
+                        None => Task::none(),
+                    }
+                } else {
+                    Task::none()
+                };
+                return Task::batch([refetch, self.start_run(run_id)]);
             }
             return Task::none();
         }
@@ -1800,7 +1798,7 @@ impl LogLens {
             ),
         };
 
-        let x = self.tree_menu_at.x.min(240.0 - 136.0).max(2.0);
+        let x = self.tree_menu_at.x.clamp(2.0, 240.0 - 136.0);
         let y = self.tree_menu_at.y.max(2.0);
         let anchored = container(tree_menu_block(edit, delete))
             .width(Fill)
@@ -2619,29 +2617,28 @@ impl LogLens {
 
         // One "icon + label" menu row. `msg == None` renders it greyed and
         // inert — used when a move would run off the end of the Column list.
-        let entry = |handle: &'static std::sync::LazyLock<Handle>,
-                     label: &str,
-                     msg: Option<Message>| {
-            let (fg, tint) = match msg {
-                Some(_) => (TEXT, TEXT_DIM),
-                None => (TEXT_DIM, BORDER),
+        let entry =
+            |handle: &'static std::sync::LazyLock<Handle>, label: &str, msg: Option<Message>| {
+                let (fg, tint) = match msg {
+                    Some(_) => (TEXT, TEXT_DIM),
+                    None => (TEXT_DIM, BORDER),
+                };
+                let mut b = button(
+                    row![
+                        glyph(handle, tint),
+                        text(label.to_string()).size(12.0).color(fg),
+                    ]
+                    .spacing(8.0)
+                    .align_y(iced::Alignment::Center),
+                )
+                .width(Fill)
+                .padding(Padding::new(4.0).left(8.0).right(8.0))
+                .style(style::picker_row(false));
+                if let Some(msg) = msg {
+                    b = b.on_press(msg);
+                }
+                b
             };
-            let mut b = button(
-                row![
-                    glyph(handle, tint),
-                    text(label.to_string()).size(12.0).color(fg),
-                ]
-                .spacing(8.0)
-                .align_y(iced::Alignment::Center),
-            )
-            .width(Fill)
-            .padding(Padding::new(4.0).left(8.0).right(8.0))
-            .style(style::picker_row(false));
-            if let Some(msg) = msg {
-                b = b.on_press(msg);
-            }
-            b
-        };
 
         let mut items: Vec<Element<'_, Message>> = Vec::new();
         items.push(

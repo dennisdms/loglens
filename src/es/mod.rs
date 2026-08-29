@@ -95,35 +95,34 @@ pub async fn list_targets(endpoint: Endpoint) -> Result<Vec<String>, String> {
     let mut names: BTreeSet<String> = BTreeSet::new();
 
     let url = format!("{}/_cat/indices?h=index&format=json", base(&endpoint.url));
-    if let Ok(response) = with_auth(client.get(&url), &endpoint.auth).send().await {
-        if response.status().is_success() {
-            if let Ok(rows) = response.json::<Vec<Value>>().await {
-                for row in rows {
-                    if let Some(index) = row.get("index").and_then(Value::as_str) {
-                        if !index.starts_with('.') {
-                            names.insert(index.to_string());
-                        }
-                    }
-                }
+    if let Ok(response) = with_auth(client.get(&url), &endpoint.auth).send().await
+        && response.status().is_success()
+        && let Ok(rows) = response.json::<Vec<Value>>().await
+    {
+        for row in rows {
+            if let Some(index) = row.get("index").and_then(Value::as_str)
+                && !index.starts_with('.')
+            {
+                names.insert(index.to_string());
             }
         }
     }
 
     let url = format!("{}/_data_stream", base(&endpoint.url));
-    if let Ok(response) = with_auth(client.get(&url), &endpoint.auth).send().await {
-        if response.status().is_success() {
-            #[derive(Deserialize)]
-            struct Streams {
-                data_streams: Vec<Named>,
-            }
-            #[derive(Deserialize)]
-            struct Named {
-                name: String,
-            }
-            if let Ok(streams) = response.json::<Streams>().await {
-                for stream in streams.data_streams {
-                    names.insert(stream.name);
-                }
+    if let Ok(response) = with_auth(client.get(&url), &endpoint.auth).send().await
+        && response.status().is_success()
+    {
+        #[derive(Deserialize)]
+        struct Streams {
+            data_streams: Vec<Named>,
+        }
+        #[derive(Deserialize)]
+        struct Named {
+            name: String,
+        }
+        if let Ok(streams) = response.json::<Streams>().await {
+            for stream in streams.data_streams {
+                names.insert(stream.name);
             }
         }
     }

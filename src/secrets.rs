@@ -48,10 +48,10 @@ pub fn remember_session(id: &str, secret: &str) {
 
 /// The secret for connection `id`, from the keyring or the session map.
 pub fn get(id: &str) -> Option<String> {
-    if let Ok(entry) = keyring::Entry::new(SERVICE, id) {
-        if let Ok(secret) = entry.get_password() {
-            return Some(secret);
-        }
+    if let Ok(entry) = keyring::Entry::new(SERVICE, id)
+        && let Ok(secret) = entry.get_password()
+    {
+        return Some(secret);
     }
     session().get(id).cloned()
 }

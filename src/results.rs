@@ -348,10 +348,10 @@ pub fn cell(source: &Value, path: &str, timestamp_field: &str, utc: bool) -> Str
 }
 
 fn resolve<'a>(source: &'a Value, path: &str) -> Option<&'a Value> {
-    if let Some(value) = source.get(path) {
-        if !value.is_null() {
-            return Some(value);
-        }
+    if let Some(value) = source.get(path)
+        && !value.is_null()
+    {
+        return Some(value);
     }
     let mut current = source;
     for segment in path.split('.') {
