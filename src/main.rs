@@ -1570,9 +1570,15 @@ impl LogLens {
     // --- View --------------------------------------------------------------
 
     fn view(&self) -> Element<'_, Message> {
-        // Right column: an optional Search bar sits above the tab strip while a
-        // Result Tab is active.
+        // Right column, top to bottom: an optional options strip, then an
+        // optional Search bar, then the tab strip sitting directly above the
+        // main area. The two optional strips only appear while a Result Tab is
+        // active.
         let mut right: Vec<Element<'_, Message>> = Vec::new();
+        if let Some(options_bar) = self.options_bar() {
+            right.push(options_bar);
+            right.push(rule::horizontal(1.0).into());
+        }
         if let Some(search_bar) = self.search_bar() {
             right.push(search_bar);
             right.push(rule::horizontal(1.0).into());
@@ -1900,11 +1906,31 @@ impl LogLens {
         .into()
     }
 
-    /// The Search bar shown above the tab strip while a Result Tab is active:
-    /// row 1 carries the query string, timeframe, Target and a Refresh control;
-    /// row 2 is the live Column + sort strip moved out of the Result Tab. The
-    /// loaded-Hit count lives in the bottom info bar. Hidden for Search form
-    /// tabs and when no tab is open.
+    /// The options strip shown at the top of the right column while a Result
+    /// Tab is active, above the Search bar and tab strip: the live Column +
+    /// sort controls moved out of the Result Tab. Hidden for Search form tabs
+    /// and when no tab is open.
+    fn options_bar(&self) -> Option<Element<'_, Message>> {
+        let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
+            return None;
+        };
+        if !matches!(tab.state, RunState::Loaded | RunState::Empty) {
+            return None;
+        }
+
+        let mut col: Vec<Element<'_, Message>> = vec![self.result_sort_bar(tab)];
+        if tab.sort_panel_open {
+            col.push(rule::horizontal(1.0).into());
+            col.push(self.sort_fields_popover(tab));
+        }
+        Some(column(col).width(Fill).into())
+    }
+
+    /// The Search bar shown between the options strip and the tab strip while a
+    /// Result Tab is active: the index/datastream target, query string,
+    /// timeframe and a Refresh control, in that order. The loaded-Hit count
+    /// lives in the bottom info bar. Hidden for
+    /// Search form tabs and when no tab is open.
     fn search_bar(&self) -> Option<Element<'_, Message>> {
         let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
             return None;
@@ -1923,6 +1949,7 @@ impl LogLens {
 
         let row1 = container(
             row![
+                text(&tab.target).size(12.0).color(TEXT_DIM),
                 text_input("Lucene Query", &tab.query_draft)
                     .on_input(move |v| Message::ResultQueryDraft(run_id, v))
                     .on_submit(Message::ResultQuerySubmit(run_id))
@@ -1930,9 +1957,6 @@ impl LogLens {
                     .padding(4.0)
                     .width(Fill),
                 timeframe_ctl,
-                text(format!("\u{b7} {}", tab.target))
-                    .size(12.0)
-                    .color(TEXT_DIM),
                 button(text("Refresh").size(12.0).color(TEXT_DIM))
                     .on_press(Message::RefreshResult(run_id))
                     .padding(Padding::new(2.0).left(8.0).right(8.0))
@@ -1948,14 +1972,6 @@ impl LogLens {
         let mut col: Vec<Element<'_, Message>> = vec![row1.into()];
         if tab.tf.open {
             col.push(self.timeframe_popover(tab));
-        }
-        if matches!(tab.state, RunState::Loaded | RunState::Empty) {
-            col.push(rule::horizontal(1.0).into());
-            col.push(self.result_sort_bar(tab));
-            if tab.sort_panel_open {
-                col.push(rule::horizontal(1.0).into());
-                col.push(self.sort_fields_popover(tab));
-            }
         }
         Some(column(col).width(Fill).into())
     }
@@ -2309,7 +2325,7 @@ impl LogLens {
         .style(style::picker_row(tab.sort_panel_open));
 
         container(
-            row![space().width(Fill), sort_btn]
+            row![sort_btn, space().width(Fill)]
                 .spacing(8.0)
                 .align_y(iced::Alignment::Center),
         )
@@ -2321,7 +2337,7 @@ impl LogLens {
 
     /// The "Sort fields" popover: one row per sort key (remove, direction
     /// toggle, reorder) plus a picker to add a field and a "Clear sorting"
-    /// action. Drops out of the Search bar until dismissed.
+    /// action. Drops out of the options strip until dismissed.
     fn sort_fields_popover<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
         let run_id = tab.run_id;
         let last = tab.sort.len().saturating_sub(1);
