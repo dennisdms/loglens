@@ -20,7 +20,7 @@ use iced::{Border, Color, Element, Fill, Font, Length, Padding, Point, Subscript
 use config::{Auth, Config, Connection};
 use config::{TimeUnit, TimeframeChoice, TimeframeMode};
 use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
-use results::{Paging, RETENTION_CAP, ROW_H, ResultTab, RunState, TimeframeDraft};
+use results::{Paging, RETENTION_CAP, ROW_H, ResultTab, RunState, TimeframeDraft, TotalHits};
 use search::{Fields, SearchForm};
 use style::{ACCENT, BG, BORDER, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
 use tab::Tab;
@@ -81,6 +81,9 @@ struct LogLens {
     tree_menu_at: Point,
     /// A pending destructive action awaiting confirmation.
     confirm: Option<Confirm>,
+    /// Frame counter for the Hit-count spinner, advanced while any Result Tab
+    /// is still counting its total Hits.
+    spinner_frame: usize,
 }
 
 /// Which tree row's management menu is currently open.
@@ -174,6 +177,31 @@ enum Message {
     /// Dismiss the Search settings modal without saving.
     SearchSettingsCancel,
     // Result tab: live query string, timeframe, columns + sort
+    /// The async `list_targets` for a Result Tab's suggestion dropdown landed.
+    ResultTargetsLoaded {
+        run_id: u64,
+        result: Result<Vec<String>, String>,
+    },
+    /// A keystroke in the Search bar's Target input; also opens the dropdown.
+    ResultTargetDraft(u64, String),
+    /// Toggle the Target suggestion dropdown (the caret button next to the
+    /// field).
+    ResultTargetPanelToggle(u64),
+    /// Dismiss the Target suggestion dropdown without committing.
+    ResultTargetPanelDismiss(u64),
+    /// Pick a suggestion from the Target dropdown (commits + re-runs).
+    ResultTargetPicked(u64, String),
+    /// Commit the Target draft (Enter): re-run against the new Target, or
+    /// revert to the committed value when the draft is blank / unchanged.
+    ResultTargetSubmit(u64),
+    /// The `_field_caps` check for a Target the user is switching to landed.
+    /// `Ok` re-points the tab and re-runs; `Err` (e.g. the index does not
+    /// exist) reverts the input and reports the failure in the status bar.
+    ResultTargetProbed {
+        run_id: u64,
+        candidate: String,
+        result: Result<es::FieldCaps, String>,
+    },
     ResultQueryDraft(u64, String),
     ResultQuerySubmit(u64),
     /// A timeframe dropdown pick: a preset applies immediately, `Custom` opens
@@ -231,6 +259,14 @@ enum Message {
         run_id: u64,
         result: Result<String, String>,
     },
+    /// The async `_count` for a run's total Hits landed.
+    TotalHitsLoaded {
+        run_id: u64,
+        generation: u64,
+        result: Result<u64, String>,
+    },
+    /// Advance the Hit-count spinner one frame.
+    SpinnerTick,
     PageLoaded {
         run_id: u64,
         result: Result<es::Page, String>,
@@ -266,6 +302,8 @@ enum Message {
     ConfirmCancel,
     // Misc
     DismissStatus,
+    /// Clear the active Result Tab's failed-Target-switch notice.
+    DismissTargetError(u64),
     Ignore,
 }
 
@@ -292,6 +330,7 @@ impl LogLens {
             sidebar_cursor: Point::ORIGIN,
             tree_menu_at: Point::ORIGIN,
             confirm: None,
+            spinner_frame: 0,
         }
     }
 
@@ -311,6 +350,16 @@ impl LogLens {
             _ => None,
         });
 
+        // Tick the Hit-count spinner only while a run is still counting.
+        let counting = self.open_tabs.iter().any(|t| {
+            matches!(t, Tab::Result(rt) if matches!(rt.total_hits, TotalHits::Loading))
+        });
+        let spinner = if counting {
+            iced::time::every(std::time::Duration::from_millis(90)).map(|_| Message::SpinnerTick)
+        } else {
+            Subscription::none()
+        };
+
         if self.detail_drag.is_some() {
             let drag = iced::event::listen_with(|event, _status, _id| match event {
                 Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
@@ -321,7 +370,7 @@ impl LogLens {
                 }
                 _ => None,
             });
-            return Subscription::batch([escape, drag]);
+            return Subscription::batch([escape, spinner, drag]);
         }
 
         if self.column_drag.is_some() {
@@ -334,10 +383,10 @@ impl LogLens {
                 }
                 _ => None,
             });
-            return Subscription::batch([escape, drag]);
+            return Subscription::batch([escape, spinner, drag]);
         }
 
-        escape
+        Subscription::batch([escape, spinner])
     }
 
     fn next_id(&mut self) -> u64 {
@@ -555,6 +604,51 @@ impl LogLens {
             Message::SearchSettingsSave => return self.save_search_settings(),
             Message::SearchSettingsCancel => self.search_settings = None,
 
+            Message::ResultTargetsLoaded { run_id, result } => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.targets_loading = false;
+                    if let Ok(mut options) = result {
+                        options.sort();
+                        rt.target_options = options;
+                    }
+                }
+            }
+            Message::ResultTargetDraft(run_id, v) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.target_draft = v;
+                    rt.target_panel_open = true;
+                    rt.target_error = None;
+                }
+            }
+            Message::ResultTargetPanelToggle(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.target_panel_open = !rt.target_panel_open;
+                    if rt.target_panel_open {
+                        rt.tf.open = false;
+                    } else {
+                        rt.target_draft = rt.target.clone();
+                    }
+                }
+            }
+            Message::ResultTargetPanelDismiss(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.target_panel_open = false;
+                    rt.target_draft = rt.target.clone();
+                }
+            }
+            Message::ResultTargetPicked(run_id, v) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.target_draft = v;
+                }
+                return self.commit_target(run_id);
+            }
+            Message::ResultTargetSubmit(run_id) => return self.commit_target(run_id),
+            Message::ResultTargetProbed {
+                run_id,
+                candidate,
+                result,
+            } => return self.on_target_probed(run_id, candidate, result),
+
             Message::ResultQueryDraft(run_id, v) => {
                 if let Some(rt) = self.result_mut(run_id) {
                     rt.query_draft = v;
@@ -752,6 +846,21 @@ impl LogLens {
             Message::PitOpened { run_id, result } => {
                 return self.on_pit_opened(run_id, result);
             }
+            Message::TotalHitsLoaded {
+                run_id,
+                generation,
+                result,
+            } => {
+                if let Some(rt) = self.result_mut(run_id)
+                    && rt.total_generation == generation
+                {
+                    rt.total_hits = match result {
+                        Ok(total) => TotalHits::Known(total),
+                        Err(_) => TotalHits::Failed,
+                    };
+                }
+            }
+            Message::SpinnerTick => self.spinner_frame = self.spinner_frame.wrapping_add(1),
             Message::PageLoaded {
                 run_id,
                 result,
@@ -795,6 +904,11 @@ impl LogLens {
                     rt.selected_hit = None;
                     rt.header_menu = None;
                     rt.sort_panel_open = false;
+                    rt.tf.open = false;
+                    if rt.target_panel_open {
+                        rt.target_panel_open = false;
+                        rt.target_draft = rt.target.clone();
+                    }
                 }
             }
             Message::DetailEdit(run_id, action) => {
@@ -893,6 +1007,11 @@ impl LogLens {
             Message::ConfirmCancel => self.confirm = None,
 
             Message::DismissStatus => self.status = None,
+            Message::DismissTargetError(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.target_error = None;
+                }
+            }
             Message::Ignore => {}
         }
 
@@ -1048,20 +1167,12 @@ impl LogLens {
         };
 
         let form_id = self.next_id();
-        self.search_settings = Some(SearchForm::from_saved(form_id, conn_id.clone(), &saved));
-
-        let targets = match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
-            Some(endpoint) => Task::perform(es::list_targets(endpoint), move |result| {
-                Message::SearchTargetsLoaded { form_id, result }
-            }),
-            None => {
-                if let Some(f) = self.form_mut(form_id) {
-                    f.targets_loading = false;
-                }
-                Task::none()
-            }
-        };
-        Task::batch([targets, self.load_form_fields()])
+        let mut form = SearchForm::from_saved(form_id, conn_id.clone(), &saved);
+        // The edit modal has no Target field, so it never needs the index list
+        // or a `_field_caps` prewarm.
+        form.targets_loading = false;
+        self.search_settings = Some(form);
+        Task::none()
     }
 
     fn delete_search(&mut self, conn_id: String, search_id: String) -> Task<Message> {
@@ -1153,14 +1264,15 @@ impl LogLens {
         })
     }
 
-    /// Writes a Result Tab's live query string / timeframe / Column / sort
-    /// choices back onto its Saved Search and persists the config.
+    /// Writes a Result Tab's live Target / query string / timeframe / Column /
+    /// sort choices back onto its Saved Search and persists the config.
     fn sync_saved_from_result(&mut self, run_id: u64) {
-        let Some((conn_id, saved_id, query_string, timeframe, columns, sort)) =
+        let Some((conn_id, saved_id, target, query_string, timeframe, columns, sort)) =
             self.result_mut(run_id).map(|rt| {
                 (
                     rt.connection_id.clone(),
                     rt.saved_id.clone(),
+                    rt.target.clone(),
                     rt.query_string.clone(),
                     rt.timeframe.clone(),
                     rt.columns.clone(),
@@ -1173,6 +1285,7 @@ impl LogLens {
         if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id)
             && let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id)
         {
+            saved.target = target;
             saved.query_string = query_string;
             saved.timeframe = timeframe;
             saved.columns = columns;
@@ -1181,6 +1294,87 @@ impl LogLens {
         if let Err(err) = config::save(&self.config) {
             self.status = Some(format!("Could not save config: {err}"));
         }
+    }
+
+    /// Starts committing the Search bar's Target draft. A blank or unchanged
+    /// draft just closes the dropdown (reverting a blank one). A real change is
+    /// only *probed* here — a `_field_caps` call against the candidate — so the
+    /// current results are left untouched until it comes back. The re-point and
+    /// re-run happen in [`Self::on_target_probed`] on success; a failure (e.g.
+    /// the index does not exist) surfaces in the status bar instead.
+    fn commit_target(&mut self, run_id: u64) -> Task<Message> {
+        let Some(rt) = self.result_mut(run_id) else {
+            return Task::none();
+        };
+        rt.target_panel_open = false;
+        let draft = rt.target_draft.trim().to_string();
+        if draft.is_empty() || draft == rt.target {
+            rt.target_draft = rt.target.clone();
+            rt.target_probe = None;
+            rt.target_error = None;
+            return Task::none();
+        }
+        rt.target_draft = draft.clone();
+        rt.target_probe = Some(draft.clone());
+        let conn_id = rt.connection_id.clone();
+
+        match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
+            Some(endpoint) => {
+                let candidate = draft.clone();
+                Task::perform(es::field_caps(endpoint, draft), move |result| {
+                    Message::ResultTargetProbed {
+                        run_id,
+                        candidate,
+                        result,
+                    }
+                })
+            }
+            None => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.target_probe = None;
+                    rt.target_draft = rt.target.clone();
+                }
+                Task::none()
+            }
+        }
+    }
+
+    /// Handles the `_field_caps` probe for a Target the user is switching to.
+    /// On success the tab re-points to the candidate (carrying the fresh field
+    /// list), persists, and re-runs. On failure the input reverts and the
+    /// error goes to the info bar (`target_error`), leaving the current
+    /// results in place.
+    fn on_target_probed(
+        &mut self,
+        run_id: u64,
+        candidate: String,
+        result: Result<es::FieldCaps, String>,
+    ) -> Task<Message> {
+        let Some(rt) = self.result_mut(run_id) else {
+            return Task::none();
+        };
+        // A newer probe (or a plain re-open) has superseded this one.
+        if rt.target_probe.as_deref() != Some(candidate.as_str()) {
+            return Task::none();
+        }
+        rt.target_probe = None;
+
+        let caps = match result {
+            Ok(caps) => caps,
+            Err(err) => {
+                rt.target_draft = rt.target.clone();
+                rt.target_error = Some(format!("Target \u{201c}{candidate}\u{201d}: {err}"));
+                return Task::none();
+            }
+        };
+
+        rt.target = candidate.clone();
+        rt.target_draft = candidate;
+        rt.target_error = None;
+        rt.all_fields = caps.all;
+        rt.sortable_fields = caps.sortable;
+        self.sync_saved_from_result(run_id);
+        self.start_run(run_id)
     }
 
     fn save_search_form(&mut self) -> Task<Message> {
@@ -1242,14 +1436,14 @@ impl LogLens {
         };
         let conn_id = form.connection_id.clone();
         let name = form.name.trim().to_string();
-        let target = form.target.trim().to_string();
         let timestamp_field = form.resolved_timestamp_field();
 
+        // The modal edits Name and Timestamp field only; the Target is
+        // re-pointed from the Search bar.
         if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id)
             && let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id)
         {
             saved.name = name;
-            saved.target = target;
             saved.timestamp_field = timestamp_field;
         }
         if let Err(err) = config::save(&self.config) {
@@ -1263,8 +1457,7 @@ impl LogLens {
             .iter()
             .any(|t| matches!(t, Tab::Result(rt) if rt.saved_id == saved_id));
         if has_tab {
-            let caps = form.fields.caps().cloned();
-            self.open_result_tab(conn_id, saved_id, None, caps, true)
+            self.open_result_tab(conn_id, saved_id, None, None, true)
         } else {
             Task::none()
         }
@@ -1315,6 +1508,10 @@ impl LogLens {
                         let target_changed = rt.target != saved.target;
                         rt.saved_name = saved.name.clone();
                         rt.target = saved.target.clone();
+                        rt.target_draft = saved.target.clone();
+                        rt.target_probe = None;
+                        rt.target_error = None;
+                        rt.target_panel_open = false;
                         rt.query_string = saved.query_string.clone();
                         rt.query_draft = saved.query_string.clone();
                         rt.timestamp_field = saved.timestamp_field.clone();
@@ -1376,6 +1573,12 @@ impl LogLens {
             saved_id,
             saved_name: saved.name.clone(),
             target: saved.target.clone(),
+            target_draft: saved.target.clone(),
+            target_probe: None,
+            target_error: None,
+            target_options: Vec::new(),
+            targets_loading: true,
+            target_panel_open: false,
             query_string: saved.query_string.clone(),
             query_draft: saved.query_string.clone(),
             timestamp_field: saved.timestamp_field.clone(),
@@ -1395,6 +1598,8 @@ impl LogLens {
             hits: Vec::new(),
             state: RunState::Loading,
             paging: Paging::Idle,
+            total_hits: TotalHits::Loading,
+            total_generation: 0,
             scroll_y: 0.0,
             viewport_h: 600.0,
             selected_hit: None,
@@ -1416,36 +1621,65 @@ impl LogLens {
             }
         }
 
-        let fetch_fields: Task<Message> = if need_fields {
-            match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
-                Some(endpoint) => Task::perform(es::field_caps(endpoint, target), move |result| {
+        let endpoint = self.connection(&conn_id).and_then(|c| self.endpoint_for(c));
+
+        let fetch_fields: Task<Message> = match (&endpoint, need_fields) {
+            (Some(endpoint), true) => {
+                Task::perform(es::field_caps(endpoint.clone(), target), move |result| {
                     Message::ResultFieldsLoaded { run_id, result }
-                }),
-                None => Task::none(),
+                })
             }
-        } else {
-            Task::none()
+            _ => Task::none(),
         };
 
-        Task::batch([fetch_fields, self.start_run(run_id)])
+        // Populate the Search bar's Target suggestion dropdown for this tab.
+        let fetch_targets: Task<Message> = match &endpoint {
+            Some(endpoint) => Task::perform(es::list_targets(endpoint.clone()), move |result| {
+                Message::ResultTargetsLoaded { run_id, result }
+            }),
+            None => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.targets_loading = false;
+                }
+                Task::none()
+            }
+        };
+
+        Task::batch([fetch_fields, fetch_targets, self.start_run(run_id)])
     }
 
     /// Freshens the range, discards any prior PIT, opens a new one, and (on
     /// success) fetches the first Page.
     fn start_run(&mut self, run_id: u64) -> Task<Message> {
-        let Some((conn_id, target, old_pit)) = self.result_mut(run_id).map(|rt| {
-            rt.state = RunState::Loading;
-            rt.hits.clear();
-            rt.paging = Paging::Idle;
-            rt.scroll_y = 0.0;
-            rt.selected_hit = None;
-            // Re-resolve the range so a relative window re-anchors to "now".
-            let (gte, lte) = rt.timeframe.bounds();
-            rt.gte = gte;
-            rt.lte = lte;
-            let old_pit = rt.pit_id.take();
-            (rt.connection_id.clone(), rt.target.clone(), old_pit)
-        }) else {
+        let Some((conn_id, target, old_pit, generation, count_params)) =
+            self.result_mut(run_id).map(|rt| {
+                rt.state = RunState::Loading;
+                rt.hits.clear();
+                rt.paging = Paging::Idle;
+                rt.scroll_y = 0.0;
+                rt.selected_hit = None;
+                // Re-resolve the range so a relative window re-anchors to "now".
+                let (gte, lte) = rt.timeframe.bounds();
+                rt.gte = gte;
+                rt.lte = lte;
+                rt.total_hits = TotalHits::Loading;
+                rt.total_generation += 1;
+                let count_params = es::CountParams {
+                    query_string: rt.query_string.clone(),
+                    timestamp_field: rt.timestamp_field.clone(),
+                    gte: rt.gte.clone(),
+                    lte: rt.lte.clone(),
+                };
+                let old_pit = rt.pit_id.take();
+                (
+                    rt.connection_id.clone(),
+                    rt.target.clone(),
+                    old_pit,
+                    rt.total_generation,
+                    count_params,
+                )
+            })
+        else {
             return Task::none();
         };
 
@@ -1462,6 +1696,14 @@ impl LogLens {
         match self.endpoint_for(conn) {
             Some(endpoint) => Task::batch([
                 close_old,
+                Task::perform(
+                    es::count(endpoint.clone(), target.clone(), count_params),
+                    move |result| Message::TotalHitsLoaded {
+                        run_id,
+                        generation,
+                        result,
+                    },
+                ),
                 Task::perform(es::open_pit(endpoint, target), move |result| {
                     Message::PitOpened { run_id, result }
                 }),
@@ -1614,6 +1856,9 @@ impl LogLens {
         if let Some(popover) = self.timeframe_popover_overlay() {
             layers.push(popover);
         }
+        if let Some(dropdown) = self.target_suggestions_overlay() {
+            layers.push(dropdown);
+        }
         if let Some(form) = &self.connection_form {
             layers.push(self.connection_form_modal(form));
         }
@@ -1627,11 +1872,13 @@ impl LogLens {
             layers.push(self.confirm_modal(confirm));
         }
 
-        if layers.len() == 1 {
-            layers.pop().unwrap()
-        } else {
-            stack(layers).width(Fill).height(Fill).into()
-        }
+        // Always wrap in a `stack`, even with no overlays: collapsing to the
+        // bare `base` when the last overlay closes (or expanding away from it
+        // when the first opens) swaps the root widget's type, which discards
+        // the whole widget tree's state — including `text_input` focus. The
+        // Target dropdown opens *while* the user is typing in the Search bar,
+        // so that reset would drop focus after every keystroke.
+        stack(layers).width(Fill).height(Fill).into()
     }
 
     fn main_area(&self) -> Element<'_, Message> {
@@ -1664,18 +1911,51 @@ impl LogLens {
     }
 
     /// A persistent info bar across the very bottom of the window, carrying
-    /// summary details for the active tab. Currently the loaded-Hit count for
-    /// a Result Tab; empty otherwise.
+    /// summary details for the active tab: the loaded-Hit count for a Result
+    /// Tab on the left, and a failed Target switch (a red outlined pill) on
+    /// the right.
     fn info_bar(&self) -> Element<'_, Message> {
         let mut items: Vec<Element<'_, Message>> = Vec::new();
         if let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) {
-            items.push(meta(&format!("{} hits", tab.hits.len())));
+            items.push(self.hit_count_readout(tab));
+            if let Some(err) = &tab.target_error {
+                items.push(space().width(Fill).into());
+                items.push(error_pill(tab.run_id, err));
+            }
         }
+        // Fixed height so a transient `error_pill` (taller than the plain
+        // hit-count readout) can't nudge the whole bar upward when it appears.
         container(row(items).spacing(12.0).align_y(iced::Alignment::Center))
             .style(|_| style::panel(PANEL_ALT))
             .width(Fill)
-            .padding(Padding::new(4.0).left(12.0).right(12.0))
+            .height(Length::Fixed(24.0))
+            .align_y(iced::alignment::Vertical::Center)
+            .padding(Padding::new(0.0).left(12.0).right(12.0))
             .into()
+    }
+
+    /// The bottom-bar Hit-count readout: how many Hits are loaded into the
+    /// table, then the total matching Hits once `_count` lands — an animated
+    /// spinner stands in for the total while it is still in flight, and it is
+    /// dropped entirely if the count failed.
+    fn hit_count_readout<'a>(&self, tab: &'a ResultTab) -> Element<'a, Message> {
+        let loaded = thousands(tab.hits.len() as u64);
+        match tab.total_hits {
+            TotalHits::Loading => row![
+                meta(&format!("Loaded {loaded} of")),
+                text(spinner_frame(self.spinner_frame))
+                    .size(12.0)
+                    .color(TEXT_DIM),
+                meta("hits"),
+            ]
+            .spacing(5.0)
+            .align_y(iced::Alignment::Center)
+            .into(),
+            TotalHits::Known(total) => {
+                meta(&format!("Loaded {loaded} of {} hits", thousands(total)))
+            }
+            TotalHits::Failed => meta(&format!("Loaded {loaded} hits")),
+        }
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
@@ -1950,9 +2230,29 @@ impl LogLens {
         .text_size(12.0)
         .padding(4.0);
 
+        // The Target is edited inline here, Kibana-style: typing opens a
+        // suggestion dropdown (`target_suggestions_overlay`) and the caret
+        // button toggles it; a pick or Enter re-points the tab. Free text
+        // (patterns like `logs-*`) commits on Enter without appearing in the
+        // list.
+        let target_ctl = row![
+            text_input("index or data stream", &tab.target_draft)
+                .on_input(move |v| Message::ResultTargetDraft(run_id, v))
+                .on_submit(Message::ResultTargetSubmit(run_id))
+                .size(12.0)
+                .padding(4.0)
+                .width(Length::Fixed(160.0)),
+            button(text("\u{25be}").size(9.0).color(TEXT_DIM))
+                .on_press(Message::ResultTargetPanelToggle(run_id))
+                .padding(Padding::new(4.0).left(6.0).right(6.0))
+                .style(style::picker_row(tab.target_panel_open)),
+        ]
+        .spacing(2.0)
+        .align_y(iced::Alignment::Center);
+
         let row1 = container(
             row![
-                text(&tab.target).size(12.0).color(TEXT_DIM),
+                target_ctl,
                 text_input("Lucene Query", &tab.query_draft)
                     .on_input(move |v| Message::ResultQueryDraft(run_id, v))
                     .on_submit(Message::ResultQuerySubmit(run_id))
@@ -2015,6 +2315,74 @@ impl LogLens {
         Some(
             mouse_area(anchored)
                 .on_press(Message::ResultTfCancel(run_id))
+                .into(),
+        )
+    }
+
+    /// The Search bar's Target suggestion dropdown, floated as a stack layer
+    /// under the Target input so it never reflows the strips or table below.
+    /// Anchored with the same top offset as the timeframe popover; a click
+    /// anywhere outside dismisses it.
+    fn target_suggestions_overlay(&self) -> Option<Element<'_, Message>> {
+        let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
+            return None;
+        };
+        if !tab.target_panel_open {
+            return None;
+        }
+        let run_id = tab.run_id;
+
+        const CARD_W: f32 = 240.0;
+        // Matches `timeframe_popover_overlay`: Menu bar, then the options strip
+        // (only once a run has loaded), then the Search bar row.
+        let mut top = 25.0;
+        if matches!(tab.state, RunState::Loaded | RunState::Empty) {
+            top += 29.0;
+        }
+        top += 40.0;
+
+        let body: Element<'_, Message> = if tab.targets_loading {
+            text("Loading indices\u{2026}")
+                .size(11.0)
+                .color(TEXT_DIM)
+                .into()
+        } else {
+            let matches = tab.target_matches();
+            if matches.is_empty() {
+                text("No matching indices")
+                    .size(11.0)
+                    .color(TEXT_DIM)
+                    .into()
+            } else {
+                let mut opts = column![].spacing(1.0);
+                for name in matches {
+                    opts = opts.push(
+                        button(text(name.clone()).size(12.0))
+                            .on_press(Message::ResultTargetPicked(run_id, name.clone()))
+                            .width(Fill)
+                            .padding(Padding::new(3.0).left(8.0))
+                            .style(style::picker_row(false)),
+                    );
+                }
+                opts.into()
+            }
+        };
+
+        let card = container(container(body).padding(4.0))
+            .style(|_| style::panel(PANEL))
+            .width(Length::Fixed(CARD_W));
+        // Left edge of the Target input: sidebar (240) + its rule (1) + the
+        // Search bar row's left padding (12).
+        let anchored = container(column![
+            space().height(top),
+            row![space().width(253.0), card, space().width(Fill)],
+        ])
+        .width(Fill)
+        .height(Fill);
+
+        Some(
+            mouse_area(anchored)
+                .on_press(Message::ResultTargetPanelDismiss(run_id))
                 .into(),
         )
     }
@@ -2116,43 +2484,53 @@ impl LogLens {
 
     // --- Search settings (create form + edit modal) ------------------
 
-    /// The three structural fields shared by the new-Saved-Search form and the
-    /// Search settings modal: name, Target (with typeahead), timestamp field.
-    fn search_settings_fields<'a>(&'a self, form: &'a SearchForm) -> Vec<Element<'a, Message>> {
+    /// The structural fields shared by the new-Saved-Search form and the Search
+    /// settings modal: name, timestamp field, and — only when `include_target`
+    /// — the Target (with typeahead). The edit modal omits the Target; it is
+    /// re-pointed from the Search bar instead.
+    fn search_settings_fields<'a>(
+        &'a self,
+        form: &'a SearchForm,
+        include_target: bool,
+    ) -> Vec<Element<'a, Message>> {
         let mut fields: Vec<Element<'a, Message>> = vec![
             field_label("Name"),
             text_input("checkout-errors", &form.name)
                 .on_input(Message::SearchName)
                 .padding(6.0)
                 .into(),
-            field_label("Target — index, data stream, or pattern"),
-            text_input("logs-*", &form.target)
-                .on_input(Message::SearchTargetInput)
-                .padding(6.0)
-                .into(),
         ];
 
-        if form.targets_loading {
+        if include_target {
+            fields.push(field_label("Target — index, data stream, or pattern"));
             fields.push(
-                text("Loading indices\u{2026}")
-                    .size(11.0)
-                    .color(TEXT_DIM)
+                text_input("logs-*", &form.target)
+                    .on_input(Message::SearchTargetInput)
+                    .padding(6.0)
                     .into(),
             );
-        } else {
-            let matches = form.target_matches();
-            if !matches.is_empty() {
-                let mut opts = column![].spacing(1.0);
-                for name in matches {
-                    opts = opts.push(
-                        button(text(name.clone()).size(12.0))
-                            .on_press(Message::SearchTargetPicked(name.clone()))
-                            .width(Fill)
-                            .padding(Padding::new(3.0).left(8.0))
-                            .style(style::picker_row(false)),
-                    );
+            if form.targets_loading {
+                fields.push(
+                    text("Loading indices\u{2026}")
+                        .size(11.0)
+                        .color(TEXT_DIM)
+                        .into(),
+                );
+            } else {
+                let matches = form.target_matches();
+                if !matches.is_empty() {
+                    let mut opts = column![].spacing(1.0);
+                    for name in matches {
+                        opts = opts.push(
+                            button(text(name.clone()).size(12.0))
+                                .on_press(Message::SearchTargetPicked(name.clone()))
+                                .width(Fill)
+                                .padding(Padding::new(3.0).left(8.0))
+                                .style(style::picker_row(false)),
+                        );
+                    }
+                    fields.push(container(opts).style(|_| style::panel(PANEL)).into());
                 }
-                fields.push(container(opts).style(|_| style::panel(PANEL)).into());
             }
         }
 
@@ -2190,7 +2568,7 @@ impl LogLens {
         .spacing(6.0)
         .max_width(560.0);
 
-        for field in self.search_settings_fields(form) {
+        for field in self.search_settings_fields(form, true) {
             col = col.push(field);
         }
 
@@ -2238,7 +2616,7 @@ impl LogLens {
         .spacing(6.0)
         .width(Fill);
 
-        for field in self.search_settings_fields(form) {
+        for field in self.search_settings_fields(form, false) {
             card = card.push(field);
         }
 
@@ -2851,12 +3229,17 @@ impl LogLens {
                 .size(12.0)
                 .color(TEXT_DIM)
                 .into(),
-            Paging::Capped => text(format!(
-                "Showing first {RETENTION_CAP} Hits — refine your search"
-            ))
-            .size(12.0)
-            .color(TEXT_DIM)
-            .into(),
+            Paging::Capped => {
+                let msg = match tab.total_hits {
+                    TotalHits::Known(total) if total > RETENTION_CAP as u64 => format!(
+                        "Showing first {} of {} Hits — refine your search",
+                        thousands(RETENTION_CAP as u64),
+                        thousands(total),
+                    ),
+                    _ => format!("Showing first {RETENTION_CAP} Hits — refine your search"),
+                };
+                text(msg).size(12.0).color(TEXT_DIM).into()
+            }
             Paging::Failed(err) => row![
                 text(format!("Failed to load more — {err}"))
                     .size(12.0)
@@ -3191,4 +3574,61 @@ fn apply_page(rt: &mut ResultTab, result: Result<es::Page, String>, append: bool
 
 fn meta<'a>(value: &str) -> Element<'a, Message> {
     text(value.to_string()).size(12.0).color(TEXT_DIM).into()
+}
+
+/// A solid-red alert pill for the info bar: a warning triangle, `msg`, and a
+/// `\u{00d7}` button that clears the notice.
+fn error_pill<'a>(run_id: u64, msg: &str) -> Element<'a, Message> {
+    container(
+        row![
+            svg(Handle::clone(&icons::WARNING))
+                .width(Length::Fixed(12.0))
+                .height(Length::Fixed(12.0))
+                .style(|_theme, _status| svg::Style {
+                    color: Some(Color::WHITE)
+                }),
+            text(msg.to_string()).size(12.0).color(Color::WHITE),
+            button(text("\u{00d7}").size(12.0).color(Color::WHITE))
+                .on_press(Message::DismissTargetError(run_id))
+                .padding(Padding::new(0.0).left(4.0).right(4.0))
+                .style(style::bare_button()),
+        ]
+        .spacing(6.0)
+        .align_y(iced::Alignment::Center),
+    )
+    // No vertical padding and a borderless (still rounded) fill so the pill
+    // stays within a single line of the info bar — see `info_bar`.
+    .padding(Padding::new(0.0).left(8.0).right(4.0))
+    .style(|_| {
+        let mut s = style::panel(ERR_RED);
+        s.border = Border {
+            color: ERR_RED,
+            width: 0.0,
+            radius: 3.0.into(),
+        };
+        s
+    })
+    .into()
+}
+
+/// One frame of the braille activity spinner, chosen by a monotonic counter.
+fn spinner_frame(frame: usize) -> &'static str {
+    const FRAMES: [&str; 10] = [
+        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
+        "\u{2827}", "\u{2807}", "\u{280f}",
+    ];
+    FRAMES[frame % FRAMES.len()]
+}
+
+/// Groups an integer into thousands: `1234567` → `1,234,567`.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }

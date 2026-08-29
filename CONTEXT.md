@@ -20,13 +20,16 @@ _Avoid_: cluster, server, host, profile
 **Saved Search**:
 A persisted, named query belonging to one Connection: a Target, a query string, a
 timeframe, a set of Columns, and a sort. Opening one runs it and shows the results
-in a Result Tab. Its query string, timeframe, Columns and sort can be changed from
-the Search bar while viewing that tab; those changes are saved back automatically.
+in a Result Tab. Its Target, query string, timeframe, Columns and sort can all be
+changed from the Search bar while viewing that tab; those changes are saved back
+automatically.
 _Avoid_: query, view, filter, saved query
 
 **Target**:
 The index, data stream, or index pattern a Saved Search runs against (e.g.
-`logs-app-prod`, `logs-*`). Chosen when the Saved Search is created.
+`logs-app-prod`, `logs-*`). Set when the Saved Search is created and re-pointed
+from the Search bar afterwards, with a typeahead over the Connection's indices
+and data streams. Changing it re-runs the Search against the new Target.
 _Avoid_: index (when a data stream or pattern may be meant), source
 
 ### Querying
@@ -74,22 +77,23 @@ _Avoid_: toolbar, ribbon
 
 **Search bar**:
 The controls for the Saved Search whose Result Tab is currently active, shown
-above the tab strip: its query string, timeframe, loaded Hit count, and Columns.
-Editing the query string, timeframe or Columns re-runs the Search. Hidden when no
-Result Tab is active.
+above the tab strip: its Target, query string, timeframe, loaded Hit count, and
+Columns. Editing the Target, query string, timeframe or Columns re-runs the
+Search. Hidden when no Result Tab is active.
 _Avoid_: filter bar, query bar, toolbar
 
 **Result Tab**:
 A tab in the main area showing the Hits from one Saved Search as a virtualized
-table. Its query string, timeframe and Columns are edited in the Search bar above
-it.
+table. Its Target, query string, timeframe and Columns are edited in the Search
+bar above it.
 _Avoid_: results pane, grid, output
 
 **Search settings**:
-The name, Target, and timestamp field of a Saved Search — the parts set outside
-the Search bar. Set in a form when creating a Saved Search and in a modal when
-changing an existing one; a new Saved Search's query string, timeframe, Columns
-and sort take defaults, tuned from the Search bar afterwards.
+The name and timestamp field of a Saved Search — the parts set outside the Search
+bar. Edited in a modal for an existing Saved Search; the creation form also
+carries the Target (the one setting the modal drops, since the Target is
+re-pointed from the Search bar). A new Saved Search's query string, timeframe,
+Columns and sort take defaults, tuned from the Search bar afterwards.
 _Avoid_: properties, config, options
 
 **Column**:

@@ -104,6 +104,19 @@ pub enum RunState {
     Error(String),
 }
 
+/// The total number of Hits matching a Result Tab's query, fetched via
+/// `_count` alongside the first Page. Independent of the Retention cap on
+/// loaded Hits, so it can (and often will) exceed `hits.len()`.
+#[derive(Debug, Clone)]
+pub enum TotalHits {
+    /// The `_count` request is in flight.
+    Loading,
+    /// The cluster reported this many matching Hits.
+    Known(u64),
+    /// The `_count` request failed; no total to show.
+    Failed,
+}
+
 /// Where paging past the first Page stands.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Paging {
@@ -127,6 +140,26 @@ pub struct ResultTab {
     pub saved_id: String,
     pub saved_name: String,
     pub target: String,
+    /// Draft text for the Search bar's Target input, committed to `target` (and
+    /// re-run, with a fresh `_field_caps`) when a suggestion is picked or Enter
+    /// is pressed.
+    pub target_draft: String,
+    /// A Target the user is trying to switch to, still being checked with
+    /// `_field_caps`. `target` / `hits` are left alone until the check passes;
+    /// if it fails (e.g. the index does not exist) the error goes to
+    /// `target_error` and the current results stay put.
+    pub target_probe: Option<String>,
+    /// The last failed Target switch, shown in the info bar. Cleared when the
+    /// user edits the Target again or a switch succeeds.
+    pub target_error: Option<String>,
+    /// Index / data stream names offered by the Target suggestion dropdown,
+    /// from `_cat/indices` + `_data_stream`. Best-effort: empty if the lookup
+    /// failed or is still in flight.
+    pub target_options: Vec<String>,
+    /// Whether the `list_targets` lookup for this tab is still running.
+    pub targets_loading: bool,
+    /// Whether the Search bar's Target suggestion dropdown is open.
+    pub target_panel_open: bool,
     pub query_string: String,
     /// Draft text for the Search bar's query-string input, committed to
     /// `query_string` (and re-run) on Enter.
@@ -162,6 +195,11 @@ pub struct ResultTab {
     pub hits: Vec<Hit>,
     pub state: RunState,
     pub paging: Paging,
+    /// Total matching Hits (`_count`), loaded asynchronously each run.
+    pub total_hits: TotalHits,
+    /// Bumped at the start of every run so a late `_count` response from a
+    /// superseded run is discarded rather than shown.
+    pub total_generation: u64,
     /// Latest scroll offset / viewport height, for windowed rendering.
     pub scroll_y: f32,
     pub viewport_h: f32,
@@ -205,6 +243,23 @@ impl ResultTab {
             .last()
             .map(|h| h.sort.clone())
             .filter(|s| !s.is_empty())
+    }
+
+    /// Suggestions for the current Target draft: case-insensitive substring
+    /// matches over the loaded index / data stream names, capped for the
+    /// dropdown. An empty draft offers the first few names as-is; the committed
+    /// Target is kept in the list (Kibana-style) — picking it is just a no-op.
+    pub fn target_matches(&self) -> Vec<&String> {
+        let draft = self.target_draft.trim();
+        // Offer the whole list until the user actually edits away from the
+        // committed Target, then narrow to substring matches.
+        let show_all = draft.is_empty() || draft == self.target;
+        let needle = draft.to_lowercase();
+        self.target_options
+            .iter()
+            .filter(|opt| show_all || opt.to_lowercase().contains(&needle))
+            .take(8)
+            .collect()
     }
 
     pub fn add_column(&mut self, field: &str) {

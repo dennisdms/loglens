@@ -24,3 +24,4 @@ icon!(SORT_ASCENDING => "sort-ascending.svg");
 icon!(SORT_DESCENDING => "sort-descending.svg");
 icon!(SORT_REMOVE => "sort-remove.svg");
 icon!(REFRESH => "refresh.svg");
+icon!(WARNING => "warning-triangle.svg");

@@ -247,6 +247,73 @@ pub struct SearchParams {
     pub search_after: Option<Vec<Value>>,
 }
 
+/// Everything a `_count` call needs — the query half of a [`SearchParams`],
+/// without the PIT / sort / paging machinery.
+#[derive(Debug, Clone)]
+pub struct CountParams {
+    /// Empty means "no `query_string` clause" (range-only).
+    pub query_string: String,
+    pub timestamp_field: String,
+    pub gte: String,
+    pub lte: String,
+}
+
+/// The `bool` query shared by `_search` and `_count`: a timestamp `range`
+/// filter, plus a `query_string` `must` clause when one is set.
+fn range_bool_query(query_string: &str, timestamp_field: &str, gte: &str, lte: &str) -> Value {
+    let mut bool_query = serde_json::Map::new();
+    bool_query.insert(
+        "filter".to_string(),
+        json!([{
+            "range": { timestamp_field: { "gte": gte, "lte": lte } }
+        }]),
+    );
+    if !query_string.trim().is_empty() {
+        bool_query.insert(
+            "must".to_string(),
+            json!([{ "query_string": { "query": query_string } }]),
+        );
+    }
+    json!({ "bool": Value::Object(bool_query) })
+}
+
+/// `POST {target}/_count` — the total number of Hits matching a query,
+/// independent of the PIT, paging, and the Retention cap on loaded Hits.
+pub async fn count(endpoint: Endpoint, target: String, params: CountParams) -> Result<u64, String> {
+    let body = json!({
+        "query": range_bool_query(
+            &params.query_string,
+            &params.timestamp_field,
+            &params.gte,
+            &params.lte,
+        ),
+    });
+
+    let client = client(&endpoint)?;
+    let url = format!(
+        "{}/{}/_count",
+        base(&endpoint.url),
+        target.trim_matches('/')
+    );
+    let response = with_auth(client.post(&url).json(&body), &endpoint.auth)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(extract_error(&text, status.as_u16()));
+    }
+
+    #[derive(Deserialize)]
+    struct CountResponse {
+        count: u64,
+    }
+    serde_json::from_str::<CountResponse>(&text)
+        .map(|c| c.count)
+        .map_err(|e| format!("unexpected _count response: {e}"))
+}
+
 /// `POST {target}/_pit?keep_alive=1m` — opens a Point-in-Time.
 pub async fn open_pit(endpoint: Endpoint, target: String) -> Result<String, String> {
     let client = client(&endpoint)?;
@@ -304,26 +371,17 @@ pub async fn search(
         .collect();
     sort.push(json!({ "_shard_doc": if primary_desc { "desc" } else { "asc" } }));
 
-    let mut bool_query = serde_json::Map::new();
-    bool_query.insert(
-        "filter".to_string(),
-        json!([{
-            "range": { (params.timestamp_field.clone()): { "gte": params.gte, "lte": params.lte } }
-        }]),
-    );
-    if !params.query_string.trim().is_empty() {
-        bool_query.insert(
-            "must".to_string(),
-            json!([{ "query_string": { "query": params.query_string } }]),
-        );
-    }
-
     let mut body = json!({
         "size": params.size,
         "track_total_hits": false,
         "pit": { "id": pit_id, "keep_alive": "1m" },
         "sort": Value::Array(sort),
-        "query": { "bool": Value::Object(bool_query) },
+        "query": range_bool_query(
+            &params.query_string,
+            &params.timestamp_field,
+            &params.gte,
+            &params.lte,
+        ),
     });
     if let Some(after) = &params.search_after {
         body["search_after"] = json!(after);
