@@ -351,9 +351,10 @@ impl LogLens {
         });
 
         // Tick the Hit-count spinner only while a run is still counting.
-        let counting = self.open_tabs.iter().any(|t| {
-            matches!(t, Tab::Result(rt) if matches!(rt.total_hits, TotalHits::Loading))
-        });
+        let counting = self
+            .open_tabs
+            .iter()
+            .any(|t| matches!(t, Tab::Result(rt) if matches!(rt.total_hits, TotalHits::Loading)));
         let spinner = if counting {
             iced::time::every(std::time::Duration::from_millis(90)).map(|_| Message::SpinnerTick)
         } else {
