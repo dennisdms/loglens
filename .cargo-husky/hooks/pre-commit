@@ -1,0 +1,12 @@
+#!/bin/sh
+#
+# Managed by cargo-husky. Edit .cargo-husky/hooks/pre-commit, then run
+# `cargo test` (or any build) to reinstall.
+
+set -e
+
+echo '+ cargo fmt --all -- --check'
+cargo fmt --all -- --check
+
+echo '+ cargo clippy --all-targets --all-features -- -D warnings'
+cargo clippy --all-targets --all-features -- -D warnings

@@ -1,0 +1,43 @@
+{
+  "version": "2.0.0",
+  "options": {
+    "cwd": "${workspaceFolder}/dev"
+  },
+  "presentation": {
+    "reveal": "always",
+    "panel": "dedicated",
+    "clear": true
+  },
+  "tasks": [
+    {
+      "label": "dev: ES up",
+      "detail": "docker compose --profile kibana up -d (Elasticsearch + log generator + Kibana)",
+      "type": "shell",
+      "command": "docker compose --profile kibana up -d",
+      "problemMatcher": [],
+      "group": { "kind": "build", "isDefault": true }
+    },
+    {
+      "label": "dev: generator logs",
+      "detail": "docker compose logs -f generator",
+      "type": "shell",
+      "command": "docker compose logs -f generator",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "dev: ES down",
+      "detail": "docker compose down (a plain down already discards all data)",
+      "type": "shell",
+      "command": "docker compose --profile kibana down",
+      "problemMatcher": []
+    },
+    {
+      "label": "dev: ES status",
+      "detail": "docker compose ps",
+      "type": "shell",
+      "command": "docker compose ps",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 mod config;
 mod connection;
 mod es;
+mod icons;
 mod results;
 mod search;
 mod secrets;
@@ -11,8 +12,9 @@ use std::collections::{HashMap, HashSet};
 
 use iced::widget::{
     button, checkbox, column, container, mouse_area, pick_list, radio, row, rule, scrollable,
-    space, stack, text, text_editor, text_input,
+    space, stack, svg, text, text_editor, text_input,
 };
+use iced::widget::svg::Handle;
 use iced::{Border, Color, Element, Fill, Font, Length, Padding, Point, Subscription, Task, Theme};
 
 use config::{Auth, Config, Connection};
@@ -67,6 +69,9 @@ struct LogLens {
     /// Column index whose header resize grip the pointer is currently over,
     /// so the hairline shows only on hover.
     grip_hover: Option<usize>,
+    /// Column index whose header the pointer is currently over, so the
+    /// "\u{22ee}" settings affordance shows only on hover.
+    header_hover: Option<usize>,
     /// The tree row whose Edit / Delete menu is open.
     tree_menu: Option<TreeMenu>,
     /// Cursor position over the sidebar, tracked so the right-click menu can
@@ -198,8 +203,22 @@ enum Message {
     ColumnDragEnd,
     /// Pointer entered (`Some`) or left (`None`) a header resize grip.
     GripHover(Option<usize>),
-    ResultSortField(u64, String),
-    ResultSortDir(u64, bool),
+    /// Pointer entered (`Some`) or left (`None`) a table Column header.
+    HeaderHover(Option<usize>),
+    /// Toggle a column header's "\u{22ee}" settings menu (by column index).
+    ResultHeaderMenu(u64, usize),
+    /// Close any open column header settings menu.
+    ResultHeaderMenuDismiss(u64),
+    /// Toggle the Search bar's "Sort fields" popover.
+    ResultSortPanel(u64),
+    /// Set a field's sort direction, adding it to the sort order if new.
+    ResultSortSet(u64, String, bool),
+    /// Drop a field from the sort order.
+    ResultSortRemove(u64, String),
+    /// Reorder the sort key at the given position by `delta` places.
+    ResultSortMove(u64, usize, isize),
+    /// Clear the whole sort order.
+    ResultSortClear(u64),
     // Hit detail panel
     HitClicked(u64, usize),
     CloseHitDetail,
@@ -268,6 +287,7 @@ impl LogLens {
             detail_drag: None,
             column_drag: None,
             grip_hover: None,
+            header_hover: None,
             tree_menu: None,
             sidebar_cursor: Point::ORIGIN,
             tree_menu_at: Point::ORIGIN,
@@ -653,22 +673,42 @@ impl LogLens {
             Message::ResultColumnRemove(run_id, i) => {
                 if let Some(rt) = self.result_mut(run_id) {
                     rt.remove_column(i);
+                    rt.header_menu = None;
                 }
                 self.sync_saved_from_result(run_id);
             }
             Message::ResultColumnMove(run_id, i, delta) => {
                 if let Some(rt) = self.result_mut(run_id) {
                     rt.move_column(i, delta);
+                    rt.header_menu = None;
                 }
                 self.sync_saved_from_result(run_id);
             }
-            Message::ResultSortField(run_id, field) => {
+            Message::ResultHeaderMenu(run_id, index) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.header_menu = if rt.header_menu == Some(index) {
+                        None
+                    } else {
+                        Some(index)
+                    };
+                }
+            }
+            Message::ResultHeaderMenuDismiss(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.header_menu = None;
+                }
+            }
+            Message::ResultSortPanel(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.sort_panel_open = !rt.sort_panel_open;
+                }
+            }
+            Message::ResultSortSet(run_id, field, desc) => {
                 let changed = self
                     .result_mut(run_id)
                     .map(|rt| {
-                        let changed = rt.sort_field != field;
-                        rt.sort_field = field;
-                        changed
+                        rt.header_menu = None;
+                        rt.set_sort_dir(&field, desc)
                     })
                     .unwrap_or(false);
                 if changed {
@@ -676,14 +716,33 @@ impl LogLens {
                     return self.start_run(run_id);
                 }
             }
-            Message::ResultSortDir(run_id, desc) => {
+            Message::ResultSortRemove(run_id, field) => {
                 let changed = self
                     .result_mut(run_id)
                     .map(|rt| {
-                        let changed = rt.sort_desc != desc;
-                        rt.sort_desc = desc;
-                        changed
+                        rt.header_menu = None;
+                        rt.remove_sort(&field)
                     })
+                    .unwrap_or(false);
+                if changed {
+                    self.sync_saved_from_result(run_id);
+                    return self.start_run(run_id);
+                }
+            }
+            Message::ResultSortMove(run_id, index, delta) => {
+                let changed = self
+                    .result_mut(run_id)
+                    .map(|rt| rt.move_sort(index, delta))
+                    .unwrap_or(false);
+                if changed {
+                    self.sync_saved_from_result(run_id);
+                    return self.start_run(run_id);
+                }
+            }
+            Message::ResultSortClear(run_id) => {
+                let changed = self
+                    .result_mut(run_id)
+                    .map(|rt| rt.clear_sort())
                     .unwrap_or(false);
                 if changed {
                     self.sync_saved_from_result(run_id);
@@ -735,6 +794,8 @@ impl LogLens {
                     self.active_tab.and_then(|t| self.open_tabs.get_mut(t))
                 {
                     rt.selected_hit = None;
+                    rt.header_menu = None;
+                    rt.sort_panel_open = false;
                 }
             }
             Message::DetailEdit(run_id, action) => {
@@ -786,6 +847,7 @@ impl LogLens {
             }
             Message::ColumnDragEnd => self.column_drag = None,
             Message::GripHover(v) => self.grip_hover = v,
+            Message::HeaderHover(v) => self.header_hover = v,
 
             Message::SidebarCursor(pos) => self.sidebar_cursor = pos,
             Message::TreeMenuToggle(target) => {
@@ -1096,7 +1158,7 @@ impl LogLens {
     /// Writes a Result Tab's live query string / timeframe / Column / sort
     /// choices back onto its Saved Search and persists the config.
     fn sync_saved_from_result(&mut self, run_id: u64) {
-        let Some((conn_id, saved_id, query_string, timeframe, columns, sort_field, sort_desc)) =
+        let Some((conn_id, saved_id, query_string, timeframe, columns, sort)) =
             self.result_mut(run_id).map(|rt| {
                 (
                     rt.connection_id.clone(),
@@ -1104,8 +1166,7 @@ impl LogLens {
                     rt.query_string.clone(),
                     rt.timeframe.clone(),
                     rt.columns.clone(),
-                    rt.sort_field.clone(),
-                    rt.sort_desc,
+                    rt.sort.clone(),
                 )
             })
         else {
@@ -1116,8 +1177,7 @@ impl LogLens {
                 saved.query_string = query_string;
                 saved.timeframe = timeframe;
                 saved.columns = columns;
-                saved.sort_field = sort_field;
-                saved.sort_desc = sort_desc;
+                saved.sort = sort;
             }
         }
         if let Err(err) = config::save(&self.config) {
@@ -1260,8 +1320,7 @@ impl LogLens {
                             rt.query_draft = saved.query_string.clone();
                             rt.timestamp_field = saved.timestamp_field.clone();
                             rt.columns = saved.columns.clone();
-                            rt.sort_field = saved.sort_field.clone();
-                            rt.sort_desc = saved.sort_desc;
+                            rt.sort = saved.sort.clone();
                             rt.timeframe = saved.timeframe.clone();
                             rt.tf = TimeframeDraft::from_timeframe(&saved.timeframe);
                             rt.gte = gte;
@@ -1325,8 +1384,9 @@ impl LogLens {
             columns: saved.columns.clone(),
             column_draft: String::new(),
             col_widths: HashMap::new(),
-            sort_field: saved.sort_field.clone(),
-            sort_desc: saved.sort_desc,
+            sort: saved.sort.clone(),
+            sort_panel_open: false,
+            header_menu: None,
             all_fields,
             sortable_fields,
             timeframe: saved.timeframe.clone(),
@@ -1441,8 +1501,7 @@ impl LogLens {
                     timestamp_field: rt.timestamp_field.clone(),
                     gte: rt.gte.clone(),
                     lte: rt.lte.clone(),
-                    sort_field: rt.sort_field.clone(),
-                    sort_desc: rt.sort_desc,
+                    sort: rt.effective_sort(),
                     size: 1000,
                     search_after: None,
                 },
@@ -1486,8 +1545,7 @@ impl LogLens {
                     timestamp_field: rt.timestamp_field.clone(),
                     gte: rt.gte.clone(),
                     lte: rt.lte.clone(),
-                    sort_field: rt.sort_field.clone(),
-                    sort_desc: rt.sort_desc,
+                    sort: rt.effective_sort(),
                     size: remaining.min(1000),
                     search_after: Some(cursor),
                 },
@@ -1878,7 +1936,11 @@ impl LogLens {
         }
         if matches!(tab.state, RunState::Loaded | RunState::Empty) {
             col.push(rule::horizontal(1.0).into());
-            col.push(self.result_columns_bar(tab));
+            col.push(self.result_sort_bar(tab));
+            if tab.sort_panel_open {
+                col.push(rule::horizontal(1.0).into());
+                col.push(self.sort_fields_popover(tab));
+            }
         }
         Some(column(col).width(Fill).into())
     }
@@ -2207,110 +2269,34 @@ impl LogLens {
         .into()
     }
 
-    /// The live Column + sort editor strip above a Result Tab's table.
-    fn result_columns_bar<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
+    /// The live controls above a Result Tab's table: a "Sort fields" button
+    /// that opens the multi-field sort popover. (Column add / remove / reorder
+    /// live in each header's "\u{22ee}" menu.)
+    fn result_sort_bar<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
         let run_id = tab.run_id;
 
-        let mut chips = row![text("Columns").size(11.0).color(TEXT_DIM)]
-            .spacing(6.0)
-            .align_y(iced::Alignment::Center);
-        for (i, name) in tab.columns.iter().enumerate() {
-            let mut left = button(text("\u{2039}").size(10.0).color(TEXT_DIM))
-                .padding(1.0)
-                .style(style::bare_button());
-            if i > 0 {
-                left = left.on_press(Message::ResultColumnMove(run_id, i, -1));
-            }
-            let mut right = button(text("\u{203a}").size(10.0).color(TEXT_DIM))
-                .padding(1.0)
-                .style(style::bare_button());
-            if i + 1 < tab.columns.len() {
-                right = right.on_press(Message::ResultColumnMove(run_id, i, 1));
-            }
-            chips = chips.push(
-                container(
-                    row![
-                        text(name.clone()).size(11.0).color(TEXT),
-                        left,
-                        right,
-                        button(text("\u{00d7}").size(10.0).color(TEXT_DIM))
-                            .on_press(Message::ResultColumnRemove(run_id, i))
-                            .padding(1.0)
-                            .style(style::bare_button()),
-                    ]
-                    .spacing(3.0)
-                    .align_y(iced::Alignment::Center),
-                )
-                .style(|_| style::panel(PANEL_ALT))
-                .padding(Padding::new(2.0).left(6.0).right(4.0)),
-            );
-        }
-
-        let add: Element<'_, Message> = if !tab.all_fields.is_empty() {
-            pick_list(tab.all_fields.as_slice(), None::<String>, move |f| {
-                Message::ResultColumnAddField(run_id, f)
-            })
-            .placeholder("+ field")
-            .text_size(11.0)
-            .padding(3.0)
-            .into()
+        let sort_summary = if tab.sort.is_empty() {
+            "Sort fields".to_string()
         } else {
+            format!("Sort fields  {}", tab.sort.len())
+        };
+        let sort_btn = button(
             row![
-                text_input("+ field", &tab.column_draft)
-                    .on_input(move |v| Message::ResultColumnDraft(run_id, v))
-                    .on_submit(Message::ResultColumnAdd(run_id))
-                    .size(11.0)
-                    .padding(3.0)
-                    .width(120.0),
-                button(text("Add").size(11.0).color(TEXT))
-                    .on_press(Message::ResultColumnAdd(run_id))
-                    .padding(Padding::new(2.0).left(8.0).right(8.0))
-                    .style(style::picker_row(true)),
+                text("\u{2195}").size(11.0).color(TEXT_DIM),
+                text(sort_summary).size(11.0).color(TEXT),
+                text("\u{25be}").size(9.0).color(TEXT_DIM),
             ]
             .spacing(4.0)
-            .into()
-        };
-        chips = chips.push(add);
-
-        let sort_ctl: Element<'_, Message> = if !tab.sortable_fields.is_empty() {
-            pick_list(
-                tab.sortable_fields.as_slice(),
-                Some(tab.sort_field.clone()),
-                move |f| Message::ResultSortField(run_id, f),
-            )
-            .text_size(11.0)
-            .padding(3.0)
-            .into()
-        } else {
-            text_input("@timestamp", &tab.sort_field)
-                .on_input(move |v| Message::ResultSortField(run_id, v))
-                .size(11.0)
-                .padding(3.0)
-                .width(150.0)
-                .into()
-        };
-        let dir = button(
-            text(if tab.sort_desc {
-                "desc \u{25be}"
-            } else {
-                "asc \u{25b4}"
-            })
-            .size(11.0)
-            .color(TEXT),
+            .align_y(iced::Alignment::Center),
         )
-        .on_press(Message::ResultSortDir(run_id, !tab.sort_desc))
-        .padding(Padding::new(2.0).left(8.0).right(8.0))
-        .style(style::bare_button());
+        .on_press(Message::ResultSortPanel(run_id))
+        .padding(Padding::new(3.0).left(8.0).right(8.0))
+        .style(style::picker_row(tab.sort_panel_open));
 
         container(
-            row![
-                scrollable(chips).horizontal().width(Fill),
-                text("Sort").size(11.0).color(TEXT_DIM),
-                sort_ctl,
-                dir,
-            ]
-            .spacing(8.0)
-            .align_y(iced::Alignment::Center),
+            row![space().width(Fill), sort_btn]
+                .spacing(8.0)
+                .align_y(iced::Alignment::Center),
         )
         .style(|_| style::panel(PANEL))
         .width(Fill)
@@ -2318,42 +2304,203 @@ impl LogLens {
         .into()
     }
 
+    /// The "Sort fields" popover: one row per sort key (remove, direction
+    /// toggle, reorder) plus a picker to add a field and a "Clear sorting"
+    /// action. Drops out of the Search bar until dismissed.
+    fn sort_fields_popover<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
+        let run_id = tab.run_id;
+        let last = tab.sort.len().saturating_sub(1);
+
+        let mut rows = column![].spacing(4.0);
+        for (i, key) in tab.sort.iter().enumerate() {
+            let field = key.field.clone();
+
+            let remove = button(text("\u{00d7}").size(12.0).color(TEXT_DIM))
+                .on_press(Message::ResultSortRemove(run_id, field.clone()))
+                .padding(2.0)
+                .style(style::bare_button());
+
+            let name = container(text(key.field.clone()).size(12.0).color(TEXT))
+                .width(Length::Fixed(220.0))
+                .clip(true);
+
+            let is_time = key.field == tab.timestamp_field;
+            let (asc_label, desc_label) = if is_time {
+                ("Old\u{2013}New", "New\u{2013}Old")
+            } else {
+                ("A\u{2013}Z", "Z\u{2013}A")
+            };
+            let asc = button(text(asc_label).size(11.0).color(TEXT))
+                .on_press(Message::ResultSortSet(run_id, field.clone(), false))
+                .padding(Padding::new(3.0).left(10.0).right(10.0))
+                .style(style::picker_row(!key.desc));
+            let desc = button(text(desc_label).size(11.0).color(TEXT))
+                .on_press(Message::ResultSortSet(run_id, field.clone(), true))
+                .padding(Padding::new(3.0).left(10.0).right(10.0))
+                .style(style::picker_row(key.desc));
+
+            let mut up = button(text("\u{25b4}").size(10.0).color(TEXT_DIM))
+                .padding(1.0)
+                .style(style::bare_button());
+            if i > 0 {
+                up = up.on_press(Message::ResultSortMove(run_id, i, -1));
+            }
+            let mut down = button(text("\u{25be}").size(10.0).color(TEXT_DIM))
+                .padding(1.0)
+                .style(style::bare_button());
+            if i < last {
+                down = down.on_press(Message::ResultSortMove(run_id, i, 1));
+            }
+
+            rows = rows.push(
+                row![
+                    remove,
+                    name,
+                    row![asc, desc].spacing(1.0),
+                    space().width(Fill),
+                    column![up, down].spacing(0.0),
+                ]
+                .spacing(8.0)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        if tab.sort.is_empty() {
+            rows = rows.push(
+                text(
+                    "No sort fields \u{2014} Hits fall back to the timestamp field, newest first.",
+                )
+                .size(11.0)
+                .color(TEXT_DIM),
+            );
+        }
+
+        let pool = if !tab.sortable_fields.is_empty() {
+            &tab.sortable_fields
+        } else {
+            &tab.all_fields
+        };
+        let available: Vec<String> = pool
+            .iter()
+            .filter(|f| tab.sort_index(f).is_none())
+            .cloned()
+            .collect();
+        let picker: Element<'_, Message> = if available.is_empty() {
+            text("Pick fields to sort by")
+                .size(11.0)
+                .color(TEXT_DIM)
+                .into()
+        } else {
+            pick_list(available, None::<String>, move |f| {
+                Message::ResultSortSet(run_id, f, true)
+            })
+            .placeholder("Pick fields to sort by")
+            .text_size(11.0)
+            .padding(3.0)
+            .into()
+        };
+
+        let mut footer = row![picker, space().width(Fill)]
+            .spacing(8.0)
+            .align_y(iced::Alignment::Center);
+        if !tab.sort.is_empty() {
+            footer = footer.push(
+                button(text("Clear sorting").size(11.0).color(ACCENT))
+                    .on_press(Message::ResultSortClear(run_id))
+                    .padding(Padding::new(3.0).left(8.0).right(8.0))
+                    .style(style::bare_button()),
+            );
+        }
+
+        container(
+            column![rows, rule::horizontal(1.0), footer]
+                .spacing(8.0)
+                .width(Fill),
+        )
+        .style(|_| style::panel(PANEL))
+        .width(Fill)
+        .padding(Padding::new(8.0).left(12.0).right(12.0))
+        .into()
+    }
+
     fn hit_table<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
         let run_id = tab.run_id;
         let last = tab.columns.len().saturating_sub(1);
-        let header = row(tab.columns.iter().enumerate().map(
-            |(i, col)| -> Element<'_, Message> {
-                let label = container(text(col.clone()).size(12.0).color(TEXT_DIM))
+        let multi_sort = tab.sort.len() > 1;
+        let header = row(tab
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, col)| -> Element<'_, Message> {
+                let mut label_row = row![text(col.clone()).size(12.0).color(TEXT_DIM)]
+                    .spacing(3.0)
+                    .align_y(iced::Alignment::Center);
+                if let Some(rank) = tab.sort_index(col) {
+                    let arrow = if tab.sort[rank].desc {
+                        "\u{25be}"
+                    } else {
+                        "\u{25b4}"
+                    };
+                    label_row = label_row.push(text(arrow).size(10.0).color(TEXT));
+                    if multi_sort {
+                        label_row =
+                            label_row.push(text(format!("{}", rank + 1)).size(9.0).color(TEXT_DIM));
+                    }
+                }
+                let label = container(label_row)
                     .width(Fill)
                     .clip(true)
                     .padding(Padding::new(4.0).left(6.0));
 
+                // A "\u{22ee}" affordance that opens this Column's settings menu
+                // (add / remove / reorder / sort). Like the resize grip, it only shows while
+                // the pointer is over the header (or the menu is open); a
+                // fixed-width slot keeps the header from reflowing on hover.
+                let show_dots =
+                    self.header_hover == Some(i) || tab.header_menu == Some(i);
+                let dots: Element<'_, Message> = if show_dots {
+                    button(text("\u{22ee}").size(12.0).color(TEXT_DIM))
+                        .on_press(Message::ResultHeaderMenu(run_id, i))
+                        .padding(Padding::new(0.0).left(2.0).right(2.0))
+                        .style(style::bare_button())
+                        .into()
+                } else {
+                    space().width(12.0).into()
+                };
+                let dots = container(dots).width(Length::Fixed(14.0));
+
                 // The last Column flexes to fill the pane, so it has no edge to
                 // drag; every other Column gets a right-edge resize grip.
-                if i == last {
-                    return container(label).width(Fill).into();
-                }
+                let inner: Element<'_, Message> = if i == last {
+                    container(row![label, dots].align_y(iced::Alignment::Center))
+                        .width(Fill)
+                        .into()
+                } else {
+                    // The hairline shows while the pointer is anywhere over this
+                    // Column's header (or its own grip, or it is being dragged) —
+                    // and only for that Column.
+                    let lit = self.grip_hover == Some(i)
+                        || self.header_hover == Some(i)
+                        || matches!(&self.column_drag, Some(d) if d.run_id == run_id && d.index == i);
+                    let line = container(space().width(2.0).height(14.0)).style(move |_| {
+                        style::panel(if lit { TEXT_DIM } else { Color::TRANSPARENT })
+                    });
+                    let grip =
+                        mouse_area(container(line).padding(Padding::new(0.0).left(4.0).right(4.0)))
+                            .interaction(iced::mouse::Interaction::ResizingColumn)
+                            .on_enter(Message::GripHover(Some(i)))
+                            .on_exit(Message::GripHover(None))
+                            .on_press(Message::ColumnDragStart(run_id, i));
 
-                // A hairline that stays invisible until the pointer is over its
-                // (wider, padded) hit area, then shows as a thin vertical rule.
-                let lit = self.grip_hover == Some(i)
-                    || matches!(&self.column_drag, Some(d) if d.run_id == run_id && d.index == i);
-                let line = container(space().width(2.0).height(14.0)).style(move |_| {
-                    style::panel(if lit { TEXT_DIM } else { Color::TRANSPARENT })
-                });
-                let grip = mouse_area(
-                    container(line).padding(Padding::new(0.0).left(4.0).right(4.0)),
-                )
-                .interaction(iced::mouse::Interaction::ResizingColumn)
-                .on_enter(Message::GripHover(Some(i)))
-                .on_exit(Message::GripHover(None))
-                .on_press(Message::ColumnDragStart(run_id, i));
+                    container(row![label, dots, grip].align_y(iced::Alignment::Center))
+                        .width(Length::Fixed(tab.col_width(col)))
+                        .into()
+                };
 
-                container(row![label, grip].align_y(iced::Alignment::Center))
-                    .width(Length::Fixed(tab.col_width(col)))
+                mouse_area(inner)
+                    .on_enter(Message::HeaderHover(Some(i)))
+                    .on_exit(Message::HeaderHover(None))
                     .into()
-            },
-        ))
+            }))
         .spacing(8.0);
 
         // Only build widgets for the slice around the viewport; pad the rest
@@ -2367,10 +2514,12 @@ impl LogLens {
             let index = start + offset;
             let selected = tab.selected_hit == Some(index);
             let cells = container(
-                row(tab.columns.iter().enumerate().map(
-                    |(i, col)| -> Element<'_, Message> {
-                        let value =
-                            results::cell(&hit.source, col, &tab.timestamp_field, tab.utc);
+                row(tab
+                    .columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, col)| -> Element<'_, Message> {
+                        let value = results::cell(&hit.source, col, &tab.timestamp_field, tab.utc);
                         let width = if i == last {
                             Length::Fill
                         } else {
@@ -2386,8 +2535,7 @@ impl LogLens {
                         .padding(Padding::new(3.0).left(6.0))
                         .clip(true)
                         .into()
-                    },
-                ))
+                    }))
                 .spacing(8.0),
             )
             .width(Fill)
@@ -2441,7 +2589,185 @@ impl LogLens {
             stacked = stacked.push(footer);
         }
 
-        stacked.into()
+        let Some(menu_col) = tab.header_menu.filter(|i| *i < tab.columns.len()) else {
+            return stacked.into();
+        };
+        stack(vec![
+            stacked.into(),
+            self.header_menu_overlay(tab, menu_col),
+        ])
+        .into()
+    }
+
+    /// The floating "\u{22ee}" column-settings menu, dropped under the header of
+    /// column `index` as a stack layer so it never reflows the table.
+    fn header_menu_overlay<'a>(&self, tab: &'a ResultTab, index: usize) -> Element<'a, Message> {
+        let run_id = tab.run_id;
+        let field = tab.columns[index].clone();
+        let last = tab.columns.len().saturating_sub(1);
+        let sorted = tab.sort_index(&field).is_some();
+
+        const MENU_W: f32 = 200.0;
+
+        // A 13px symbolic icon, recoloured to `tint` via the svg colour filter.
+        let glyph = |handle: &'static std::sync::LazyLock<Handle>, tint: Color| {
+            svg(Handle::clone(handle))
+                .width(Length::Fixed(13.0))
+                .height(Length::Fixed(13.0))
+                .style(move |_theme, _status| svg::Style { color: Some(tint) })
+        };
+
+        // One "icon + label" menu row. `msg == None` renders it greyed and
+        // inert — used when a move would run off the end of the Column list.
+        let entry = |handle: &'static std::sync::LazyLock<Handle>,
+                     label: &str,
+                     msg: Option<Message>| {
+            let (fg, tint) = match msg {
+                Some(_) => (TEXT, TEXT_DIM),
+                None => (TEXT_DIM, BORDER),
+            };
+            let mut b = button(
+                row![
+                    glyph(handle, tint),
+                    text(label.to_string()).size(12.0).color(fg),
+                ]
+                .spacing(8.0)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Fill)
+            .padding(Padding::new(4.0).left(8.0).right(8.0))
+            .style(style::picker_row(false));
+            if let Some(msg) = msg {
+                b = b.on_press(msg);
+            }
+            b
+        };
+
+        let mut items: Vec<Element<'_, Message>> = Vec::new();
+        items.push(
+            entry(
+                &icons::ARROW_LEFT,
+                "Move column left",
+                (index > 0).then_some(Message::ResultColumnMove(run_id, index, -1)),
+            )
+            .into(),
+        );
+        items.push(
+            entry(
+                &icons::ARROW_RIGHT,
+                "Move column right",
+                (index < last).then_some(Message::ResultColumnMove(run_id, index, 1)),
+            )
+            .into(),
+        );
+        items.push(
+            entry(
+                &icons::TRASH,
+                "Remove column",
+                Some(Message::ResultColumnRemove(run_id, index)),
+            )
+            .into(),
+        );
+
+        // Fields not already shown as Columns; picked from the menu to add one.
+        let available: Vec<String> = tab
+            .all_fields
+            .iter()
+            .filter(|f| !tab.columns.iter().any(|c| c == *f))
+            .cloned()
+            .collect();
+        let add_ctl: Element<'_, Message> = if !available.is_empty() {
+            pick_list(available, None::<String>, move |f| {
+                Message::ResultColumnAddField(run_id, f)
+            })
+            .placeholder("Add column\u{2026}")
+            .text_size(12.0)
+            .padding(Padding::new(4.0).left(6.0).right(6.0))
+            .width(Fill)
+            .into()
+        } else {
+            row![
+                text_input("Add column\u{2026}", &tab.column_draft)
+                    .on_input(move |v| Message::ResultColumnDraft(run_id, v))
+                    .on_submit(Message::ResultColumnAdd(run_id))
+                    .size(12.0)
+                    .padding(4.0)
+                    .width(Fill),
+                button(text("+").size(12.0).color(TEXT))
+                    .on_press(Message::ResultColumnAdd(run_id))
+                    .padding(Padding::new(4.0).left(8.0).right(8.0))
+                    .style(style::picker_row(true)),
+            ]
+            .spacing(4.0)
+            .into()
+        };
+        items.push(
+            container(
+                row![glyph(&icons::PLUS, TEXT_DIM), add_ctl]
+                    .spacing(8.0)
+                    .align_y(iced::Alignment::Center),
+            )
+            .padding(Padding::new(2.0).left(8.0).right(8.0))
+            .into(),
+        );
+
+        items.push(rule::horizontal(1.0).into());
+        items.push(
+            entry(
+                &icons::SORT_ASCENDING,
+                "Sort ascending",
+                Some(Message::ResultSortSet(run_id, field.clone(), false)),
+            )
+            .into(),
+        );
+        items.push(
+            entry(
+                &icons::SORT_DESCENDING,
+                "Sort descending",
+                Some(Message::ResultSortSet(run_id, field.clone(), true)),
+            )
+            .into(),
+        );
+        if sorted {
+            items.push(
+                entry(
+                    &icons::SORT_REMOVE,
+                    "Remove from sort",
+                    Some(Message::ResultSortRemove(run_id, field.clone())),
+                )
+                .into(),
+            );
+        }
+        let card = container(column(items).spacing(1.0).width(Length::Fixed(MENU_W)))
+            .style(|_| style::menu_popup())
+            .padding(3.0);
+
+        // Header geometry: 6px container pad + each fixed Column's width + 8px
+        // row spacing between Columns. Anchor the card's right edge near the
+        // Column's right edge, then clamp into the pane.
+        let anchored: Element<'_, Message> = if index == last {
+            row![
+                space().width(Fill),
+                container(card).padding(Padding::new(0.0).right(6.0)),
+            ]
+            .into()
+        } else {
+            let mut right_edge = 6.0;
+            for i in 0..=index {
+                right_edge += tab.col_width(&tab.columns[i]) + 8.0;
+            }
+            let left = (right_edge - MENU_W).max(6.0);
+            container(card).padding(Padding::new(0.0).left(left)).into()
+        };
+
+        mouse_area(
+            container(column![space().height(26.0), anchored])
+                .width(Fill)
+                .height(Fill),
+        )
+        .on_press(Message::ResultHeaderMenuDismiss(run_id))
+        .on_right_press(Message::ResultHeaderMenuDismiss(run_id))
+        .into()
     }
 
     fn paging_footer<'a>(&self, tab: &'a ResultTab) -> Option<Element<'a, Message>> {

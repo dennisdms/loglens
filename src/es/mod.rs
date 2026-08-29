@@ -240,8 +240,9 @@ pub struct SearchParams {
     /// Range bounds — Elasticsearch date-math (`now-15m`) or ISO timestamps.
     pub gte: String,
     pub lte: String,
-    pub sort_field: String,
-    pub sort_desc: bool,
+    /// Sort keys as `(field, descending)`, highest priority first. `_shard_doc`
+    /// is appended as a tiebreaker. Never empty.
+    pub sort: Vec<(String, bool)>,
     pub size: usize,
     /// `None` for the first Page; the previous Hit's `sort` values otherwise.
     pub search_after: Option<Vec<Value>>,
@@ -294,7 +295,15 @@ pub async fn search(
     pit_id: String,
     params: SearchParams,
 ) -> Result<Page, String> {
-    let dir = if params.sort_desc { "desc" } else { "asc" };
+    // `[{ field: dir }, ..., { _shard_doc: <primary dir> }]` — a stable total
+    // order so `search_after` can page without gaps or repeats.
+    let primary_desc = params.sort.first().map(|(_, desc)| *desc).unwrap_or(true);
+    let mut sort: Vec<Value> = params
+        .sort
+        .iter()
+        .map(|(field, desc)| json!({ field.clone(): if *desc { "desc" } else { "asc" } }))
+        .collect();
+    sort.push(json!({ "_shard_doc": if primary_desc { "desc" } else { "asc" } }));
 
     let mut bool_query = serde_json::Map::new();
     bool_query.insert(
@@ -314,7 +323,7 @@ pub async fn search(
         "size": params.size,
         "track_total_hits": false,
         "pit": { "id": pit_id, "keep_alive": "1m" },
-        "sort": [ { (params.sort_field.clone()): dir }, { "_shard_doc": dir } ],
+        "sort": Value::Array(sort),
         "query": { "bool": Value::Object(bool_query) },
     });
     if let Some(after) = &params.search_after {

@@ -6,7 +6,7 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use iced::widget::text_editor;
 use serde_json::Value;
 
-use crate::config::{TimeUnit, Timeframe, TimeframeMode};
+use crate::config::{SortKey, TimeUnit, Timeframe, TimeframeMode};
 use crate::es::Hit;
 
 /// Draft state for the Search bar's "Custom\u{2026}" timeframe popover: an
@@ -138,8 +138,13 @@ pub struct ResultTab {
     /// Per-Column pixel widths set by dragging a header edge. Columns absent
     /// here fall back to a default width (wider for the timestamp Column).
     pub col_widths: HashMap<String, f32>,
-    pub sort_field: String,
-    pub sort_desc: bool,
+    /// Sort order, highest priority first. Empty falls back to the timestamp
+    /// field, descending (see [`ResultTab::effective_sort`]).
+    pub sort: Vec<SortKey>,
+    /// Whether the Search bar's "Sort fields" popover is open.
+    pub sort_panel_open: bool,
+    /// Column header whose "\u{22ee}" settings menu is open, by column index.
+    pub header_menu: Option<usize>,
     /// `_field_caps` for this tab's Target, fetched lazily; empty until it lands
     /// (or if it failed — the pickers then fall back to free text).
     pub all_fields: Vec<String>,
@@ -244,6 +249,64 @@ impl ResultTab {
         if index < self.columns.len() && target >= 0 && (target as usize) < self.columns.len() {
             self.columns.swap(index, target as usize);
         }
+    }
+
+    /// The sort keys to actually send to Elasticsearch as `(field, descending)`
+    /// pairs: the tab's own keys, or the timestamp field descending when none
+    /// are set. Never empty.
+    pub fn effective_sort(&self) -> Vec<(String, bool)> {
+        if self.sort.is_empty() {
+            return vec![(self.timestamp_field.clone(), true)];
+        }
+        self.sort
+            .iter()
+            .map(|key| (key.field.clone(), key.desc))
+            .collect()
+    }
+
+    /// This field's position in the sort order, if it is sorted on.
+    pub fn sort_index(&self, field: &str) -> Option<usize> {
+        self.sort.iter().position(|key| key.field == field)
+    }
+
+    /// Sets `field`'s sort direction, appending it to the order if it is not
+    /// already sorted on. Returns whether anything changed.
+    pub fn set_sort_dir(&mut self, field: &str, desc: bool) -> bool {
+        match self.sort.iter_mut().find(|key| key.field == field) {
+            Some(key) => {
+                if key.desc == desc {
+                    return false;
+                }
+                key.desc = desc;
+            }
+            None => self.sort.push(SortKey::new(field, desc)),
+        }
+        true
+    }
+
+    /// Drops `field` from the sort order. Returns whether it was there.
+    pub fn remove_sort(&mut self, field: &str) -> bool {
+        let before = self.sort.len();
+        self.sort.retain(|key| key.field != field);
+        self.sort.len() != before
+    }
+
+    /// Moves the sort key at `index` by `delta` places. Returns whether it moved.
+    pub fn move_sort(&mut self, index: usize, delta: isize) -> bool {
+        let target = index as isize + delta;
+        if index < self.sort.len() && target >= 0 && (target as usize) < self.sort.len() {
+            self.sort.swap(index, target as usize);
+            return true;
+        }
+        false
+    }
+
+    /// Clears the sort order (Hits fall back to timestamp descending). Returns
+    /// whether there was anything to clear.
+    pub fn clear_sort(&mut self) -> bool {
+        let had = !self.sort.is_empty();
+        self.sort.clear();
+        had
     }
 
     /// Toggles the detail panel for Hit `index`: opens it (loading that Hit's

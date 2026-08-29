@@ -19,6 +19,10 @@ pub const TEXT: Color = Color::from_rgb8(0xd4, 0xd4, 0xd4);
 pub const TEXT_DIM: Color = Color::from_rgb8(0x8a, 0x8a, 0x8a);
 /// Selection / active highlight.
 pub const ACCENT: Color = Color::from_rgb8(0x09, 0x47, 0x71);
+/// Pointer-hover highlight for menu / list rows. Deliberately lighter than
+/// `PANEL_ALT` so it stays visible on the floating menu card, which is itself
+/// filled with `PANEL_ALT`.
+pub const HOVER: Color = Color::from_rgb8(0x37, 0x37, 0x3d);
 
 // --- Widget styles -------------------------------------------------------
 
@@ -70,7 +74,7 @@ pub fn picker_row(active: bool) -> impl Fn(&Theme, button::Status) -> button::St
     move |_theme, status| {
         let background = match (active, status) {
             (true, _) => Some(ACCENT.into()),
-            (false, button::Status::Hovered) => Some(PANEL_ALT.into()),
+            (false, button::Status::Hovered) => Some(HOVER.into()),
             _ => None,
         };
         button::Style {

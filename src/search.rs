@@ -3,7 +3,7 @@
 //! Shown as a form tab when creating a Saved Search and as a modal when
 //! editing an existing one.
 
-use crate::config::{self, SavedSearch, Timeframe};
+use crate::config::{self, SavedSearch, SortKey, Timeframe};
 use crate::es::FieldCaps;
 
 /// Where the form's `_field_caps` lookup stands. Prewarmed so the Result Tab it
@@ -119,10 +119,9 @@ impl SearchForm {
             target: self.target.trim().to_string(),
             query_string: String::new(),
             timeframe: Timeframe::default(),
-            sort_field: timestamp_field.clone(),
+            sort: vec![SortKey::new(timestamp_field.clone(), true)],
             timestamp_field,
             columns: config::default_columns(),
-            sort_desc: true,
         })
     }
 }

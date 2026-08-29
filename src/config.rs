@@ -48,12 +48,29 @@ pub struct SavedSearch {
     /// Fields projected into table columns, in display order.
     #[serde(default = "default_columns")]
     pub columns: Vec<String>,
-    /// Field the Hits are sorted on (`_shard_doc` is always appended after it).
-    #[serde(default = "default_timestamp_field")]
-    pub sort_field: String,
-    /// Sort direction: descending when true.
+    /// Sort order, highest priority first (`_shard_doc` is always appended as a
+    /// tiebreaker). Empty falls back to the timestamp field, descending. Legacy
+    /// `sort_field` / `sort_desc` keys are migrated in on load (see [`load`]).
+    #[serde(default)]
+    pub sort: Vec<SortKey>,
+}
+
+/// One field in a Saved Search's sort order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SortKey {
+    pub field: String,
+    /// Descending when true.
     #[serde(default = "default_true")]
-    pub sort_desc: bool,
+    pub desc: bool,
+}
+
+impl SortKey {
+    pub fn new(field: impl Into<String>, desc: bool) -> Self {
+        Self {
+            field: field.into(),
+            desc,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -247,10 +264,52 @@ pub fn load() -> Config {
     let Some(path) = config_path() else {
         return Config::default();
     };
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Config::default();
+    };
+    let Ok(mut raw) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Config::default();
+    };
+    migrate_legacy_sort(&mut raw);
+    serde_json::from_value(raw).unwrap_or_default()
+}
+
+/// Rewrites the pre-multisort `sort_field` / `sort_desc` pair on each Saved
+/// Search into a one-entry `sort` array, so older configs keep their sort.
+fn migrate_legacy_sort(raw: &mut serde_json::Value) {
+    let Some(connections) = raw.get_mut("connections").and_then(|c| c.as_array_mut()) else {
+        return;
+    };
+    for connection in connections {
+        let Some(searches) = connection
+            .get_mut("searches")
+            .and_then(|s| s.as_array_mut())
+        else {
+            continue;
+        };
+        for search in searches {
+            let Some(obj) = search.as_object_mut() else {
+                continue;
+            };
+            if obj.contains_key("sort") {
+                continue;
+            }
+            let Some(field) = obj
+                .remove("sort_field")
+                .and_then(|v| v.as_str().map(str::to_string))
+            else {
+                continue;
+            };
+            let desc = obj
+                .remove("sort_desc")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            obj.insert(
+                "sort".to_string(),
+                serde_json::json!([{ "field": field, "desc": desc }]),
+            );
+        }
+    }
 }
 
 /// Writes the config, creating the parent directory as needed.

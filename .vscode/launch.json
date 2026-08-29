@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Run Log Lens (+ dev ES)",
+      "preLaunchTask": "dev: ES up",
+      "cargo": {
+        "args": ["build", "--bin=loglens"],
+        "filter": { "name": "loglens", "kind": "bin" }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "terminal": "integrated"
+    }
+  ]
+}
+I
