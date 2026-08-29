@@ -1961,7 +1961,9 @@ impl LogLens {
                     svg(Handle::clone(&icons::REFRESH))
                         .width(Length::Fixed(18.0))
                         .height(Length::Fixed(18.0))
-                        .style(|_theme, _status| svg::Style { color: Some(TEXT_DIM) }),
+                        .style(|_theme, _status| svg::Style {
+                            color: Some(TEXT_DIM)
+                        }),
                 )
                 .on_press(Message::RefreshResult(run_id))
                 .padding(Padding::new(4.0).left(8.0).right(8.0))
