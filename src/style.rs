@@ -86,6 +86,27 @@ pub fn picker_row(active: bool) -> impl Fn(&Theme, button::Status) -> button::St
     }
 }
 
+/// A compact icon button with a visible surface: hairline border, rounded
+/// corners, filled with `PANEL_ALT` and lit on hover.
+pub fn icon_button() -> impl Fn(&Theme, button::Status) -> button::Style {
+    |_theme, status| {
+        let background = match status {
+            button::Status::Hovered | button::Status::Pressed => HOVER,
+            _ => PANEL_ALT,
+        };
+        button::Style {
+            background: Some(background.into()),
+            text_color: TEXT,
+            border: Border {
+                color: BORDER,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
 /// A button with no chrome of its own (tab label, close affordance).
 pub fn bare_button() -> impl Fn(&Theme, button::Status) -> button::Style {
     |_theme, _status| button::Style {

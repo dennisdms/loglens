@@ -1611,6 +1611,9 @@ impl LogLens {
         if let Some(menu) = self.tree_menu_overlay() {
             layers.push(menu);
         }
+        if let Some(popover) = self.timeframe_popover_overlay() {
+            layers.push(popover);
+        }
         if let Some(form) = &self.connection_form {
             layers.push(self.connection_form_modal(form));
         }
@@ -1959,15 +1962,13 @@ impl LogLens {
                 timeframe_ctl,
                 button(
                     svg(Handle::clone(&icons::REFRESH))
-                        .width(Length::Fixed(18.0))
-                        .height(Length::Fixed(18.0))
-                        .style(|_theme, _status| svg::Style {
-                            color: Some(TEXT_DIM)
-                        }),
+                        .width(Length::Fixed(16.0))
+                        .height(Length::Fixed(16.0))
+                        .style(|_theme, _status| svg::Style { color: Some(TEXT) }),
                 )
                 .on_press(Message::RefreshResult(run_id))
-                .padding(Padding::new(4.0).left(8.0).right(8.0))
-                .style(style::bare_button()),
+                .padding(Padding::new(5.0).left(9.0).right(9.0))
+                .style(style::icon_button()),
             ]
             .spacing(12.0)
             .align_y(iced::Alignment::Center),
@@ -1976,15 +1977,50 @@ impl LogLens {
         .width(Fill)
         .padding(Padding::new(6.0).left(12.0).right(12.0));
 
-        let mut col: Vec<Element<'_, Message>> = vec![row1.into()];
-        if tab.tf.open {
-            col.push(self.timeframe_popover(tab));
-        }
-        Some(column(col).width(Fill).into())
+        Some(row1.into())
     }
 
-    /// The "Custom\u{2026}" timeframe popover: a relative or absolute window
-    /// editor that drops out of the Search bar until applied or dismissed.
+    /// The floating "Custom\u{2026}" timeframe editor, anchored under the Search
+    /// bar's timeframe control as a stack layer so it never reflows the strips
+    /// or main area below it. Mirrors the sidebar right-click menu: a click
+    /// anywhere outside dismisses it.
+    fn timeframe_popover_overlay(&self) -> Option<Element<'_, Message>> {
+        let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
+            return None;
+        };
+        if !tab.tf.open {
+            return None;
+        }
+        let run_id = tab.run_id;
+
+        const CARD_W: f32 = 480.0;
+        // Distance from the top of the window down to just below the Search bar
+        // row, matching the right column's layout in `view`: the Menu bar, then
+        // the options strip (only once a run has loaded — see `options_bar`),
+        // then the Search bar row. Each figure includes its trailing 1px rule.
+        let mut top = 25.0;
+        if matches!(tab.state, RunState::Loaded | RunState::Empty) {
+            top += 29.0;
+        }
+        top += 40.0;
+
+        let card = container(self.timeframe_popover(tab)).width(Length::Fixed(CARD_W));
+        let anchored = container(column![
+            space().height(top),
+            row![space().width(Fill), card, space().width(12.0)],
+        ])
+        .width(Fill)
+        .height(Fill);
+
+        Some(
+            mouse_area(anchored)
+                .on_press(Message::ResultTfCancel(run_id))
+                .into(),
+        )
+    }
+
+    /// The "Custom\u{2026}" timeframe popover card: a relative or absolute window
+    /// editor, applied or dismissed. Floated by [`Self::timeframe_popover_overlay`].
     fn timeframe_popover<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
         let run_id = tab.run_id;
         let tf = &tab.tf;
