@@ -87,11 +87,13 @@ pub fn picker_row(active: bool) -> impl Fn(&Theme, button::Status) -> button::St
 }
 
 /// A compact icon button with a visible surface: hairline border, rounded
-/// corners, filled with `PANEL_ALT` and lit on hover.
-pub fn icon_button() -> impl Fn(&Theme, button::Status) -> button::Style {
-    |_theme, status| {
-        let background = match status {
-            button::Status::Hovered | button::Status::Pressed => HOVER,
+/// corners, filled with `PANEL_ALT` and lit on hover. Filled with `ACCENT`
+/// while `active` (e.g. its popover is open).
+pub fn icon_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let background = match (active, status) {
+            (true, _) => ACCENT,
+            (_, button::Status::Hovered | button::Status::Pressed) => HOVER,
             _ => PANEL_ALT,
         };
         button::Style {

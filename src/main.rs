@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use iced::widget::svg::Handle;
 use iced::widget::{
     button, checkbox, column, container, mouse_area, pick_list, radio, row, rule, scrollable,
-    space, stack, svg, text, text_editor, text_input,
+    space, stack, svg, text, text_editor, text_input, tooltip,
 };
 use iced::{Border, Color, Element, Fill, Font, Length, Padding, Point, Subscription, Task, Theme};
 
@@ -237,8 +237,10 @@ enum Message {
     ResultHeaderMenu(u64, usize),
     /// Close any open column header settings menu.
     ResultHeaderMenuDismiss(u64),
-    /// Toggle the Search bar's "Sort fields" popover.
+    /// Toggle the options strip's "Sort fields" popover.
     ResultSortPanel(u64),
+    /// Close the "Sort fields" popover (click outside).
+    ResultSortPanelDismiss(u64),
     /// Set a field's sort direction, adding it to the sort order if new.
     ResultSortSet(u64, String, bool),
     /// Drop a field from the sort order.
@@ -795,6 +797,11 @@ impl LogLens {
             Message::ResultSortPanel(run_id) => {
                 if let Some(rt) = self.result_mut(run_id) {
                     rt.sort_panel_open = !rt.sort_panel_open;
+                }
+            }
+            Message::ResultSortPanelDismiss(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.sort_panel_open = false;
                 }
             }
             Message::ResultSortSet(run_id, field, desc) => {
@@ -1854,6 +1861,9 @@ impl LogLens {
         if let Some(menu) = self.tree_menu_overlay() {
             layers.push(menu);
         }
+        if let Some(popover) = self.sort_fields_popover_overlay() {
+            layers.push(popover);
+        }
         if let Some(popover) = self.timeframe_popover_overlay() {
             layers.push(popover);
         }
@@ -2202,12 +2212,10 @@ impl LogLens {
             return None;
         }
 
-        let mut col: Vec<Element<'_, Message>> = vec![self.result_sort_bar(tab)];
-        if tab.sort_panel_open {
-            col.push(rule::horizontal(1.0).into());
-            col.push(self.sort_fields_popover(tab));
-        }
-        Some(column(col).width(Fill).into())
+        // The "Sort fields" popover is *not* pushed inline here — it floats as a
+        // stack layer (`sort_fields_popover_overlay`) so opening it never reflows
+        // the strips or table below.
+        Some(self.result_sort_bar(tab))
     }
 
     /// The Search bar shown between the options strip and the tab strip while a
@@ -2269,7 +2277,7 @@ impl LogLens {
                 )
                 .on_press(Message::RefreshResult(run_id))
                 .padding(Padding::new(5.0).left(9.0).right(9.0))
-                .style(style::icon_button()),
+                .style(style::icon_button(false)),
             ]
             .spacing(12.0)
             .align_y(iced::Alignment::Center),
@@ -2728,26 +2736,32 @@ impl LogLens {
     fn result_sort_bar<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
         let run_id = tab.run_id;
 
-        let sort_summary = if tab.sort.is_empty() {
-            "Sort fields".to_string()
-        } else {
-            format!("Sort fields  {}", tab.sort.len())
-        };
         let sort_btn = button(
             row![
-                text("\u{2195}").size(11.0).color(TEXT_DIM),
-                text(sort_summary).size(11.0).color(TEXT),
-                text("\u{25be}").size(9.0).color(TEXT_DIM),
+                svg(Handle::clone(&icons::SORT_FIELDS))
+                    .width(Length::Fixed(16.0))
+                    .height(Length::Fixed(16.0))
+                    .style(|_theme, _status| svg::Style { color: Some(TEXT) }),
+                text(format!("{}", tab.sort.len())).size(14.0).color(TEXT),
             ]
-            .spacing(4.0)
+            .spacing(5.0)
             .align_y(iced::Alignment::Center),
         )
         .on_press(Message::ResultSortPanel(run_id))
-        .padding(Padding::new(3.0).left(8.0).right(8.0))
-        .style(style::picker_row(tab.sort_panel_open));
+        .padding(Padding::new(5.0).left(9.0).right(9.0))
+        .style(style::icon_button(tab.sort_panel_open));
+
+        let sort_ctl = tooltip(
+            sort_btn,
+            container(text("Sort fields").size(11.0).color(TEXT))
+                .padding(Padding::new(4.0).left(6.0).right(6.0))
+                .style(|_| style::menu_popup()),
+            tooltip::Position::Bottom,
+        )
+        .gap(4.0);
 
         container(
-            row![sort_btn, space().width(Fill)]
+            row![sort_ctl, space().width(Fill)]
                 .spacing(8.0)
                 .align_y(iced::Alignment::Center),
         )
@@ -2757,9 +2771,47 @@ impl LogLens {
         .into()
     }
 
+    /// The floating "Sort fields" editor, anchored under the options strip's
+    /// "Sort fields" button as a stack layer so it never reflows the strips or
+    /// main area below it. A click anywhere outside dismisses it.
+    fn sort_fields_popover_overlay(&self) -> Option<Element<'_, Message>> {
+        let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
+            return None;
+        };
+        if !tab.sort_panel_open {
+            return None;
+        }
+        if !matches!(tab.state, RunState::Loaded | RunState::Empty) {
+            return None;
+        }
+        let run_id = tab.run_id;
+
+        const CARD_W: f32 = 460.0;
+        // Just below the options strip: the Menu bar (25) + its rule, then the
+        // options strip row (29) including its trailing 1px rule.
+        let top = 25.0 + 29.0;
+        // Left edge of the "Sort fields" button: sidebar (240) + its rule (1) +
+        // the options strip row's left padding (12).
+        let left = 253.0;
+
+        let card = container(self.sort_fields_popover(tab)).width(Length::Fixed(CARD_W));
+        let anchored = container(column![
+            space().height(top),
+            row![space().width(left), card, space().width(Fill)],
+        ])
+        .width(Fill)
+        .height(Fill);
+
+        Some(
+            mouse_area(anchored)
+                .on_press(Message::ResultSortPanelDismiss(run_id))
+                .into(),
+        )
+    }
+
     /// The "Sort fields" popover: one row per sort key (remove, direction
     /// toggle, reorder) plus a picker to add a field and a "Clear sorting"
-    /// action. Drops out of the options strip until dismissed.
+    /// action. Floated by [`Self::sort_fields_popover_overlay`].
     fn sort_fields_popover<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
         let run_id = tab.run_id;
         let last = tab.sort.len().saturating_sub(1);
@@ -2869,7 +2921,15 @@ impl LogLens {
                 .spacing(8.0)
                 .width(Fill),
         )
-        .style(|_| style::panel(PANEL))
+        .style(|_| {
+            let mut s = style::panel(PANEL);
+            s.border = Border {
+                color: BORDER,
+                width: 1.0,
+                radius: 4.0.into(),
+            };
+            s
+        })
         .width(Fill)
         .padding(Padding::new(8.0).left(12.0).right(12.0))
         .into()
