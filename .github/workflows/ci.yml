@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    # Pinned rather than `ubuntu-latest`: the release workflow builds the Linux
+    # Artifact on 22.04 for its glibc floor, and CI is worth nothing if it
+    # compiles on an image the Release is never built on.
+    runs-on: ubuntu-22.04
+
+    # Linux only. Compile errors in this codebase are near-always
+    # platform-agnostic and the release workflow builds Windows anyway; a
+    # Windows leg here doubles the minutes for rare value.
+
+    # There is deliberately no `apt-get` step. Nothing in the tree links a C
+    # library: the keyring backend is pure Rust over zbus, and winit/wgpu
+    # `dlopen` libX11, libwayland-client, libxkbcommon and libEGL at runtime
+    # rather than linking them, so `readelf -d` on the built binary needs only
+    # libc, libm and libgcc_s. If a future dependency changes that, add exactly
+    # the packages the linker error names and say here which error named each
+    # one — do not paste a long package list copied from another project.
+
+    steps:
+      # v4 rather than v5: the only difference is the Node runtime the action
+      # itself runs on, and v4 is the version every runner image still ships
+      # support for.
+      - uses: actions/checkout@v4
+        # The default shallow fetch (depth 1) is fine: build.rs only needs
+        # `git rev-parse --short HEAD`, which resolves in a shallow clone.
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Restores ~/.cargo and target/ keyed on the lockfile and the toolchain.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
