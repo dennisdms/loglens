@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Local, TimeZone, Utc};
-use iced::widget::{text_editor, Id};
+use iced::widget::{Id, text_editor};
 use serde_json::Value;
 
 use crate::config::{SortKey, TimeUnit, Timeframe, TimeframeMode};
@@ -94,7 +94,7 @@ const WINDOW_BUFFER: usize = 40;
 /// Where a Result Tab's run currently stands.
 #[derive(Debug, Clone)]
 pub enum RunState {
-    /// PIT opening or first Page in flight.
+    /// First Page in flight.
     Loading,
     /// At least one Page loaded and shown.
     Loaded,
@@ -190,8 +190,6 @@ pub struct ResultTab {
     /// Range bounds frozen at the start of this run.
     pub gte: String,
     pub lte: String,
-    /// The open Point-in-Time for this tab, once opened.
-    pub pit_id: Option<String>,
     pub hits: Vec<Hit>,
     pub state: RunState,
     /// True while a re-run (Refresh, edited query / timeframe / target) is in
@@ -237,9 +235,7 @@ impl ResultTab {
     /// previous rows and headers stay put instead of flashing out.
     pub fn table_visible(&self) -> bool {
         matches!(self.state, RunState::Loaded)
-            || (self.refreshing
-                && matches!(self.state, RunState::Loading)
-                && !self.hits.is_empty())
+            || (self.refreshing && matches!(self.state, RunState::Loading) && !self.hits.is_empty())
     }
 
     /// The `[start, end)` slice of `hits` to actually build widgets for,

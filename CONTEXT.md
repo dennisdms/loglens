@@ -53,15 +53,10 @@ One matching Elasticsearch document. Rendered as one row in a Result Tab.
 _Avoid_: record, entry, result, log line
 
 **Page**:
-One batch of Hits fetched in a single request. A Result Tab starts with one Page
-and appends more as the user scrolls.
+One batch of Hits fetched in a single `_search` request. A Result Tab starts
+with one Page and appends more as the user scrolls, each one an independent
+`search_after` call past the last Hit's sort values.
 _Avoid_: batch, chunk, scroll
-
-**Point-in-Time**:
-A frozen view of the Target that a Result Tab holds open for the life of the tab,
-so that paging through Hits stays consistent even as new documents are indexed.
-Abbreviated PIT.
-_Avoid_: snapshot, cursor, scroll context
 
 **Retention cap**:
 The maximum number of Hits a Result Tab will load (10,000 by default). On

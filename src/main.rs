@@ -10,12 +10,12 @@ mod tab;
 
 use std::collections::{HashMap, HashSet};
 
+use iced::widget::scrollable::RelativeOffset;
 use iced::widget::svg::Handle;
 use iced::widget::{
-    button, checkbox, column, container, mouse_area, operation, pick_list, radio, row, rule,
-    scrollable, space, stack, svg, text, text_editor, text_input, tooltip, Id,
+    Id, button, checkbox, column, container, mouse_area, operation, pick_list, radio, row, rule,
+    scrollable, space, stack, svg, text, text_editor, text_input, tooltip,
 };
-use iced::widget::scrollable::RelativeOffset;
 use iced::{Border, Color, Element, Fill, Font, Length, Padding, Point, Subscription, Task, Theme};
 
 use config::{Auth, Config, Connection};
@@ -258,10 +258,6 @@ enum Message {
     DetailDragTo(f32),
     DetailDragEnd,
     // Result tab run
-    PitOpened {
-        run_id: u64,
-        result: Result<String, String>,
-    },
     /// The async `_count` for a run's total Hits landed.
     TotalHitsLoaded {
         run_id: u64,
@@ -282,7 +278,7 @@ enum Message {
         content_h: f32,
     },
     RetryPage(u64),
-    /// Discard the active Result Tab's PIT and re-run it from the Search bar.
+    /// Re-run the active Result Tab from the Search bar.
     RefreshResult(u64),
     // Tree item management
     /// Pointer moved over the sidebar; tracked to anchor the right-click menu.
@@ -307,7 +303,6 @@ enum Message {
     DismissStatus,
     /// Clear the active Result Tab's failed-Target-switch notice.
     DismissTargetError(u64),
-    Ignore,
 }
 
 impl LogLens {
@@ -466,7 +461,7 @@ impl LogLens {
                     self.active_tab = Some(tab);
                 }
             }
-            Message::CloseTab(tab) => return self.close_tab(tab),
+            Message::CloseTab(tab) => self.close_tab(tab),
             Message::ToggleFolder(name) => {
                 if !self.expanded.remove(&name) {
                     self.expanded.insert(name);
@@ -853,9 +848,6 @@ impl LogLens {
                 }
             }
 
-            Message::PitOpened { run_id, result } => {
-                return self.on_pit_opened(run_id, result);
-            }
             Message::TotalHitsLoaded {
                 run_id,
                 generation,
@@ -883,7 +875,8 @@ impl LogLens {
                 // A completed first Page (initial run or refresh) starts at the
                 // top: the table `scrollable` stays mounted across a refresh, so
                 // snap it back explicitly rather than relying on a remount.
-                if !append && ok
+                if !append
+                    && ok
                     && let Some(rt) = self.result_mut(run_id)
                 {
                     rt.scroll_y = 0.0;
@@ -1013,7 +1006,7 @@ impl LogLens {
             }
             Message::DeleteSearch { connection, search } => {
                 self.tree_menu = None;
-                return self.delete_search(connection, search);
+                self.delete_search(connection, search);
             }
             Message::ConfirmProceed => {
                 let confirm = self.confirm.take();
@@ -1032,7 +1025,6 @@ impl LogLens {
                     rt.target_error = None;
                 }
             }
-            Message::Ignore => {}
         }
 
         Task::none()
@@ -1040,16 +1032,10 @@ impl LogLens {
 
     // --- Tabs ----------------------------------------------------------
 
-    fn close_tab(&mut self, tab: usize) -> Task<Message> {
+    fn close_tab(&mut self, tab: usize) {
         if tab >= self.open_tabs.len() {
-            return Task::none();
+            return;
         }
-
-        // Release any server-side PIT this tab was holding.
-        let closing_pit = match &self.open_tabs[tab] {
-            Tab::Result(rt) => rt.pit_id.clone().map(|pit| (rt.connection_id.clone(), pit)),
-            _ => None,
-        };
 
         self.open_tabs.remove(tab);
         self.active_tab = match self.active_tab {
@@ -1058,14 +1044,6 @@ impl LogLens {
             Some(active) if active == tab => Some(tab.min(self.open_tabs.len() - 1)),
             other => other,
         };
-
-        if let Some((conn_id, pit)) = closing_pit
-            && let Some(conn) = self.connection(&conn_id)
-            && let Some(endpoint) = self.endpoint_for(conn)
-        {
-            return Task::perform(es::close_pit(endpoint, pit), |_| Message::Ignore);
-        }
-        Task::none()
     }
 
     // --- Connection form ----------------------------------------------
@@ -1195,8 +1173,7 @@ impl LogLens {
         Task::none()
     }
 
-    fn delete_search(&mut self, conn_id: String, search_id: String) -> Task<Message> {
-        let mut tasks: Vec<Task<Message>> = Vec::new();
+    fn delete_search(&mut self, conn_id: String, search_id: String) {
         // Close the Search settings modal if it targets this search.
         if self
             .search_settings
@@ -1211,7 +1188,7 @@ impl LogLens {
             Tab::Result(rt) => rt.saved_id == search_id,
             Tab::SearchForm(f) => f.saved_id.as_deref() == Some(search_id.as_str()),
         }) {
-            tasks.push(self.close_tab(pos));
+            self.close_tab(pos);
         }
 
         if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id) {
@@ -1220,7 +1197,6 @@ impl LogLens {
         if let Err(err) = config::save(&self.config) {
             self.status = Some(format!("Could not save config: {err}"));
         }
-        Task::batch(tasks)
     }
 
     fn delete_connection(&mut self, conn_id: String) -> Task<Message> {
@@ -1232,7 +1208,7 @@ impl LogLens {
         {
             self.search_settings = None;
         }
-        let close = self.close_connection_tabs(&conn_id);
+        self.close_connection_tabs(&conn_id);
 
         self.config.connections.retain(|c| c.id != conn_id);
         secrets::delete(&conn_id);
@@ -1240,20 +1216,17 @@ impl LogLens {
         if let Err(err) = config::save(&self.config) {
             self.status = Some(format!("Could not save config: {err}"));
         }
-        close
+        Task::none()
     }
 
-    /// Closes every tab — Result or Search form — belonging to a Connection,
-    /// releasing any PITs.
-    fn close_connection_tabs(&mut self, conn_id: &str) -> Task<Message> {
-        let mut tasks: Vec<Task<Message>> = Vec::new();
+    /// Closes every tab — Result or Search form — belonging to a Connection.
+    fn close_connection_tabs(&mut self, conn_id: &str) {
         while let Some(pos) = self.open_tabs.iter().position(|t| match t {
             Tab::Result(rt) => rt.connection_id == conn_id,
             Tab::SearchForm(f) => f.connection_id == conn_id,
         }) {
-            tasks.push(self.close_tab(pos));
+            self.close_tab(pos);
         }
-        Task::batch(tasks)
     }
 
     /// Fetches `_field_caps` for the Search form's Target, if it has one.
@@ -1614,7 +1587,6 @@ impl LogLens {
             tf: TimeframeDraft::from_timeframe(&saved.timeframe),
             gte,
             lte,
-            pit_id: None,
             hits: Vec::new(),
             state: RunState::Loading,
             refreshing: false,
@@ -1670,10 +1642,9 @@ impl LogLens {
         Task::batch([fetch_fields, fetch_targets, self.start_run(run_id)])
     }
 
-    /// Freshens the range, discards any prior PIT, opens a new one, and (on
-    /// success) fetches the first Page.
+    /// Freshens the range, then fetches the first Page (and the `_count`).
     fn start_run(&mut self, run_id: u64) -> Task<Message> {
-        let Some((conn_id, target, old_pit, generation, count_params)) =
+        let Some((conn_id, target, generation, count_params, search_params)) =
             self.result_mut(run_id).map(|rt| {
                 // If this tab already had a table up, keep the strips pinned and
                 // the previous rows on screen while the re-run is in flight, so
@@ -1699,13 +1670,21 @@ impl LogLens {
                     gte: rt.gte.clone(),
                     lte: rt.lte.clone(),
                 };
-                let old_pit = rt.pit_id.take();
+                let search_params = es::SearchParams {
+                    query_string: rt.query_string.clone(),
+                    timestamp_field: rt.timestamp_field.clone(),
+                    gte: rt.gte.clone(),
+                    lte: rt.lte.clone(),
+                    sort: rt.effective_sort(),
+                    size: 1000,
+                    search_after: None,
+                };
                 (
                     rt.connection_id.clone(),
                     rt.target.clone(),
-                    old_pit,
                     rt.total_generation,
                     count_params,
+                    search_params,
                 )
             })
         else {
@@ -1715,16 +1694,9 @@ impl LogLens {
         let Some(conn) = self.connection(&conn_id) else {
             return Task::none();
         };
-        let close_old: Task<Message> = match (&old_pit, self.endpoint_for(conn)) {
-            (Some(pit), Some(endpoint)) => {
-                Task::perform(es::close_pit(endpoint, pit.clone()), |_| Message::Ignore)
-            }
-            _ => Task::none(),
-        };
 
         match self.endpoint_for(conn) {
             Some(endpoint) => Task::batch([
-                close_old,
                 Task::perform(
                     es::count(endpoint.clone(), target.clone(), count_params),
                     move |result| Message::TotalHitsLoaded {
@@ -1733,8 +1705,12 @@ impl LogLens {
                         result,
                     },
                 ),
-                Task::perform(es::open_pit(endpoint, target), move |result| {
-                    Message::PitOpened { run_id, result }
+                Task::perform(es::search(endpoint, target, search_params), move |result| {
+                    Message::PageLoaded {
+                        run_id,
+                        result,
+                        append: false,
+                    }
                 }),
             ]),
             None => {
@@ -1750,56 +1726,10 @@ impl LogLens {
         }
     }
 
-    fn on_pit_opened(&mut self, run_id: u64, result: Result<String, String>) -> Task<Message> {
-        let pit = match result {
-            Ok(pit) => pit,
-            Err(err) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.refreshing = false;
-                    rt.state = RunState::Error(err);
-                }
-                return Task::none();
-            }
-        };
-
-        let Some((conn_id, params)) = self.result_mut(run_id).map(|rt| {
-            rt.pit_id = Some(pit.clone());
-            (
-                rt.connection_id.clone(),
-                es::SearchParams {
-                    query_string: rt.query_string.clone(),
-                    timestamp_field: rt.timestamp_field.clone(),
-                    gte: rt.gte.clone(),
-                    lte: rt.lte.clone(),
-                    sort: rt.effective_sort(),
-                    size: 1000,
-                    search_after: None,
-                },
-            )
-        }) else {
-            return Task::none();
-        };
-
-        let Some(conn) = self.connection(&conn_id) else {
-            return Task::none();
-        };
-        let Some(endpoint) = self.endpoint_for(conn) else {
-            return Task::none();
-        };
-        Task::perform(es::search(endpoint, pit, params), move |result| {
-            Message::PageLoaded {
-                run_id,
-                result,
-                append: false,
-            }
-        })
-    }
-
-    /// Fetches the next Page for a Result Tab via `search_after` on its PIT.
+    /// Fetches the next Page for a Result Tab via `search_after`.
     /// A no-op unless the tab is idle, under the cap, and has a cursor.
     fn load_more(&mut self, run_id: u64) -> Task<Message> {
-        let Some((conn_id, pit, params)) = self.result_mut(run_id).and_then(|rt| {
-            let pit = rt.pit_id.clone()?;
+        let Some((conn_id, target, params)) = self.result_mut(run_id).and_then(|rt| {
             let cursor = rt.next_cursor()?;
             let remaining = RETENTION_CAP.saturating_sub(rt.hits.len());
             if remaining == 0 {
@@ -1809,7 +1739,7 @@ impl LogLens {
             rt.paging = Paging::Loading;
             Some((
                 rt.connection_id.clone(),
-                pit,
+                rt.target.clone(),
                 es::SearchParams {
                     query_string: rt.query_string.clone(),
                     timestamp_field: rt.timestamp_field.clone(),
@@ -1830,7 +1760,7 @@ impl LogLens {
         let Some(endpoint) = self.endpoint_for(conn) else {
             return Task::none();
         };
-        Task::perform(es::search(endpoint, pit, params), move |result| {
+        Task::perform(es::search(endpoint, target, params), move |result| {
             Message::PageLoaded {
                 run_id,
                 result,
@@ -3626,9 +3556,6 @@ fn apply_page(rt: &mut ResultTab, result: Result<es::Page, String>, append: bool
     }
     match result {
         Ok(page) => {
-            if let Some(pit) = page.pit_id {
-                rt.pit_id = Some(pit);
-            }
             let got = page.hits.len();
             if append {
                 rt.hits.extend(page.hits);

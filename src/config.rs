@@ -48,7 +48,7 @@ pub struct SavedSearch {
     /// Fields projected into table columns, in display order.
     #[serde(default = "default_columns")]
     pub columns: Vec<String>,
-    /// Sort order, highest priority first (`_shard_doc` is always appended as a
+    /// Sort order, highest priority first (`_doc` is always appended as a
     /// tiebreaker). Empty falls back to the timestamp field, descending. Legacy
     /// `sort_field` / `sort_desc` keys are migrated in on load (see [`load`]).
     #[serde(default)]

@@ -226,11 +226,9 @@ pub struct Hit {
 #[derive(Debug, Clone)]
 pub struct Page {
     pub hits: Vec<Hit>,
-    /// A refreshed PIT id, when the cluster returns one.
-    pub pit_id: Option<String>,
 }
 
-/// Everything a `_search` call needs besides the PIT id.
+/// Everything a `_search` call needs besides the Target.
 #[derive(Debug, Clone)]
 pub struct SearchParams {
     /// Empty means "no `query_string` clause" (range-only).
@@ -239,7 +237,7 @@ pub struct SearchParams {
     /// Range bounds — Elasticsearch date-math (`now-15m`) or ISO timestamps.
     pub gte: String,
     pub lte: String,
-    /// Sort keys as `(field, descending)`, highest priority first. `_shard_doc`
+    /// Sort keys as `(field, descending)`, highest priority first. `_doc`
     /// is appended as a tiebreaker. Never empty.
     pub sort: Vec<(String, bool)>,
     pub size: usize,
@@ -248,7 +246,7 @@ pub struct SearchParams {
 }
 
 /// Everything a `_count` call needs — the query half of a [`SearchParams`],
-/// without the PIT / sort / paging machinery.
+/// without the sort / paging machinery.
 #[derive(Debug, Clone)]
 pub struct CountParams {
     /// Empty means "no `query_string` clause" (range-only).
@@ -278,7 +276,7 @@ fn range_bool_query(query_string: &str, timestamp_field: &str, gte: &str, lte: &
 }
 
 /// `POST {target}/_count` — the total number of Hits matching a query,
-/// independent of the PIT, paging, and the Retention cap on loaded Hits.
+/// independent of paging and the Retention cap on loaded Hits.
 pub async fn count(endpoint: Endpoint, target: String, params: CountParams) -> Result<u64, String> {
     let body = json!({
         "query": range_bool_query(
@@ -314,67 +312,26 @@ pub async fn count(endpoint: Endpoint, target: String, params: CountParams) -> R
         .map_err(|e| format!("unexpected _count response: {e}"))
 }
 
-/// `POST {target}/_pit?keep_alive=1m` — opens a Point-in-Time.
-pub async fn open_pit(endpoint: Endpoint, target: String) -> Result<String, String> {
-    let client = client(&endpoint)?;
-    let url = format!(
-        "{}/{}/_pit?keep_alive=1m",
-        base(&endpoint.url),
-        target.trim_matches('/')
-    );
-    let response = with_auth(client.post(&url), &endpoint.auth)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let status = response.status();
-    let text = response.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(extract_error(&text, status.as_u16()));
-    }
-    #[derive(Deserialize)]
-    struct Pit {
-        id: String,
-    }
-    serde_json::from_str::<Pit>(&text)
-        .map(|p| p.id)
-        .map_err(|e| e.to_string())
-}
-
-/// `DELETE /_pit` — releases server-side PIT state. Best-effort.
-pub async fn close_pit(endpoint: Endpoint, pit_id: String) -> Result<(), String> {
-    let client = client(&endpoint)?;
-    let url = format!("{}/_pit", base(&endpoint.url));
-    with_auth(
-        client.delete(&url).json(&json!({ "id": pit_id })),
-        &endpoint.auth,
-    )
-    .send()
-    .await
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// `POST /_search` against an open PIT, paging with `search_after` and a
-/// `[<sort field>, _shard_doc]` total order.
+/// `POST {target}/_search`, paging with `search_after` and a
+/// `[<sort field>, _doc]` total order.
 pub async fn search(
     endpoint: Endpoint,
-    pit_id: String,
+    target: String,
     params: SearchParams,
 ) -> Result<Page, String> {
-    // `[{ field: dir }, ..., { _shard_doc: <primary dir> }]` — a stable total
-    // order so `search_after` can page without gaps or repeats.
+    // `[{ field: dir }, ..., { _doc: <primary dir> }]` — a stable total order
+    // so `search_after` can page without gaps or repeats.
     let primary_desc = params.sort.first().map(|(_, desc)| *desc).unwrap_or(true);
     let mut sort: Vec<Value> = params
         .sort
         .iter()
         .map(|(field, desc)| json!({ field.clone(): if *desc { "desc" } else { "asc" } }))
         .collect();
-    sort.push(json!({ "_shard_doc": if primary_desc { "desc" } else { "asc" } }));
+    sort.push(json!({ "_doc": if primary_desc { "desc" } else { "asc" } }));
 
     let mut body = json!({
         "size": params.size,
         "track_total_hits": false,
-        "pit": { "id": pit_id, "keep_alive": "1m" },
         "sort": Value::Array(sort),
         "query": range_bool_query(
             &params.query_string,
@@ -388,7 +345,11 @@ pub async fn search(
     }
 
     let client = client(&endpoint)?;
-    let url = format!("{}/_search", base(&endpoint.url));
+    let url = format!(
+        "{}/{}/_search",
+        base(&endpoint.url),
+        target.trim_matches('/')
+    );
     let response = with_auth(client.post(&url).json(&body), &endpoint.auth)
         .send()
         .await
@@ -402,8 +363,6 @@ pub async fn search(
     #[derive(Deserialize)]
     struct Response {
         hits: HitsEnvelope,
-        #[serde(default)]
-        pit_id: Option<String>,
     }
     #[derive(Deserialize)]
     struct HitsEnvelope {
@@ -429,7 +388,6 @@ pub async fn search(
                 sort: h.sort,
             })
             .collect(),
-        pit_id: parsed.pit_id,
     })
 }
 
