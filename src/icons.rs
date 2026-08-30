@@ -26,3 +26,5 @@ icon!(SORT_DESCENDING => "sort-descending.svg");
 icon!(SORT_REMOVE => "sort-remove.svg");
 icon!(REFRESH => "refresh.svg");
 icon!(WARNING => "warning-triangle.svg");
+icon!(TABLE => "table.svg");
+icon!(RAW_TEXT => "raw-text.svg");

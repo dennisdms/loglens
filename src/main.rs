@@ -3113,12 +3113,21 @@ impl LogLens {
     fn result_sort_bar<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
         let run_id = tab.run_id;
 
-        let sort_btn = button(
-            row![
-                svg(Handle::clone(&icons::SORT_FIELDS))
+        // The icon sits in a box as tall as the sort button's size-14 digit, so
+        // the two buttons in this bar come out the same height.
+        let icon_box = |handle: &Handle| {
+            container(
+                svg(Handle::clone(handle))
                     .width(Length::Fixed(16.0))
                     .height(Length::Fixed(16.0))
                     .style(|_theme, _status| svg::Style { color: Some(TEXT) }),
+            )
+            .center_y(Length::Fixed(18.0))
+        };
+
+        let sort_btn = button(
+            row![
+                icon_box(&icons::SORT_FIELDS),
                 text(format!("{}", tab.sort.len())).size(14.0).color(TEXT),
             ]
             .spacing(5.0)
@@ -3137,17 +3146,24 @@ impl LogLens {
         )
         .gap(4.0);
 
-        let mode_btn = |label: &'static str, mode: line::LayoutMode| {
-            button(text(label).size(11.0).color(TEXT))
-                .on_press(Message::ResultLayoutMode(run_id, mode))
-                .padding(Padding::new(4.0).left(10.0).right(10.0))
-                .style(style::picker_row(tab.mode == mode))
+        let is_raw = tab.mode == line::LayoutMode::RawText;
+        let (mode_icon, mode_label, next_mode) = if is_raw {
+            (&icons::RAW_TEXT, "Text", line::LayoutMode::Table)
+        } else {
+            (&icons::TABLE, "Table", line::LayoutMode::RawText)
         };
-        let mode_ctl = row![
-            mode_btn("Table", line::LayoutMode::Table),
-            mode_btn("Raw text", line::LayoutMode::RawText),
-        ]
-        .spacing(1.0);
+        let mode_btn = button(icon_box(mode_icon))
+            .on_press(Message::ResultLayoutMode(run_id, next_mode))
+            .padding(Padding::new(5.0).left(9.0).right(9.0))
+            .style(style::icon_button(false));
+        let mode_ctl = tooltip(
+            mode_btn,
+            container(text(mode_label).size(11.0).color(TEXT))
+                .padding(Padding::new(4.0).left(6.0).right(6.0))
+                .style(|_| style::menu_popup()),
+            tooltip::Position::Bottom,
+        )
+        .gap(4.0);
 
         container(
             row![sort_ctl, mode_ctl, space().width(Fill)]
