@@ -3,6 +3,13 @@
 //! The OS keyring is the store of record. Where no keyring backend is available
 //! (headless Linux, locked-down environments) we fall back to a per-session
 //! in-memory map and the UI prompts the user to re-enter the secret each run.
+//!
+//! Every function here is synchronous and is called from the iced main thread,
+//! so a keyring call blocks the UI for the whole round trip to the platform's
+//! credential store. If the keyring is *locked*, that includes however long the
+//! desktop's unlock prompt stays on screen. Accepted: it is rare, and the
+//! alternative is threading an async boundary through every secret read. Revisit
+//! only if it bites in practice.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};

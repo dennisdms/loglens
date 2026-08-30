@@ -7,7 +7,17 @@ edition = "2024"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 dirs = "6.0.0"
 iced = { version = "0.14", features = ["tokio", "svg"] }
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    # Linux: pure-Rust secret-service over zbus. The runtime feature MUST stay
+    # `async-io`, not `tokio`: with the tokio runtime, keyring calls made on the
+    # main thread deadlock (keyring-3.6.3/src/secret_service.rs, "Tokio runtime
+    # caution"), and all of secrets.rs is called from the iced main thread.
+    "async-secret-service",
+    "crypto-rust",
+    "async-io",
+] }
 png = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }
