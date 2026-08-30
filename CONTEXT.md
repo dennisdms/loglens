@@ -164,7 +164,9 @@ _Avoid_: build, version (when the set of files is meant), drop
 One downloadable file belonging to a Release — the Windows installer, the
 Windows portable archive, or the Linux archive. Named to a fixed convention
 that the Update check depends on, so the names are a compatibility contract
-rather than a formatting choice.
+rather than a formatting choice: `LogLens-<version>-<os>-x86_64` carrying the
+flavour last — `-setup.exe`, `-portable.zip`, `.tar.gz` — plus one
+`SHA256SUMS` covering them.
 _Avoid_: asset, package, binary
 
 **Install flavour**:
@@ -172,7 +174,10 @@ How a copy of Log Lens got onto the machine. **Installer-managed** — placed by
 the Windows installer or the Linux archive's install script, in a directory it
 owns and can rewrite. **Portable** — unpacked by hand, owned by nobody. Only an
 installer-managed copy can update itself; a portable one is told about a new
-Release and left alone.
+Release and left alone. Told apart by an `install-manifest.json` that records
+the directory the installer wrote to: a copy is installer-managed only while
+that recorded directory is the one it is running from, so a portable copy
+sitting beside an installed one is not mistaken for it.
 _Avoid_: install type, install mode, channel
 
 **Update check**:
