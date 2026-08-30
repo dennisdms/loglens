@@ -41,7 +41,27 @@ const OK_GREEN: Color = Color::from_rgb8(0x6c, 0xc0, 0x7a);
 const ERR_RED: Color = Color::from_rgb8(0xe0, 0x6c, 0x6c);
 const WARN_AMBER: Color = Color::from_rgb8(0xd6, 0xa5, 0x4c);
 
+/// The display name, as `--version` and `--help` print it. The binary is
+/// `loglens`; this is what a human is shown.
+const APP_NAME: &str = "Log Lens";
+
+/// This build's version: the crate version plus the short commit hash it was
+/// built from, e.g. `0.1.0 (a1b2c3d)`. Several builds share a version number,
+/// so the hash is what makes the first bug report against "0.1.0" say *which*
+/// 0.1.0. The hash is `unknown` when built from a source archive with no
+/// repository present — see `build.rs`, which stamps it in.
+pub const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("LOGLENS_GIT_SHA"),
+    ")"
+);
+
 pub fn main() -> iced::Result {
+    if handle_cli_flags() {
+        return Ok(());
+    }
+
     // A daemon rather than a plain application: Settings opens in its own OS
     // window, and only `daemon`'s `view` / `title` are handed the `window::Id`
     // needed to render each window differently.
@@ -50,6 +70,37 @@ pub fn main() -> iced::Result {
         .theme(LogLens::theme)
         .subscription(LogLens::subscription)
         .run()
+}
+
+/// Answers `--version` / `--help` and reports whether the process should stop
+/// there, before any window exists.
+///
+/// This is not a command-line interface and is not growing into one — anything
+/// unrecognised is ignored and the app starts as normal, so a desktop launcher
+/// passing its own arguments never breaks. Two flags do not justify an
+/// argument-parsing dependency.
+///
+/// It runs ahead of `iced` deliberately: a GUI cannot be launched on a headless
+/// CI runner, but a binary that prints the version it claims to be and exits
+/// cleanly has proved it loaded, linked and ran on that platform. That is the
+/// release workflow's smoke test over every Artifact.
+fn handle_cli_flags() -> bool {
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("{APP_NAME} {VERSION}");
+                return true;
+            }
+            "--help" | "-h" => {
+                println!("{APP_NAME} {VERSION} — a desktop IDE for browsing logs");
+                println!("Usage: loglens [-V | --version] [-h | --help]");
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    false
 }
 
 /// The X11 `WM_CLASS` / Wayland `app_id` for every Log Lens window. Desktop
