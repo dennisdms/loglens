@@ -151,3 +151,39 @@ it matches. Ordered: the first matching field predicate wins, and text patterns
 layer over it. Global to the application, not per Saved Search. Edited from the
 options strip's "Highlight rules" button (both Table and Text mode).
 _Avoid_: filter, formatter, theme rule
+
+### Distribution
+
+**Release**:
+One published version of Log Lens, carrying an Artifact per Install flavour,
+their checksums, and notes describing what changed. Cut by tagging; a Release
+is never visible to users until every one of its Artifacts is present.
+_Avoid_: build, version (when the set of files is meant), drop
+
+**Artifact**:
+One downloadable file belonging to a Release — the Windows installer, the
+Windows portable archive, or the Linux archive. Named to a fixed convention
+that the Update check depends on, so the names are a compatibility contract
+rather than a formatting choice.
+_Avoid_: asset, package, binary
+
+**Install flavour**:
+How a copy of Log Lens got onto the machine. **Installer-managed** — placed by
+the Windows installer or the Linux archive's install script, in a directory it
+owns and can rewrite. **Portable** — unpacked by hand, owned by nobody. Only an
+installer-managed copy can update itself; a portable one is told about a new
+Release and left alone.
+_Avoid_: install type, install mode, channel
+
+**Update check**:
+Asking GitHub whether a Release newer than the running version exists. Happens
+at most once a day on startup, and on demand from the Help menu. Pre-releases
+are never offered.
+_Avoid_: version check, poll
+
+**Update** (verb):
+Replacing the running copy with a newer Release by running that Release's own
+installer, so shortcuts, launcher entries and icons move with the binary
+instead of drifting away from it. Never touches the user's Connections,
+settings, or stored secrets.
+_Avoid_: upgrade, patch, self-update
