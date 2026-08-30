@@ -54,15 +54,17 @@ pub fn main() -> iced::Result {
 
 /// The X11 `WM_CLASS` / Wayland `app_id` for every Log Lens window. Desktop
 /// environments key alt-tab grouping, the taskbar label, and the `.desktop`
-/// match off this, so it stays constant across windows. It doubles as the name
-/// shown in GNOME's app switcher when no installed `.desktop` file is matched,
-/// so it is the human-readable "Log Lens" rather than a bare identifier; a
-/// packaged build would switch to a reverse-DNS id plus an installed
-/// `loglens.desktop` (whose `StartupWMClass` must then match). Only
+/// match off this, so it stays constant across windows. It is the
+/// freedesktop-conventional reverse-DNS id, and the installed desktop entry
+/// (`io.github.dennisdms.LogLens.desktop`) and icon
+/// (`…/icons/hicolor/256x256/apps/io.github.dennisdms.LogLens.png`) are named
+/// after it exactly — that filename match is how GNOME binds a running window
+/// to its launcher icon in the dock and alt-tab. The display name stays
+/// "Log Lens"; it comes from the desktop entry's `Name=`, not from here. Only
 /// `PlatformSpecific` on Linux carries the field; macOS and Windows take the
 /// name from the bundle / executable instead.
 #[cfg(target_os = "linux")]
-const APP_ID: &str = "Log Lens";
+const APP_ID: &str = "io.github.dennisdms.LogLens";
 
 /// Settings shared by every Log Lens window: the app icon and (on Linux) the
 /// desktop application id. Per-window fields (size, resizability) are set by
