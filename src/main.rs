@@ -18,12 +18,15 @@ use iced::widget::{
     Id, button, checkbox, column, container, mouse_area, opaque, operation, pick_list, radio, row,
     rule, scrollable, space, stack, svg, text, text_editor, text_input, tooltip,
 };
-use iced::{Border, Color, Element, Fill, Font, Length, Padding, Point, Subscription, Task, Theme};
+use iced::window;
+use iced::{
+    Border, Color, Element, Fill, Font, Length, Padding, Point, Size, Subscription, Task, Theme,
+};
 
 use config::{Auth, Config, Connection};
 use config::{TimeUnit, TimeframeChoice, TimeframeMode};
 use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
-use results::{Paging, RETENTION_CAP, ROW_H, ResultTab, RunState, TimeframeDraft, TotalHits};
+use results::{Paging, ROW_H, ResultTab, RunState, TimeframeDraft, TotalHits};
 use rules::{MatcherKind, RulesForm};
 use search::{Fields, SearchForm};
 use style::{ACCENT, BG, BORDER, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
@@ -39,12 +42,31 @@ const ERR_RED: Color = Color::from_rgb8(0xe0, 0x6c, 0x6c);
 const WARN_AMBER: Color = Color::from_rgb8(0xd6, 0xa5, 0x4c);
 
 pub fn main() -> iced::Result {
-    iced::application(LogLens::new, LogLens::update, LogLens::view)
-        .title("Log Lens")
+    // A daemon rather than a plain application: Settings opens in its own OS
+    // window, and only `daemon`'s `view` / `title` are handed the `window::Id`
+    // needed to render each window differently.
+    iced::daemon(LogLens::new, LogLens::update, LogLens::view)
+        .title(LogLens::title)
         .theme(LogLens::theme)
         .subscription(LogLens::subscription)
-        .window_size(iced::Size::new(1180.0, 760.0))
         .run()
+}
+
+/// Window settings for the main Log Lens window, opened once at boot.
+fn main_window_settings() -> window::Settings {
+    window::Settings {
+        size: Size::new(1180.0, 760.0),
+        ..window::Settings::default()
+    }
+}
+
+/// Window settings for the Settings window.
+fn settings_window_settings() -> window::Settings {
+    window::Settings {
+        size: Size::new(460.0, 340.0),
+        resizable: true,
+        ..window::Settings::default()
+    }
 }
 
 // --- State -----------------------------------------------------------------
@@ -91,6 +113,33 @@ struct LogLens {
     /// Frame counter for the Hit-count spinner, advanced while any Result Tab
     /// is still counting its total Hits.
     spinner_frame: usize,
+    /// The main window's id, opened at boot. Closing it exits the app.
+    main_window: window::Id,
+    /// The Settings window's id while it is open.
+    settings_window: Option<window::Id>,
+    /// Whether the Menu bar's "File" dropdown is showing.
+    file_menu_open: bool,
+    /// Editable copy of `config.es`, backing the Settings window's fields.
+    settings_draft: SettingsDraft,
+}
+
+/// Draft text for the Settings window's Elasticsearch page. Committed back into
+/// `Config.es` (parsed and clamped) on Save.
+#[derive(Debug, Clone, Default)]
+struct SettingsDraft {
+    max_results: String,
+    fetch_size: String,
+    error: Option<String>,
+}
+
+impl SettingsDraft {
+    fn from_settings(es: config::EsSettings) -> Self {
+        Self {
+            max_results: es.max_results.to_string(),
+            fetch_size: es.fetch_size.to_string(),
+            error: None,
+        }
+    }
 }
 
 /// Which tree row's management menu is currently open.
@@ -336,6 +385,21 @@ enum Message {
     },
     ConfirmProceed,
     ConfirmCancel,
+    // Menu bar + Settings window
+    /// Toggle the Menu bar's "File" dropdown.
+    FileMenuToggle,
+    /// Close the "File" dropdown (click outside).
+    FileMenuDismiss,
+    /// Open (or focus) the Settings window.
+    OpenSettings,
+    SettingsMaxResults(String),
+    SettingsFetchSize(String),
+    /// Validate + persist the Settings draft, then close the window.
+    SettingsSave,
+    /// Close the Settings window without saving.
+    SettingsClose,
+    /// An OS window was closed. Exits the app when it is the main window.
+    WindowClosed(window::Id),
     // Misc
     DismissStatus,
     /// Clear the active Result Tab's failed-Target-switch notice.
@@ -346,12 +410,16 @@ enum Message {
 }
 
 impl LogLens {
-    fn new() -> Self {
+    fn new() -> (Self, Task<Message>) {
         let mut expanded = HashSet::new();
         expanded.insert(ES_ROOT.to_string());
 
-        Self {
-            config: config::load(),
+        let config = config::load();
+        let (main_window, open_main) = window::open(main_window_settings());
+
+        let app = Self {
+            settings_draft: SettingsDraft::from_settings(config.es),
+            config,
             open_tabs: Vec::new(),
             active_tab: None,
             expanded,
@@ -370,11 +438,23 @@ impl LogLens {
             tree_menu_at: Point::ORIGIN,
             confirm: None,
             spinner_frame: 0,
-        }
+            main_window,
+            settings_window: None,
+            file_menu_open: false,
+        };
+        (app, open_main.discard())
     }
 
-    fn theme(&self) -> Theme {
+    fn theme(&self, _window: window::Id) -> Theme {
         Theme::Dark
+    }
+
+    fn title(&self, window: window::Id) -> String {
+        if Some(window) == self.settings_window {
+            "Settings — Log Lens".to_string()
+        } else {
+            "Log Lens".to_string()
+        }
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -388,6 +468,10 @@ impl LogLens {
             }) => Some(Message::CloseHitDetail),
             _ => None,
         });
+
+        // Closing the main window exits the app; closing Settings just clears
+        // its handle (a daemon keeps running with no windows open).
+        let closes = window::close_events().map(Message::WindowClosed);
 
         // Tick the Hit-count spinner only while a run is still counting.
         let counting = self
@@ -410,7 +494,7 @@ impl LogLens {
                 }
                 _ => None,
             });
-            return Subscription::batch([escape, spinner, drag]);
+            return Subscription::batch([escape, closes, spinner, drag]);
         }
 
         if self.column_drag.is_some() {
@@ -423,10 +507,10 @@ impl LogLens {
                 }
                 _ => None,
             });
-            return Subscription::batch([escape, spinner, drag]);
+            return Subscription::batch([escape, closes, spinner, drag]);
         }
 
-        Subscription::batch([escape, spinner])
+        Subscription::batch([escape, closes, spinner])
     }
 
     fn next_id(&mut self) -> u64 {
@@ -1200,6 +1284,41 @@ impl LogLens {
             }
             Message::ConfirmCancel => self.confirm = None,
 
+            Message::FileMenuToggle => self.file_menu_open = !self.file_menu_open,
+            Message::FileMenuDismiss => self.file_menu_open = false,
+            Message::OpenSettings => {
+                self.file_menu_open = false;
+                if let Some(id) = self.settings_window {
+                    return window::gain_focus(id);
+                }
+                self.settings_draft = SettingsDraft::from_settings(self.config.es);
+                let (id, open) = window::open(settings_window_settings());
+                self.settings_window = Some(id);
+                return open.discard();
+            }
+            Message::SettingsMaxResults(v) => {
+                self.settings_draft.max_results = v;
+                self.settings_draft.error = None;
+            }
+            Message::SettingsFetchSize(v) => {
+                self.settings_draft.fetch_size = v;
+                self.settings_draft.error = None;
+            }
+            Message::SettingsSave => return self.save_settings(),
+            Message::SettingsClose => {
+                if let Some(id) = self.settings_window.take() {
+                    return window::close(id);
+                }
+            }
+            Message::WindowClosed(id) => {
+                if id == self.main_window {
+                    return iced::exit();
+                }
+                if Some(id) == self.settings_window {
+                    self.settings_window = None;
+                }
+            }
+
             Message::DismissStatus => self.status = None,
             Message::DismissTargetError(run_id) => {
                 if let Some(rt) = self.result_mut(run_id) {
@@ -1213,6 +1332,67 @@ impl LogLens {
         }
 
         Task::none()
+    }
+
+    // --- Settings window ---------------------------------------------------
+
+    /// Parses and clamps the Settings draft, writes it into `Config.es`,
+    /// persists, pushes the new limits onto every open Result Tab, and closes
+    /// the Settings window. A malformed field leaves everything untouched and
+    /// shows an inline error.
+    fn save_settings(&mut self) -> Task<Message> {
+        let parse = |raw: &str, label: &str| -> Result<usize, String> {
+            raw.trim()
+                .replace([',', '_'], "")
+                .parse::<usize>()
+                .map_err(|_| format!("{label} must be a whole number"))
+                .and_then(|n| {
+                    if n == 0 {
+                        Err(format!("{label} must be at least 1"))
+                    } else {
+                        Ok(n)
+                    }
+                })
+        };
+
+        let max_results = match parse(&self.settings_draft.max_results, "Max Results") {
+            Ok(n) => n,
+            Err(err) => {
+                self.settings_draft.error = Some(err);
+                return Task::none();
+            }
+        };
+        let fetch_size = match parse(&self.settings_draft.fetch_size, "Fetch size") {
+            Ok(n) => n,
+            Err(err) => {
+                self.settings_draft.error = Some(err);
+                return Task::none();
+            }
+        };
+
+        let es = config::EsSettings {
+            max_results,
+            fetch_size,
+        }
+        .normalized();
+        self.config.es = es;
+        self.settings_draft = SettingsDraft::from_settings(es);
+
+        for tab in &mut self.open_tabs {
+            if let Tab::Result(rt) = tab {
+                rt.max_results = es.max_results;
+                rt.fetch_size = es.fetch_size;
+            }
+        }
+
+        if let Err(err) = config::save(&self.config) {
+            self.status = Some(format!("Could not save config: {err}"));
+        }
+
+        match self.settings_window.take() {
+            Some(id) => window::close(id),
+            None => Task::none(),
+        }
     }
 
     // --- Tabs ----------------------------------------------------------
@@ -1802,6 +1982,8 @@ impl LogLens {
             detail_content: text_editor::Content::new(),
             detail_height: results::DETAIL_DEFAULT_H,
             utc: self.config.utc_timestamps,
+            max_results: self.config.es.max_results,
+            fetch_size: self.config.es.fetch_size,
             mode: saved.mode,
             template: saved.template.clone(),
             template_draft: saved.template.clone(),
@@ -1886,7 +2068,7 @@ impl LogLens {
                     gte: rt.gte.clone(),
                     lte: rt.lte.clone(),
                     sort: rt.effective_sort(),
-                    size: 1000,
+                    size: rt.fetch_size.min(rt.max_results),
                     search_after: None,
                 };
                 (
@@ -1941,7 +2123,7 @@ impl LogLens {
     fn load_more(&mut self, run_id: u64) -> Task<Message> {
         let Some((conn_id, target, params)) = self.result_mut(run_id).and_then(|rt| {
             let cursor = rt.next_cursor()?;
-            let remaining = RETENTION_CAP.saturating_sub(rt.hits.len());
+            let remaining = rt.max_results.saturating_sub(rt.hits.len());
             if remaining == 0 {
                 rt.paging = Paging::Capped;
                 return None;
@@ -1956,7 +2138,7 @@ impl LogLens {
                     gte: rt.gte.clone(),
                     lte: rt.lte.clone(),
                     sort: rt.effective_sort(),
-                    size: remaining.min(1000),
+                    size: remaining.min(rt.fetch_size),
                     search_after: Some(cursor),
                 },
             ))
@@ -1981,7 +2163,14 @@ impl LogLens {
 
     // --- View --------------------------------------------------------------
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self, window: window::Id) -> Element<'_, Message> {
+        if Some(window) == self.settings_window {
+            return self.settings_view();
+        }
+        self.main_view()
+    }
+
+    fn main_view(&self) -> Element<'_, Message> {
         // Right column, top to bottom: an optional options strip, then an
         // optional Search bar, then the tab strip sitting directly above the
         // main area. The two optional strips only appear while a Result Tab is
@@ -2020,6 +2209,9 @@ impl LogLens {
         .into();
 
         let mut layers: Vec<Element<'_, Message>> = vec![base];
+        if let Some(menu) = self.file_menu_overlay() {
+            layers.push(menu);
+        }
         if let Some(menu) = self.tree_menu_overlay() {
             layers.push(menu);
         }
@@ -2354,21 +2546,125 @@ impl LogLens {
             .into()
     }
 
-    /// The always-present Menu bar across the top of the window. `File` and
-    /// `View` are visible but inert until dropdowns land.
+    /// The always-present Menu bar across the top of the window. `File` opens a
+    /// dropdown (see [`Self::file_menu_overlay`]); `View` is still inert.
     fn menu_bar(&self) -> Element<'_, Message> {
         container(
             row![
-                text("File").size(13.0).color(TEXT_DIM),
+                button(text("File").size(13.0).color(TEXT))
+                    .on_press(Message::FileMenuToggle)
+                    .padding(Padding::new(2.0).left(6.0).right(6.0))
+                    .style(style::picker_row(self.file_menu_open)),
                 text("View").size(13.0).color(TEXT_DIM),
             ]
-            .spacing(18.0)
+            .spacing(12.0)
             .align_y(iced::Alignment::Center),
         )
         .style(|_| style::panel(PANEL_ALT))
         .width(Fill)
-        .padding(Padding::new(4.0).left(12.0).right(12.0))
+        .padding(Padding::new(4.0).left(8.0).right(12.0))
         .into()
+    }
+
+    /// The floating "File" dropdown, anchored under its Menu bar label.
+    fn file_menu_overlay(&self) -> Option<Element<'_, Message>> {
+        if !self.file_menu_open {
+            return None;
+        }
+        let block = container(
+            button(text("Settings").size(12.0).color(TEXT))
+                .on_press(Message::OpenSettings)
+                .width(Fill)
+                .padding(Padding::new(4.0).left(10.0).right(10.0))
+                .style(style::picker_row(false)),
+        )
+        .width(150.0)
+        .padding(3.0)
+        .style(|_| style::menu_popup());
+
+        let anchored = container(block)
+            .width(Fill)
+            .height(Fill)
+            .padding(Padding::new(0.0).left(8.0).top(26.0));
+
+        Some(
+            mouse_area(anchored)
+                .on_press(Message::FileMenuDismiss)
+                .on_right_press(Message::FileMenuDismiss)
+                .into(),
+        )
+    }
+
+    /// The Settings window body: a single Elasticsearch page with the two fetch
+    /// limits. Rendered whenever `view` is asked for the Settings window.
+    fn settings_view(&self) -> Element<'_, Message> {
+        let draft = &self.settings_draft;
+
+        let max_results = column![
+            field_label("Max Results"),
+            text("Stop fetching once a tab has loaded this many documents.")
+                .size(11.0)
+                .color(TEXT_DIM),
+            text_input("", &draft.max_results)
+                .on_input(Message::SettingsMaxResults)
+                .on_submit(Message::SettingsSave)
+                .padding(6.0)
+                .width(Length::Fixed(140.0)),
+        ]
+        .spacing(4.0);
+
+        let fetch_size = column![
+            field_label("Fetch size"),
+            text("Documents per request while paging (max 10,000).")
+                .size(11.0)
+                .color(TEXT_DIM),
+            text_input("", &draft.fetch_size)
+                .on_input(Message::SettingsFetchSize)
+                .on_submit(Message::SettingsSave)
+                .padding(6.0)
+                .width(Length::Fixed(140.0)),
+        ]
+        .spacing(4.0);
+
+        let mut col = column![
+            text("Elasticsearch").size(16.0).color(TEXT),
+            text(
+                "How many log documents Log Lens pulls from a cluster, and in \
+                 what size batches."
+            )
+            .size(11.0)
+            .color(TEXT_DIM),
+            space().height(4.0),
+            max_results,
+            fetch_size,
+        ]
+        .spacing(10.0);
+
+        if let Some(err) = &draft.error {
+            col = col.push(text(err.clone()).size(12.0).color(ERR_RED));
+        }
+
+        col = col.push(space().height(6.0));
+        col = col.push(
+            row![
+                button(text("Save").size(13.0).color(TEXT))
+                    .on_press(Message::SettingsSave)
+                    .padding(Padding::new(6.0).left(16.0).right(16.0))
+                    .style(style::picker_row(true)),
+                button(text("Cancel").size(13.0).color(TEXT_DIM))
+                    .on_press(Message::SettingsClose)
+                    .padding(Padding::new(6.0).left(14.0).right(14.0))
+                    .style(style::bare_button()),
+            ]
+            .spacing(8.0),
+        );
+
+        container(scrollable(col).height(Fill))
+            .style(|_| style::panel(BG))
+            .width(Fill)
+            .height(Fill)
+            .padding(20.0)
+            .into()
     }
 
     /// The options strip shown at the top of the right column while a Result
@@ -3933,13 +4229,14 @@ impl LogLens {
                 .color(TEXT_DIM)
                 .into(),
             Paging::Capped => {
+                let cap = tab.max_results as u64;
                 let msg = match tab.total_hits {
-                    TotalHits::Known(total) if total > RETENTION_CAP as u64 => format!(
+                    TotalHits::Known(total) if total > cap => format!(
                         "Showing first {} of {} Hits — refine your search",
-                        thousands(RETENTION_CAP as u64),
+                        thousands(cap),
                         thousands(total),
                     ),
-                    _ => format!("Showing first {RETENTION_CAP} Hits — refine your search"),
+                    _ => format!("Showing first {cap} Hits — refine your search"),
                 };
                 text(msg).size(12.0).color(TEXT_DIM).into()
             }
@@ -4300,9 +4597,9 @@ fn apply_page(rt: &mut ResultTab, result: Result<es::Page, String>, append: bool
                     RunState::Loaded
                 };
             }
-            rt.paging = if rt.hits.len() >= RETENTION_CAP {
+            rt.paging = if rt.hits.len() >= rt.max_results {
                 Paging::Capped
-            } else if got < 1000 {
+            } else if got < rt.fetch_size {
                 Paging::Exhausted
             } else {
                 Paging::Idle

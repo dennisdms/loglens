@@ -1,5 +1,11 @@
 # Result paging via search_after
 
+> **Amended 2026-08-30:** the Page size (1,000) and the per-tab ceiling (10,000)
+> are no longer fixed. They are the "Fetch size" and "Max Results" settings in
+> the Settings window (`Config.es`), still defaulting to 1,000 / 10,000, with
+> Fetch size capped at Elasticsearch's 10,000 per-request limit. Everything below
+> holds; read "1,000" / "10,000" as those defaults.
+
 ## Context
 
 A Result Tab loads Hits in Pages of 1,000 and appends more as the user scrolls,

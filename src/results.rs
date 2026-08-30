@@ -84,9 +84,6 @@ pub const COL_TIMESTAMP_W: f32 = 210.0;
 pub const COL_MIN_W: f32 = 60.0;
 pub const COL_MAX_W: f32 = 1200.0;
 
-/// Hard ceiling on Hits loaded into one Result Tab (ADR 0002).
-pub const RETENTION_CAP: usize = 10_000;
-
 /// Rows rendered above and below the visible viewport as scroll slack.
 const WINDOW_BUFFER: usize = 40;
 
@@ -216,6 +213,11 @@ pub struct ResultTab {
     pub detail_height: f32,
     /// Render `@timestamp`-typed cells in UTC rather than local time.
     pub utc: bool,
+    /// The most Hits this tab will load, from `Config.es.max_results`. Paging
+    /// stops once `hits.len()` reaches it.
+    pub max_results: usize,
+    /// Documents pulled per `_search` request, from `Config.es.fetch_size`.
+    pub fetch_size: usize,
     /// Table or raw text — the Layout mode, carried from the Saved Search.
     pub mode: LayoutMode,
     /// Raw text mode's template. Empty until resolved from field caps the
@@ -267,7 +269,7 @@ impl ResultTab {
     pub fn wants_more(&self, offset_y: f32, viewport_h: f32, content_h: f32) -> bool {
         matches!(self.state, RunState::Loaded)
             && self.paging == Paging::Idle
-            && self.hits.len() < RETENTION_CAP
+            && self.hits.len() < self.max_results
             && content_h - (offset_y + viewport_h) < 600.0
     }
 

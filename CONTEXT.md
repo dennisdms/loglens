@@ -58,17 +58,31 @@ with one Page and appends more as the user scrolls, each one an independent
 `search_after` call past the last Hit's sort values.
 _Avoid_: batch, chunk, scroll
 
-**Retention cap**:
-The maximum number of Hits a Result Tab will load (10,000 by default). On
-reaching it the tab stops paging and tells the user to narrow the query.
-_Avoid_: limit, max results, buffer size
+**Max Results**:
+The maximum number of Hits a Result Tab will load (10,000 by default, set in the
+Settings window). On reaching it the tab stops paging and tells the user to
+narrow the query. Formerly a fixed "retention cap".
+_Avoid_: retention cap, limit, buffer size
+
+**Fetch size**:
+How many documents Log Lens pulls per `_search` request while paging (1,000 by
+default, capped at 10,000 — Elasticsearch's own per-request ceiling). Set in the
+Settings window.
+_Avoid_: page size, batch size
 
 ### Display
 
 **Menu bar**:
 A strip across the top of the window holding application-wide actions, grouped as
 menus (File, View). Always present, independent of which Saved Search is open.
+`File` opens a dropdown with `Settings`; `View` is still inert.
 _Avoid_: toolbar, ribbon
+
+**Settings window**:
+A separate OS window (File > Settings) for application-wide configuration, apart
+from any Saved Search. One page so far — Elasticsearch — carrying Max Results and
+Fetch size. Saving applies the new limits to every open Result Tab.
+_Avoid_: preferences pane, settings tab, modal
 
 **Options strip**:
 The row of display controls directly above an active Result Tab: sort fields, the

@@ -18,6 +18,53 @@ pub struct Config {
     /// Highlight rules, applied globally across every Result Tab.
     #[serde(default)]
     pub rules: Vec<crate::line::Rule>,
+    /// Elasticsearch fetch limits, tuned from the Settings window.
+    #[serde(default)]
+    pub es: EsSettings,
+}
+
+/// Hard ceiling on the batch size Elasticsearch will return in one `_search`.
+pub const FETCH_SIZE_MAX: usize = 10_000;
+
+pub fn default_max_results() -> usize {
+    10_000
+}
+
+pub fn default_fetch_size() -> usize {
+    1_000
+}
+
+/// Elasticsearch paging limits shared by every Result Tab.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct EsSettings {
+    /// The most Hits a single Result Tab will ever load. Once this many are on
+    /// screen, scrolling stops fetching more.
+    #[serde(default = "default_max_results")]
+    pub max_results: usize,
+    /// How many documents to pull per `_search` request while paging. Capped at
+    /// [`FETCH_SIZE_MAX`] (Elasticsearch's own per-request ceiling).
+    #[serde(default = "default_fetch_size")]
+    pub fetch_size: usize,
+}
+
+impl Default for EsSettings {
+    fn default() -> Self {
+        Self {
+            max_results: default_max_results(),
+            fetch_size: default_fetch_size(),
+        }
+    }
+}
+
+impl EsSettings {
+    /// Clamps both values into their sane ranges: at least one document each,
+    /// and `fetch_size` no larger than [`FETCH_SIZE_MAX`].
+    pub fn normalized(self) -> Self {
+        Self {
+            max_results: self.max_results.max(1),
+            fetch_size: self.fetch_size.clamp(1, FETCH_SIZE_MAX),
+        }
+    }
 }
 
 /// A named Elasticsearch endpoint plus how to reach it. Secretless.
