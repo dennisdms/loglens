@@ -1,5 +1,9 @@
 /target
 
+# Staged Release Artifacts — where the Inno Setup script and make-portable.ps1
+# write the Windows setup .exe and portable .zip
+/dist
+
 # Working notes and generated tickets — local scratch, not shared
 /.scratch
 
