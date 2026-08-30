@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Local, TimeZone, Utc};
-use iced::widget::text_editor;
+use iced::widget::{text_editor, Id};
 use serde_json::Value;
 
 use crate::config::{SortKey, TimeUnit, Timeframe, TimeframeMode};
@@ -194,6 +194,14 @@ pub struct ResultTab {
     pub pit_id: Option<String>,
     pub hits: Vec<Hit>,
     pub state: RunState,
+    /// True while a re-run (Refresh, edited query / timeframe / target) is in
+    /// flight over a tab that had already loaded. Keeps the options and Search
+    /// strips pinned and the previous table on screen so nothing flickers while
+    /// `state` briefly passes back through `Loading`.
+    pub refreshing: bool,
+    /// Stable id for the Hit table's `scrollable`, so a completed run can snap it
+    /// back to the top even though the widget stays mounted across a refresh.
+    pub scroll_id: Id,
     pub paging: Paging,
     /// Total matching Hits (`_count`), loaded asynchronously each run.
     pub total_hits: TotalHits,
@@ -214,6 +222,26 @@ pub struct ResultTab {
 }
 
 impl ResultTab {
+    /// Whether the options and Search strips should be shown for this tab. True
+    /// once a run has produced a table (or an empty result), and held true
+    /// through an in-place re-run so the strips — and everything below them —
+    /// stay put instead of collapsing while `state` passes back through
+    /// `Loading`.
+    pub fn strips_visible(&self) -> bool {
+        matches!(self.state, RunState::Loaded | RunState::Empty)
+            || (self.refreshing && matches!(self.state, RunState::Loading))
+    }
+
+    /// Whether to render the Hit table rather than a status placeholder. True
+    /// once a run is `Loaded`, and held true through an in-place refresh so the
+    /// previous rows and headers stay put instead of flashing out.
+    pub fn table_visible(&self) -> bool {
+        matches!(self.state, RunState::Loaded)
+            || (self.refreshing
+                && matches!(self.state, RunState::Loading)
+                && !self.hits.is_empty())
+    }
+
     /// The `[start, end)` slice of `hits` to actually build widgets for,
     /// given the current scroll offset.
     pub fn row_window(&self) -> (usize, usize) {

@@ -12,9 +12,10 @@ use std::collections::{HashMap, HashSet};
 
 use iced::widget::svg::Handle;
 use iced::widget::{
-    button, checkbox, column, container, mouse_area, pick_list, radio, row, rule, scrollable,
-    space, stack, svg, text, text_editor, text_input, tooltip,
+    button, checkbox, column, container, mouse_area, operation, pick_list, radio, row, rule,
+    scrollable, space, stack, svg, text, text_editor, text_input, tooltip, Id,
 };
+use iced::widget::scrollable::RelativeOffset;
 use iced::{Border, Color, Element, Fill, Font, Length, Padding, Point, Subscription, Task, Theme};
 
 use config::{Auth, Config, Connection};
@@ -552,6 +553,7 @@ impl LogLens {
                     && let PendingAction::RunSearch { run_id } = prompt.then
                     && let Some(rt) = self.result_mut(run_id)
                 {
+                    rt.refreshing = false;
                     rt.state = RunState::Error(
                         "Connection secret required to run this search".to_string(),
                     );
@@ -874,8 +876,18 @@ impl LogLens {
                 result,
                 append,
             } => {
+                let ok = result.is_ok();
                 if let Some(rt) = self.result_mut(run_id) {
                     apply_page(rt, result, append);
+                }
+                // A completed first Page (initial run or refresh) starts at the
+                // top: the table `scrollable` stays mounted across a refresh, so
+                // snap it back explicitly rather than relying on a remount.
+                if !append && ok
+                    && let Some(rt) = self.result_mut(run_id)
+                {
+                    rt.scroll_y = 0.0;
+                    return operation::snap_to(rt.scroll_id.clone(), RelativeOffset::START);
                 }
             }
             Message::ResultScrolled {
@@ -1605,6 +1617,8 @@ impl LogLens {
             pit_id: None,
             hits: Vec::new(),
             state: RunState::Loading,
+            refreshing: false,
+            scroll_id: Id::unique(),
             paging: Paging::Idle,
             total_hits: TotalHits::Loading,
             total_generation: 0,
@@ -1661,11 +1675,18 @@ impl LogLens {
     fn start_run(&mut self, run_id: u64) -> Task<Message> {
         let Some((conn_id, target, old_pit, generation, count_params)) =
             self.result_mut(run_id).map(|rt| {
+                // If this tab already had a table up, keep the strips pinned and
+                // the previous rows on screen while the re-run is in flight, so
+                // nothing flickers. The old Hits are swapped out wholesale when
+                // the new first Page lands (see `PageLoaded`).
+                rt.refreshing = matches!(rt.state, RunState::Loaded | RunState::Empty);
                 rt.state = RunState::Loading;
-                rt.hits.clear();
-                rt.paging = Paging::Idle;
-                rt.scroll_y = 0.0;
                 rt.selected_hit = None;
+                if !rt.refreshing {
+                    rt.hits.clear();
+                    rt.paging = Paging::Idle;
+                    rt.scroll_y = 0.0;
+                }
                 // Re-resolve the range so a relative window re-anchors to "now".
                 let (gte, lte) = rt.timeframe.bounds();
                 rt.gte = gte;
@@ -1734,6 +1755,7 @@ impl LogLens {
             Ok(pit) => pit,
             Err(err) => {
                 if let Some(rt) = self.result_mut(run_id) {
+                    rt.refreshing = false;
                     rt.state = RunState::Error(err);
                 }
                 return Task::none();
@@ -2208,7 +2230,7 @@ impl LogLens {
         let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
             return None;
         };
-        if !matches!(tab.state, RunState::Loaded | RunState::Empty) {
+        if !tab.strips_visible() {
             return None;
         }
 
@@ -2308,7 +2330,7 @@ impl LogLens {
         // the options strip (only once a run has loaded — see `options_bar`),
         // then the Search bar row. Each figure includes its trailing 1px rule.
         let mut top = 25.0;
-        if matches!(tab.state, RunState::Loaded | RunState::Empty) {
+        if tab.strips_visible() {
             top += 29.0;
         }
         top += 40.0;
@@ -2345,7 +2367,7 @@ impl LogLens {
         // Matches `timeframe_popover_overlay`: Menu bar, then the options strip
         // (only once a run has loaded), then the Search bar row.
         let mut top = 25.0;
-        if matches!(tab.state, RunState::Loaded | RunState::Empty) {
+        if tab.strips_visible() {
             top += 29.0;
         }
         top += 40.0;
@@ -2656,6 +2678,9 @@ impl LogLens {
 
     fn result_view<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
         let body: Element<'_, Message> = match &tab.state {
+            // A refresh over an already-populated tab keeps the old table on
+            // screen until the new first Page lands, so nothing flashes.
+            _ if tab.table_visible() => self.hit_table(tab),
             RunState::Loading => centered("Running\u{2026}", TEXT_DIM),
             RunState::Empty => centered("No hits for this query and timeframe", TEXT_DIM),
             RunState::Error(err) => container(
@@ -2781,7 +2806,7 @@ impl LogLens {
         if !tab.sort_panel_open {
             return None;
         }
-        if !matches!(tab.state, RunState::Loaded | RunState::Empty) {
+        if !tab.strips_visible() {
             return None;
         }
         let run_id = tab.run_id;
@@ -3074,6 +3099,7 @@ impl LogLens {
         }
 
         let table = scrollable(column(body).width(Fill))
+            .id(tab.scroll_id.clone())
             .width(Fill)
             .height(Fill)
             .on_scroll(move |viewport| {
@@ -3595,6 +3621,9 @@ fn modal_card<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
 /// Folds a fetched Page into a Result Tab: replacing Hits on a first run,
 /// appending on a scroll-driven load-more, and settling the paging state.
 fn apply_page(rt: &mut ResultTab, result: Result<es::Page, String>, append: bool) {
+    if !append {
+        rt.refreshing = false;
+    }
     match result {
         Ok(page) => {
             if let Some(pit) = page.pit_id {
