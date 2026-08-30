@@ -1,5 +1,6 @@
 //! Build script. Stamps the commit the binary was built from into the
-//! executable, so `--version` can report it.
+//! executable, so `--version` can report it, and on Windows compiles the icon
+//! and version information resource into the executable itself.
 
 fn main() {
     // Version string: 0.1.0 (a1b2c3d) — the SHA is what makes a bug report
@@ -17,7 +18,40 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=LOGLENS_GIT_SHA={sha}");
     rerun_on_commit_change();
+    embed_windows_resources();
 }
+
+/// Compiles `assets/app-icon/icon.ico` and the version information block into
+/// the executable's Windows resources.
+///
+/// Without this the exe carries the generic Rust binary icon everywhere it is
+/// seen as a file — Explorer, the taskbar, the Start menu, any shortcut
+/// pointing at it — and reports nothing useful in its file properties. The
+/// `window::Settings.icon` set in `base_window_settings()` only dresses the
+/// live window; it does not touch the file on disk. Inno Setup points
+/// `SetupIconFile` at the same `.ico`.
+///
+/// `cfg(windows)` on a build script is the *host*, and a build script only ever
+/// runs on the host — which is also the only place `winresource` can invoke a
+/// resource compiler. Releases are built on a Windows runner, so this runs
+/// where it matters; cross-compiling to Windows from Linux would produce an
+/// unadorned exe rather than a failure.
+#[cfg(windows)]
+fn embed_windows_resources() {
+    println!("cargo:rerun-if-changed=assets/app-icon/icon.ico");
+
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon("assets/app-icon/icon.ico");
+    res.set("ProductName", "Log Lens");
+    res.set(
+        "FileDescription",
+        "Log Lens — a desktop IDE for browsing logs",
+    );
+    res.compile().unwrap();
+}
+
+#[cfg(not(windows))]
+fn embed_windows_resources() {}
 
 /// Tell cargo which files to watch so a new commit restamps the SHA.
 ///

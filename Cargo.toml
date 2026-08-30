@@ -24,5 +24,17 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
 
+# Only for `attach_parent_console` in main.rs: a GUI subsystem release build has
+# no console, so `--version` has to borrow the parent terminal's to print
+# anything at all.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
+# Compiles the icon and the version information block into the exe. Build
+# scripts run on the host, so this is gated on the host being Windows, matching
+# the `cfg(windows)` block in build.rs.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dev-dependencies]
 cargo-husky = { version = "1.5.0", default-features = false, features = ["user-hooks"] }

@@ -1,5 +1,14 @@
+// A release build is a GUI subsystem executable on Windows, so launching it
+// from the Start menu opens the Log Lens window and nothing else. Without this
+// a black console window appears behind the app, which is the loudest possible
+// signal that it is not a real application. Debug builds keep their console, so
+// `cargo run` still prints. See `attach_parent_console` for what the release
+// build does when it *is* launched from a terminal.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod config;
 mod connection;
+mod crashlog;
 mod es;
 mod icons;
 mod line;
@@ -58,6 +67,11 @@ pub const VERSION: &str = concat!(
 );
 
 pub fn main() -> iced::Result {
+    // First thing, so a panic anywhere after it leaves a trace on disk rather
+    // than only on a stderr that a release build does not have.
+    crashlog::install_panic_hook();
+    attach_parent_console();
+
     if handle_cli_flags() {
         return Ok(());
     }
@@ -102,6 +116,74 @@ fn handle_cli_flags() -> bool {
 
     false
 }
+
+/// Reattaches a Windows release build to the terminal it was launched from, if
+/// it was launched from one.
+///
+/// **Do not delete this as dead code.** It is what makes `handle_cli_flags`
+/// above visible on Windows at all. A release build is a GUI subsystem
+/// executable (see the attribute at the top of this file), and such a process
+/// starts with no console attached and no valid standard handles, so
+/// `loglens.exe --version` typed at a `cmd.exe` or PowerShell prompt would
+/// print into the void. That output is the release workflow's smoke test over
+/// every Artifact, and the only way a user can ask a build which version it is.
+///
+/// `AttachConsole(ATTACH_PARENT_PROCESS)` borrows the parent's console when
+/// there is one and points the standard streams at it. When there is no parent
+/// console — launched from the Start menu, from Explorer, from a shortcut — the
+/// attach fails, nothing is printed, and nothing is shown, which is exactly
+/// what is wanted.
+///
+/// Deliberately *not* `AllocConsole`: that would create the very console window
+/// the GUI subsystem attribute exists to remove.
+///
+/// A debug build is a console subsystem executable and already has its own
+/// console, so the attach fails there and this leaves its streams untouched.
+///
+/// Every other platform's process simply keeps the streams it was started with,
+/// so there is nothing to do there.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use std::os::windows::io::IntoRawHandle;
+
+    use windows_sys::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AttachConsole, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+        STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+
+    // SAFETY: a plain FFI call taking one constant. A zero return means there
+    // was no parent console to attach to, which is not an error here.
+    if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } == 0 {
+        return;
+    }
+
+    // Attaching does not by itself repoint the process's standard handles at
+    // the console, so `println!` would still be writing to the invalid handles
+    // the process started with. Open the console's own pseudo-files and install
+    // them; `std::io::stdout` resolves the handle on every write, so this takes
+    // effect immediately.
+    for (name, id) in [
+        ("CONIN$", STD_INPUT_HANDLE),
+        ("CONOUT$", STD_OUTPUT_HANDLE),
+        ("CONOUT$", STD_ERROR_HANDLE),
+    ] {
+        let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(name)
+        else {
+            continue;
+        };
+        // Leaked on purpose: the handle has to stay open for the rest of the
+        // process's life, and the OS reclaims it at exit.
+        let handle = file.into_raw_handle();
+        // SAFETY: `handle` is a live console handle that nothing else owns now.
+        unsafe { SetStdHandle(id, handle.cast()) };
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console() {}
 
 /// The X11 `WM_CLASS` / Wayland `app_id` for every Log Lens window. Desktop
 /// environments key alt-tab grouping, the taskbar label, and the `.desktop`
