@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c2027"/>
+      <stop offset="1" stop-color="#12141a"/>
+    </linearGradient>
+    <clipPath id="lens"><circle cx="118" cy="100" r="39"/></clipPath>
+  </defs>
+  <rect x="1" y="1" width="254" height="254" rx="58" fill="url(#bg)" stroke="#3b414c" stroke-width="2"/>
+
+  <!-- raw log stream: dim, thin, lengths scattered; one warning row, one error row -->
+  <g stroke-width="6" stroke-linecap="round">
+    <line x1="26" y1="40"  x2="150" y2="40"  stroke="#4c545f"/>
+    <line x1="26" y1="56"  x2="224" y2="56"  stroke="#4c545f"/>
+    <line x1="26" y1="72"  x2="196" y2="72"  stroke="#4c545f"/>
+    <line x1="26" y1="88"  x2="182" y2="88"  stroke="#8b6f3b"/>
+    <line x1="26" y1="104" x2="232" y2="104" stroke="#4c545f"/>
+    <line x1="26" y1="120" x2="200" y2="120" stroke="#94484d"/>
+    <line x1="26" y1="136" x2="214" y2="136" stroke="#4c545f"/>
+    <line x1="26" y1="152" x2="156" y2="152" stroke="#4c545f"/>
+    <line x1="26" y1="168" x2="206" y2="168" stroke="#4c545f"/>
+    <line x1="26" y1="184" x2="132" y2="184" stroke="#4c545f"/>
+    <line x1="26" y1="200" x2="180" y2="200" stroke="#4c545f"/>
+  </g>
+
+  <!-- through the lens the same rows come into focus: brighter, bolder, severity clear -->
+  <circle cx="118" cy="100" r="39" fill="#4da6ff" fill-opacity="0.06"/>
+  <g clip-path="url(#lens)">
+    <rect x="54" y="82"  width="150" height="13" rx="6.5" fill="#e0a24a" fill-opacity="0.20"/>
+    <rect x="54" y="114" width="150" height="13" rx="6.5" fill="#e5484d" fill-opacity="0.30"/>
+    <g stroke-width="7" stroke-linecap="round">
+      <line x1="62" y1="72"  x2="200" y2="72"  stroke="#dee3ea"/>
+      <line x1="62" y1="88"  x2="186" y2="88"  stroke="#e6b24e"/>
+      <line x1="62" y1="104" x2="238" y2="104" stroke="#dee3ea"/>
+      <line x1="62" y1="120" x2="206" y2="120" stroke="#f0575c"/>
+      <line x1="62" y1="136" x2="220" y2="136" stroke="#cdd4dc"/>
+    </g>
+  </g>
+
+  <!-- lens frame -->
+  <line x1="145" y1="128" x2="182" y2="169" stroke="#4da6ff" stroke-width="14" stroke-linecap="round"/>
+  <circle cx="118" cy="100" r="39" fill="none" stroke="#4da6ff" stroke-width="9"/>
+  <path d="M85 87 A 37 37 0 0 0 88 119" fill="none" stroke="#cfe6ff" stroke-width="6" stroke-linecap="round" opacity="0.4"/>
+</svg>

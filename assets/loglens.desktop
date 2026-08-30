@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Log Lens
+GenericName=Log Viewer
+Comment=A cross-platform IDE for browsing logs
+Exec=loglens
+Icon=loglens
+Terminal=false
+Categories=Development;Utility;
+StartupWMClass=Log Lens
+Keywords=logs;elasticsearch;search;

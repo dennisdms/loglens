@@ -2034,6 +2034,7 @@ dependencies = [
  "dirs",
  "iced",
  "keyring",
+ "png",
  "reqwest",
  "serde",
  "serde_json",

@@ -52,11 +52,41 @@ pub fn main() -> iced::Result {
         .run()
 }
 
+/// The X11 `WM_CLASS` / Wayland `app_id` for every Log Lens window. Desktop
+/// environments key alt-tab grouping, the taskbar label, and the `.desktop`
+/// match off this, so it stays constant across windows. It doubles as the name
+/// shown in GNOME's app switcher when no installed `.desktop` file is matched,
+/// so it is the human-readable "Log Lens" rather than a bare identifier; a
+/// packaged build would switch to a reverse-DNS id plus an installed
+/// `loglens.desktop` (whose `StartupWMClass` must then match). Only
+/// `PlatformSpecific` on Linux carries the field; macOS and Windows take the
+/// name from the bundle / executable instead.
+#[cfg(target_os = "linux")]
+const APP_ID: &str = "Log Lens";
+
+/// Settings shared by every Log Lens window: the app icon and (on Linux) the
+/// desktop application id. Per-window fields (size, resizability) are set by
+/// the callers.
+fn base_window_settings() -> window::Settings {
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut platform_specific = window::settings::PlatformSpecific::default();
+    #[cfg(target_os = "linux")]
+    {
+        platform_specific.application_id = APP_ID.to_string();
+    }
+
+    window::Settings {
+        icon: icons::app_icon(),
+        platform_specific,
+        ..window::Settings::default()
+    }
+}
+
 /// Window settings for the main Log Lens window, opened once at boot.
 fn main_window_settings() -> window::Settings {
     window::Settings {
         size: Size::new(1180.0, 760.0),
-        ..window::Settings::default()
+        ..base_window_settings()
     }
 }
 
@@ -65,7 +95,7 @@ fn settings_window_settings() -> window::Settings {
     window::Settings {
         size: Size::new(460.0, 340.0),
         resizable: true,
-        ..window::Settings::default()
+        ..base_window_settings()
     }
 }
 
@@ -2171,17 +2201,17 @@ impl LogLens {
     }
 
     fn main_view(&self) -> Element<'_, Message> {
-        // Right column, top to bottom: an optional options strip, then an
-        // optional Search bar, then the tab strip sitting directly above the
-        // main area. The two optional strips only appear while a Result Tab is
+        // Right column, top to bottom: an optional Search bar, then an optional
+        // options strip, then the tab strip sitting directly above the main
+        // area. The two optional strips only appear while a Result Tab is
         // active.
         let mut right: Vec<Element<'_, Message>> = Vec::new();
-        if let Some(options_bar) = self.options_bar() {
-            right.push(options_bar);
-            right.push(rule::horizontal(1.0).into());
-        }
         if let Some(search_bar) = self.search_bar() {
             right.push(search_bar);
+            right.push(rule::horizontal(1.0).into());
+        }
+        if let Some(options_bar) = self.options_bar() {
+            right.push(options_bar);
             right.push(rule::horizontal(1.0).into());
         }
         right.push(self.tab_bar());
@@ -2667,10 +2697,10 @@ impl LogLens {
             .into()
     }
 
-    /// The options strip shown at the top of the right column while a Result
-    /// Tab is active, above the Search bar and tab strip: the live Column +
-    /// sort controls moved out of the Result Tab. Hidden for Search form tabs
-    /// and when no tab is open.
+    /// The options strip shown below the Search bar while a Result Tab is
+    /// active, directly above the tab strip: the live Column + sort controls
+    /// moved out of the Result Tab. Hidden for Search form tabs and when no tab
+    /// is open.
     fn options_bar(&self) -> Option<Element<'_, Message>> {
         let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
             return None;
@@ -2685,11 +2715,11 @@ impl LogLens {
         Some(self.result_sort_bar(tab))
     }
 
-    /// The Search bar shown between the options strip and the tab strip while a
-    /// Result Tab is active: the index/datastream target, query string,
-    /// timeframe and a Refresh control, in that order. The loaded-Hit count
-    /// lives in the bottom info bar. Hidden for
-    /// Search form tabs and when no tab is open.
+    /// The Search bar shown at the top of the right column, above the options
+    /// strip and tab strip, while a Result Tab is active: the index/datastream
+    /// target, query string, timeframe and a Refresh control, in that order.
+    /// The loaded-Hit count lives in the bottom info bar. Hidden for Search
+    /// form tabs and when no tab is open.
     fn search_bar(&self) -> Option<Element<'_, Message>> {
         let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
             return None;
@@ -2760,8 +2790,9 @@ impl LogLens {
 
     /// The floating "Custom\u{2026}" timeframe editor, anchored under the Search
     /// bar's timeframe control as a stack layer so it never reflows the strips
-    /// or main area below it. Mirrors the sidebar right-click menu: a click
-    /// anywhere outside dismisses it.
+    /// or main area below it (the options strip sits below the Search bar now).
+    /// Mirrors the sidebar right-click menu: a click anywhere outside dismisses
+    /// it.
     fn timeframe_popover_overlay(&self) -> Option<Element<'_, Message>> {
         let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
             return None;
@@ -2774,13 +2805,9 @@ impl LogLens {
         const CARD_W: f32 = 480.0;
         // Distance from the top of the window down to just below the Search bar
         // row, matching the right column's layout in `view`: the Menu bar, then
-        // the options strip (only once a run has loaded — see `options_bar`),
-        // then the Search bar row. Each figure includes its trailing 1px rule.
-        let mut top = 25.0;
-        if tab.strips_visible() {
-            top += 29.0;
-        }
-        top += 40.0;
+        // the Search bar row (the options strip sits below it). Each figure
+        // includes its trailing 1px rule.
+        let top = 25.0 + 40.0;
 
         let card = container(self.timeframe_popover(tab)).width(Length::Fixed(CARD_W));
         let anchored = container(column![
@@ -2811,13 +2838,8 @@ impl LogLens {
         let run_id = tab.run_id;
 
         const CARD_W: f32 = 240.0;
-        // Matches `timeframe_popover_overlay`: Menu bar, then the options strip
-        // (only once a run has loaded), then the Search bar row.
-        let mut top = 25.0;
-        if tab.strips_visible() {
-            top += 29.0;
-        }
-        top += 40.0;
+        // Matches `timeframe_popover_overlay`: Menu bar, then the Search bar row.
+        let top = 25.0 + 40.0;
 
         let body: Element<'_, Message> = if tab.targets_loading {
             text("Loading indices\u{2026}")
@@ -3657,8 +3679,9 @@ impl LogLens {
 
         const CARD_W: f32 = 460.0;
         // Just below the options strip: the Menu bar (25) + its rule, then the
-        // options strip row (29) including its trailing 1px rule.
-        let top = 25.0 + 29.0;
+        // Search bar row (40), then the options strip row (29) including its
+        // trailing 1px rule.
+        let top = 25.0 + 40.0 + 29.0;
         // Left edge of the "Sort fields" button: sidebar (240) + its rule (1) +
         // the options strip row's left padding (12).
         let left = 253.0;
