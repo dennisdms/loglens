@@ -70,6 +70,18 @@ A strip across the top of the window holding application-wide actions, grouped a
 menus (File, View). Always present, independent of which Saved Search is open.
 _Avoid_: toolbar, ribbon
 
+**Options strip**:
+The row of display controls directly above an active Result Tab: sort fields, the
+Table/Text mode toggle, the Highlight rules editor, and — in Text mode only — the
+Format modal. Shown once a run has loaded.
+_Avoid_: toolbar
+
+**Format modal**:
+Where a Result Tab's Text-mode template is edited: the `%{field.path}` template
+input, a reference list of the fields available in the current search, and a live
+preview of the first Hits that re-renders as the template is typed. Opened from
+the options strip; only reachable in Text mode.
+
 **Search bar**:
 The controls for the Saved Search whose Result Tab is currently active, shown
 above the tab strip: its Target, query string, timeframe, loaded Hit count, and
@@ -99,7 +111,8 @@ Chosen in the Search bar.
 How a Result Tab draws its Hits: either as Columns (the table) or as a template
 (raw text). Both are kept, so switching modes never discards the other's
 settings. Belongs to a Saved Search; the render-time value is assembled from it
-plus the timestamp field and the UTC preference.
+plus the timestamp field and the UTC preference. The template is edited in the
+Format modal, opened from the options strip in Text mode.
 _Avoid_: format, view mode, display settings
 
 **Line**:
@@ -121,5 +134,6 @@ _Avoid_: span, chunk, token
 A rule that colours a Line. Matches either a field predicate (`level == ERROR`),
 which colours the whole Line, or a text pattern, which colours just the Segments
 it matches. Ordered: the first matching field predicate wins, and text patterns
-layer over it. Global to the application, not per Saved Search.
+layer over it. Global to the application, not per Saved Search. Edited from the
+options strip's "Highlight rules" button (both Table and Text mode).
 _Avoid_: filter, formatter, theme rule

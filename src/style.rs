@@ -109,6 +109,22 @@ pub fn icon_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::S
     }
 }
 
+/// Wrapper for an "options group": a cluster of related option controls tied
+/// together into one visual unit by a recessed surface and hairline border,
+/// setting it apart from the standalone option buttons beside it.
+pub fn options_group() -> container::Style {
+    container::Style {
+        background: Some(BG.into()),
+        text_color: Some(TEXT),
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// A button with no chrome of its own (tab label, close affordance).
 pub fn bare_button() -> impl Fn(&Theme, button::Status) -> button::Style {
     |_theme, _status| button::Style {

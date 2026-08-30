@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 use iced::widget::scrollable::RelativeOffset;
 use iced::widget::svg::Handle;
 use iced::widget::{
-    Id, button, checkbox, column, container, mouse_area, operation, pick_list, radio, row, rule,
-    scrollable, space, stack, svg, text, text_editor, text_input, tooltip,
+    Id, button, checkbox, column, container, mouse_area, opaque, operation, pick_list, radio, row,
+    rule, scrollable, space, stack, svg, text, text_editor, text_input, tooltip,
 };
 use iced::{Border, Color, Element, Fill, Font, Length, Padding, Point, Subscription, Task, Theme};
 
@@ -263,6 +263,12 @@ enum Message {
     ResultTemplateDraft(u64, String),
     /// Commit the raw text template draft (Enter).
     ResultTemplateSubmit(u64),
+    /// Open the raw-text "Format" modal for a Result Tab.
+    OpenFormat(u64),
+    /// Commit the template draft and close the "Format" modal.
+    CloseFormat(u64),
+    /// Discard the template draft and close the "Format" modal.
+    FormatCancel(u64),
     // Highlight rules modal
     OpenRulesForm,
     RulesFormCancel,
@@ -334,6 +340,9 @@ enum Message {
     DismissStatus,
     /// Clear the active Result Tab's failed-Target-switch notice.
     DismissTargetError(u64),
+    /// Deliberately does nothing — used to let a modal backdrop swallow scroll
+    /// events so they never reach the widgets behind it.
+    Ignore,
 }
 
 impl LogLens {
@@ -915,6 +924,26 @@ impl LogLens {
                 }
                 self.sync_saved_from_result(run_id);
             }
+            Message::OpenFormat(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.format_open = true;
+                }
+            }
+            Message::CloseFormat(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.template = rt.template_draft.trim().to_string();
+                    rt.resolve_template();
+                    rt.template_draft = rt.template.clone();
+                    rt.format_open = false;
+                }
+                self.sync_saved_from_result(run_id);
+            }
+            Message::FormatCancel(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.template_draft = rt.template.clone();
+                    rt.format_open = false;
+                }
+            }
 
             Message::OpenRulesForm => {
                 self.rules_form = Some(RulesForm::new(self.config.rules.clone()));
@@ -1068,6 +1097,7 @@ impl LogLens {
                     rt.selected_hit = None;
                     rt.header_menu = None;
                     rt.sort_panel_open = false;
+                    rt.format_open = false;
                     rt.tf.open = false;
                     if rt.target_panel_open {
                         rt.target_panel_open = false;
@@ -1176,6 +1206,10 @@ impl LogLens {
                     rt.target_error = None;
                 }
             }
+            // A scroll (or stray press) on a modal backdrop routes here so the
+            // `mouse_area` in `modal_card_sized` can capture the event and keep
+            // it from reaching the Result Tab behind the modal.
+            Message::Ignore => {}
         }
 
         Task::none()
@@ -1771,6 +1805,7 @@ impl LogLens {
             mode: saved.mode,
             template: saved.template.clone(),
             template_draft: saved.template.clone(),
+            format_open: false,
         };
         // Resolve the raw text template up front if the field list is already
         // known; otherwise it is resolved lazily when `ResultFieldsLoaded`
@@ -2005,6 +2040,12 @@ impl LogLens {
         }
         if let Some(form) = &self.rules_form {
             layers.push(self.rules_form_modal(form));
+        }
+        if let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t))
+            && tab.format_open
+            && tab.mode == line::LayoutMode::RawText
+        {
+            layers.push(self.format_modal(tab));
         }
         if let Some(prompt) = &self.secret_prompt {
             layers.push(self.secret_prompt_modal(prompt));
@@ -2320,10 +2361,6 @@ impl LogLens {
             row![
                 text("File").size(13.0).color(TEXT_DIM),
                 text("View").size(13.0).color(TEXT_DIM),
-                button(text("Highlight rules\u{2026}").size(13.0).color(TEXT_DIM))
-                    .on_press(Message::OpenRulesForm)
-                    .padding(0.0)
-                    .style(style::bare_button()),
             ]
             .spacing(18.0)
             .align_y(iced::Alignment::Center),
@@ -2420,47 +2457,9 @@ impl LogLens {
         .width(Fill)
         .padding(Padding::new(6.0).left(12.0).right(12.0));
 
-        // In raw text mode a second row carries the template input and its
-        // live "unknown field" warning, right below the query string.
-        if tab.mode == line::LayoutMode::RawText {
-            return Some(column![row1, self.template_bar(tab)].width(Fill).into());
-        }
+        // The raw-text template is edited in the "Format" modal (opened from the
+        // options strip), not here — the Search bar stays a single row.
         Some(row1.into())
-    }
-
-    /// The raw text template input plus its non-blocking validation warning,
-    /// shown below the Search bar's first row while a Result Tab is in raw
-    /// text mode.
-    fn template_bar<'a>(&self, tab: &'a ResultTab) -> Element<'a, Message> {
-        let run_id = tab.run_id;
-        let input = text_input("%{field.path} template", &tab.template_draft)
-            .on_input(move |v| Message::ResultTemplateDraft(run_id, v))
-            .on_submit(Message::ResultTemplateSubmit(run_id))
-            .size(12.0)
-            .padding(4.0)
-            .font(Font::MONOSPACE)
-            .width(Fill);
-
-        let mut strip = row![input].spacing(12.0).align_y(iced::Alignment::Center);
-        let unknown = line::unknown_template_fields(&tab.template_draft, &tab.all_fields);
-        if !unknown.is_empty() {
-            let list = unknown
-                .iter()
-                .map(|f| format!("\u{201c}{f}\u{201d}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            strip = strip.push(
-                text(format!("Unknown field: {list}"))
-                    .size(11.0)
-                    .color(WARN_AMBER),
-            );
-        }
-
-        container(strip)
-            .style(|_| style::panel(PANEL))
-            .width(Fill)
-            .padding(Padding::new(6.0).left(12.0).right(12.0))
-            .into()
     }
 
     /// The floating "Custom\u{2026}" timeframe editor, anchored under the Search
@@ -3020,6 +3019,152 @@ impl LogLens {
         modal_card(card.into())
     }
 
+    /// The raw-text "Format" modal. Three sections, top to bottom: the fields
+    /// available in the current search (reference only), the `%{...}` template
+    /// itself, and a live preview of the first Hits that re-renders as the
+    /// template is edited. Reached from the options strip's "Format" button
+    /// while a Result Tab is in Text mode.
+    fn format_modal<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
+        let run_id = tab.run_id;
+
+        let mut card = column![
+            text("Format").size(16.0).color(TEXT),
+            text(
+                "Template for Text mode. \u{201c}%{field.path}\u{201d} inserts a \
+                 field; \u{201c}%{_source}\u{201d} inserts the whole document as \
+                 JSON."
+            )
+            .size(11.0)
+            .color(TEXT_DIM),
+        ]
+        .spacing(8.0)
+        .width(Fill);
+
+        // 1. Fields available in this search — reference only, no click behaviour.
+        card = card.push(rule::horizontal(1.0));
+        card = card.push(text("Fields").size(12.0).color(TEXT_DIM));
+        let fields: Element<'_, Message> = if tab.all_fields.is_empty() {
+            text("Field list not loaded yet.")
+                .size(11.0)
+                .color(TEXT_DIM)
+                .into()
+        } else {
+            let mut list = column![].spacing(1.0);
+            for f in &tab.all_fields {
+                list = list.push(
+                    text(f.clone())
+                        .size(11.0)
+                        .font(Font::MONOSPACE)
+                        .color(TEXT_DIM),
+                );
+            }
+            list = list.push(
+                text("_source \u{2014} the whole document as JSON")
+                    .size(11.0)
+                    .color(TEXT_DIM),
+            );
+            scrollable(list)
+                .height(Length::Fixed(140.0))
+                .width(Fill)
+                .into()
+        };
+        card = card.push(fields);
+
+        // 2. Format — the template string, plus a non-blocking unknown-field warning.
+        card = card.push(rule::horizontal(1.0));
+        card = card.push(text("Format").size(12.0).color(TEXT_DIM));
+        card = card.push(
+            text_input("%{field.path} template", &tab.template_draft)
+                .on_input(move |v| Message::ResultTemplateDraft(run_id, v))
+                .on_submit(Message::ResultTemplateSubmit(run_id))
+                .size(12.0)
+                .padding(4.0)
+                .font(Font::MONOSPACE)
+                .width(Fill),
+        );
+        let unknown = line::unknown_template_fields(&tab.template_draft, &tab.all_fields);
+        if !unknown.is_empty() {
+            let list = unknown
+                .iter()
+                .map(|f| format!("\u{201c}{f}\u{201d}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            card = card.push(
+                text(format!("Unknown field: {list}"))
+                    .size(11.0)
+                    .color(WARN_AMBER),
+            );
+        }
+
+        // 3. Display — a live preview of the first Hits under the current draft.
+        card = card.push(rule::horizontal(1.0));
+        card = card.push(text("Display").size(12.0).color(TEXT_DIM));
+        let template = {
+            let draft = tab.template_draft.trim();
+            if draft.is_empty() {
+                tab.template.clone()
+            } else {
+                draft.to_string()
+            }
+        };
+        let preview_layout = line::Layout {
+            mode: line::LayoutMode::RawText,
+            columns: Vec::new(),
+            template,
+            timestamp_field: tab.timestamp_field.clone(),
+            utc: tab.utc,
+        };
+        let prepared = line::Prepared::from_rules(&self.config.rules);
+        let preview: Element<'_, Message> = if tab.hits.is_empty() {
+            text("Run a search to preview.")
+                .size(11.0)
+                .color(TEXT_DIM)
+                .into()
+        } else {
+            let mut lines = column![];
+            for hit in tab.hits.iter().take(10) {
+                let rendered = line::render(hit, &preview_layout, &prepared);
+                let content: Element<'_, Message> = match rendered.parts.first() {
+                    Some(part) => part_widget(part),
+                    None => text("").size(12.0).font(Font::MONOSPACE).into(),
+                };
+                lines = lines.push(container(content).height(Length::Fixed(results::ROW_H)));
+            }
+            scrollable(lines)
+                .width(Fill)
+                .height(Length::Fixed(results::ROW_H * 10.0 + 6.0))
+                .direction(scrollable::Direction::Both {
+                    vertical: scrollable::Scrollbar::default(),
+                    horizontal: scrollable::Scrollbar::default(),
+                })
+                .into()
+        };
+        card = card.push(
+            container(preview)
+                .width(Fill)
+                .padding(6.0)
+                .style(|_| style::panel(BG)),
+        );
+
+        card = card.push(space().height(4.0));
+        card = card.push(
+            row![
+                space().width(Fill),
+                button(text("Cancel").size(13.0).color(TEXT_DIM))
+                    .on_press(Message::FormatCancel(run_id))
+                    .padding(Padding::new(6.0).left(14.0).right(14.0))
+                    .style(style::bare_button()),
+                button(text("Done").size(13.0).color(TEXT))
+                    .on_press(Message::CloseFormat(run_id))
+                    .padding(Padding::new(6.0).left(14.0).right(14.0))
+                    .style(style::picker_row(true)),
+            ]
+            .spacing(8.0),
+        );
+
+        modal_card_sized(card.into(), 640.0)
+    }
+
     // --- Result tab view ---------------------------------------------
 
     fn result_view<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
@@ -3107,27 +3252,36 @@ impl LogLens {
         .into()
     }
 
-    /// The live controls above a Result Tab's table: a "Sort fields" button
-    /// that opens the multi-field sort popover. (Column add / remove / reorder
-    /// live in each header's "\u{22ee}" menu.)
+    /// The live options strip above a Result Tab's table, left-aligned:
+    /// "Sort fields", "Highlight rules", then the Layout options group — the
+    /// Table/Text mode toggle, joined by "Format" while in Text mode, wrapped
+    /// in one bordered surface so they read as a unit. (Column add / remove /
+    /// reorder live in each header's "\u{22ee}" menu.)
     fn result_sort_bar<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
         let run_id = tab.run_id;
 
         // The icon sits in a box as tall as the sort button's size-14 digit, so
-        // the two buttons in this bar come out the same height.
-        let icon_box = |handle: &Handle| {
+        // every button in this strip comes out the same height.
+        let icon_box = |handle: &Handle, color: Color| {
             container(
                 svg(Handle::clone(handle))
                     .width(Length::Fixed(16.0))
                     .height(Length::Fixed(16.0))
-                    .style(|_theme, _status| svg::Style { color: Some(TEXT) }),
+                    .style(move |_theme, _status| svg::Style { color: Some(color) }),
             )
             .center_y(Length::Fixed(18.0))
         };
 
+        // A dropdown-style tooltip bubble shared by every button in the strip.
+        let tip = |label: &'a str| {
+            container(text(label).size(11.0).color(TEXT))
+                .padding(Padding::new(4.0).left(6.0).right(6.0))
+                .style(|_| style::menu_popup())
+        };
+
         let sort_btn = button(
             row![
-                icon_box(&icons::SORT_FIELDS),
+                icon_box(&icons::SORT_FIELDS, TEXT),
                 text(format!("{}", tab.sort.len())).size(14.0).color(TEXT),
             ]
             .spacing(5.0)
@@ -3136,44 +3290,58 @@ impl LogLens {
         .on_press(Message::ResultSortPanel(run_id))
         .padding(Padding::new(5.0).left(9.0).right(9.0))
         .style(style::icon_button(tab.sort_panel_open));
+        let sort_ctl = tooltip(sort_btn, tip("Sort fields"), tooltip::Position::Bottom).gap(4.0);
 
-        let sort_ctl = tooltip(
-            sort_btn,
-            container(text("Sort fields").size(11.0).color(TEXT))
-                .padding(Padding::new(4.0).left(6.0).right(6.0))
-                .style(|_| style::menu_popup()),
-            tooltip::Position::Bottom,
-        )
-        .gap(4.0);
+        // Highlight rules apply in both modes, so this button is always shown;
+        // it opens the global rules modal (formerly reached from the Menu bar).
+        let rules_btn = button(icon_box(&icons::HIGHLIGHT_RULES, TEXT))
+            .on_press(Message::OpenRulesForm)
+            .padding(Padding::new(5.0).left(9.0).right(9.0))
+            .style(style::icon_button(self.rules_form.is_some()));
+        let rules_ctl =
+            tooltip(rules_btn, tip("Highlight rules"), tooltip::Position::Bottom).gap(4.0);
 
+        // Layout options group: the Table/Text mode toggle, joined by the
+        // "Format" button while in Text mode — Format edits the raw-text
+        // template, so it is meaningless (and hidden) in Table mode. The shared
+        // bordered surface ties the two together as one control.
         let is_raw = tab.mode == line::LayoutMode::RawText;
         let (mode_icon, mode_label, next_mode) = if is_raw {
             (&icons::RAW_TEXT, "Text", line::LayoutMode::Table)
         } else {
             (&icons::TABLE, "Table", line::LayoutMode::RawText)
         };
-        let mode_btn = button(icon_box(mode_icon))
+        let mode_btn = button(icon_box(mode_icon, TEXT))
             .on_press(Message::ResultLayoutMode(run_id, next_mode))
             .padding(Padding::new(5.0).left(9.0).right(9.0))
             .style(style::icon_button(false));
-        let mode_ctl = tooltip(
-            mode_btn,
-            container(text(mode_label).size(11.0).color(TEXT))
-                .padding(Padding::new(4.0).left(6.0).right(6.0))
-                .style(|_| style::menu_popup()),
-            tooltip::Position::Bottom,
-        )
-        .gap(4.0);
+        let mut group =
+            row![tooltip(mode_btn, tip(mode_label), tooltip::Position::Bottom).gap(4.0)]
+                .spacing(6.0)
+                .align_y(iced::Alignment::Center);
 
-        container(
-            row![sort_ctl, mode_ctl, space().width(Fill)]
-                .spacing(8.0)
-                .align_y(iced::Alignment::Center),
-        )
-        .style(|_| style::panel(PANEL))
-        .width(Fill)
-        .padding(Padding::new(4.0).left(12.0).right(12.0))
-        .into()
+        if is_raw {
+            let format_btn = button(icon_box(&icons::FORMAT, TEXT))
+                .on_press(Message::OpenFormat(run_id))
+                .padding(Padding::new(5.0).left(9.0).right(9.0))
+                .style(style::icon_button(tab.format_open));
+            group =
+                group.push(tooltip(format_btn, tip("Format"), tooltip::Position::Bottom).gap(4.0));
+        }
+
+        let layout_group = container(group)
+            .padding(3.0)
+            .style(|_| style::options_group());
+
+        let controls = row![sort_ctl, rules_ctl, layout_group, space().width(Fill)]
+            .spacing(8.0)
+            .align_y(iced::Alignment::Center);
+
+        container(controls)
+            .style(|_| style::panel(PANEL))
+            .width(Fill)
+            .padding(Padding::new(4.0).left(12.0).right(12.0))
+            .into()
     }
 
     /// The floating "Sort fields" editor, anchored under the options strip's
@@ -4071,7 +4239,13 @@ fn swatch<'a>(color: Option<Color>) -> Element<'a, Message> {
 
 /// Centres `content` in a panel card over a dimmed backdrop.
 fn modal_card<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
-    let card = container(content).width(460.0).padding(20.0).style(|_| {
+    modal_card_sized(content, 460.0)
+}
+
+/// [`modal_card`] with an explicit card width — for modals that need more room
+/// than the default (e.g. the Format modal's log-line preview).
+fn modal_card_sized<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> {
+    let card = container(content).width(width).padding(20.0).style(|_| {
         let mut s = style::panel(PANEL);
         s.border = Border {
             color: BORDER,
@@ -4081,7 +4255,7 @@ fn modal_card<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
         s
     });
 
-    container(card)
+    let backdrop = container(card)
         .width(Fill)
         .height(Fill)
         .center_x(Fill)
@@ -4095,8 +4269,13 @@ fn modal_card<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
                 .into(),
             ),
             ..container::Style::default()
-        })
-        .into()
+        });
+
+    // `opaque` swallows clicks on the backdrop; the `mouse_area` swallows scroll
+    // wheel events. Without this a scroll while a modal is open reaches — and
+    // moves — the Result Tab behind it. Inner scrollables still scroll: they
+    // capture the event first, before it ever reaches this `mouse_area`.
+    opaque(mouse_area(backdrop).on_scroll(|_| Message::Ignore))
 }
 
 /// Folds a fetched Page into a Result Tab: replacing Hits on a first run,

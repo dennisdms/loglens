@@ -224,6 +224,9 @@ pub struct ResultTab {
     /// Draft text for the Search bar's template input, committed to
     /// `template` on Enter (mirrors `query_draft`).
     pub template_draft: String,
+    /// Whether the raw-text "Format" modal (template + field list + preview) is
+    /// open for this tab.
+    pub format_open: bool,
 }
 
 impl ResultTab {
