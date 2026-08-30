@@ -15,6 +15,9 @@ pub struct Config {
     /// Render Hit timestamps in UTC rather than local time.
     #[serde(default)]
     pub utc_timestamps: bool,
+    /// Highlight rules, applied globally across every Result Tab.
+    #[serde(default)]
+    pub rules: Vec<crate::line::Rule>,
 }
 
 /// A named Elasticsearch endpoint plus how to reach it. Secretless.
@@ -53,6 +56,15 @@ pub struct SavedSearch {
     /// `sort_field` / `sort_desc` keys are migrated in on load (see [`load`]).
     #[serde(default)]
     pub sort: Vec<SortKey>,
+    /// Table or raw text. Defaults to Table so every existing config loads
+    /// unchanged.
+    #[serde(default)]
+    pub mode: crate::line::LayoutMode,
+    /// Raw text mode's template. Empty means "not yet set" — the app computes
+    /// a default from field caps the first time raw text mode is entered; see
+    /// `Layout::default_template`. An empty string is never rendered directly.
+    #[serde(default)]
+    pub template: String,
 }
 
 /// One field in a Saved Search's sort order.

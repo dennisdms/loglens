@@ -2,12 +2,11 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Local, TimeZone, Utc};
 use iced::widget::{Id, text_editor};
-use serde_json::Value;
 
 use crate::config::{SortKey, TimeUnit, Timeframe, TimeframeMode};
 use crate::es::Hit;
+use crate::line::{Layout, LayoutMode};
 
 /// Draft state for the Search bar's "Custom\u{2026}" timeframe popover: an
 /// editable relative (amount + unit) or absolute (from / to) window, applied
@@ -217,6 +216,14 @@ pub struct ResultTab {
     pub detail_height: f32,
     /// Render `@timestamp`-typed cells in UTC rather than local time.
     pub utc: bool,
+    /// Table or raw text — the Layout mode, carried from the Saved Search.
+    pub mode: LayoutMode,
+    /// Raw text mode's template. Empty until resolved from field caps the
+    /// first time raw text mode renders (see [`Layout::default_template`]).
+    pub template: String,
+    /// Draft text for the Search bar's template input, committed to
+    /// `template` on Enter (mirrors `query_draft`).
+    pub template_draft: String,
 }
 
 impl ResultTab {
@@ -403,76 +410,30 @@ impl ResultTab {
         self.detail_content = text_editor::Content::with_text(&json);
         self.selected_hit = Some(index);
     }
-}
 
-/// The display string for one Hit / Column pair.
-///
-/// Dotted paths resolve through nested objects (falling back to a literal
-/// dotted key); arrays join with `, `; objects render as compact JSON; missing
-/// or null fields are blank. The Timeframe's timestamp field is formatted as a
-/// local (or UTC) datetime.
-pub fn cell(source: &Value, path: &str, timestamp_field: &str, utc: bool) -> String {
-    let Some(value) = resolve(source, path) else {
-        return String::new();
-    };
-    if path == timestamp_field {
-        if let Some(text) = value.as_str() {
-            return format_timestamp_str(text, utc);
-        }
-        if let Some(millis) = value.as_i64() {
-            return format_timestamp_millis(millis, utc);
+    /// The render-time [`Layout`] for this tab: its persisted `mode`,
+    /// `columns` and `template`, plus the two runtime values (`timestamp_field`
+    /// and the UTC preference) assembled on every render.
+    /// Fills in `template` from the field list the first time it is needed, if
+    /// it has not been set yet. Returns whether it changed (so the caller can
+    /// persist the Saved Search).
+    pub fn resolve_template(&mut self) -> bool {
+        if self.template.is_empty() && !self.all_fields.is_empty() {
+            self.template = Layout::default_template(&self.all_fields);
+            self.template_draft = self.template.clone();
+            true
+        } else {
+            false
         }
     }
-    render_value(value)
-}
 
-fn resolve<'a>(source: &'a Value, path: &str) -> Option<&'a Value> {
-    if let Some(value) = source.get(path)
-        && !value.is_null()
-    {
-        return Some(value);
-    }
-    let mut current = source;
-    for segment in path.split('.') {
-        current = current.get(segment)?;
-    }
-    (!current.is_null()).then_some(current)
-}
-
-fn render_value(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        Value::String(s) => s.clone(),
-        Value::Array(items) => items
-            .iter()
-            .map(render_value)
-            .collect::<Vec<_>>()
-            .join(", "),
-        Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
-    }
-}
-
-fn format_timestamp_str(raw: &str, utc: bool) -> String {
-    match DateTime::parse_from_rfc3339(raw) {
-        Ok(dt) => format_dt(dt.with_timezone(&Utc), utc),
-        Err(_) => raw.to_string(),
-    }
-}
-
-fn format_timestamp_millis(millis: i64, utc: bool) -> String {
-    match Utc.timestamp_millis_opt(millis).single() {
-        Some(dt) => format_dt(dt, utc),
-        None => millis.to_string(),
-    }
-}
-
-fn format_dt(dt: DateTime<Utc>, utc: bool) -> String {
-    const FMT: &str = "%Y-%m-%d %H:%M:%S%.3f";
-    if utc {
-        format!("{} UTC", dt.format(FMT))
-    } else {
-        dt.with_timezone(&Local).format(FMT).to_string()
+    pub fn layout(&self) -> Layout {
+        Layout {
+            mode: self.mode,
+            columns: self.columns.clone(),
+            template: self.template.clone(),
+            timestamp_field: self.timestamp_field.clone(),
+            utc: self.utc,
+        }
     }
 }

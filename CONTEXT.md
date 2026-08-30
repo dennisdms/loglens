@@ -94,3 +94,32 @@ _Avoid_: properties, config, options
 **Column**:
 A field projected out of each Hit into its own table column in a Result Tab.
 Chosen in the Search bar.
+
+**Layout**:
+How a Result Tab draws its Hits: either as Columns (the table) or as a template
+(raw text). Both are kept, so switching modes never discards the other's
+settings. Belongs to a Saved Search; the render-time value is assembled from it
+plus the timestamp field and the UTC preference.
+_Avoid_: format, view mode, display settings
+
+**Line**:
+One Hit rendered for display: an ordered list of Parts. A Columns Layout gives
+one Part per Column; a template Layout gives one. The table draws Part _i_ into
+column _i_; raw text mode concatenates them; GREP matches against their text.
+_Avoid_: row, formatted hit, output
+
+**Part**:
+One addressable piece of a Line — a Column's worth of text under a Columns
+Layout, or the whole rendered line under a template. Holds one or more Segments.
+
+**Segment**:
+A run of text within a Part carrying one style. A Part is a single Segment until
+a Highlight rule splits it. Named to stay out of the way of iced's own `Span`.
+_Avoid_: span, chunk, token
+
+**Highlight rule**:
+A rule that colours a Line. Matches either a field predicate (`level == ERROR`),
+which colours the whole Line, or a text pattern, which colours just the Segments
+it matches. Ordered: the first matching field predicate wins, and text patterns
+layer over it. Global to the application, not per Saved Search.
+_Avoid_: filter, formatter, theme rule

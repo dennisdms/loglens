@@ -122,6 +122,8 @@ impl SearchForm {
             sort: vec![SortKey::new(timestamp_field.clone(), true)],
             timestamp_field,
             columns: config::default_columns(),
+            mode: crate::line::LayoutMode::default(),
+            template: String::new(),
         })
     }
 }

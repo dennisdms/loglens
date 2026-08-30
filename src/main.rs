@@ -2,7 +2,9 @@ mod config;
 mod connection;
 mod es;
 mod icons;
+mod line;
 mod results;
+mod rules;
 mod search;
 mod secrets;
 mod style;
@@ -22,6 +24,7 @@ use config::{Auth, Config, Connection};
 use config::{TimeUnit, TimeframeChoice, TimeframeMode};
 use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
 use results::{Paging, RETENTION_CAP, ROW_H, ResultTab, RunState, TimeframeDraft, TotalHits};
+use rules::{MatcherKind, RulesForm};
 use search::{Fields, SearchForm};
 use style::{ACCENT, BG, BORDER, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
 use tab::Tab;
@@ -33,6 +36,7 @@ const ES_ROOT: &str = "\u{1}Elasticsearch";
 
 const OK_GREEN: Color = Color::from_rgb8(0x6c, 0xc0, 0x7a);
 const ERR_RED: Color = Color::from_rgb8(0xe0, 0x6c, 0x6c);
+const WARN_AMBER: Color = Color::from_rgb8(0xd6, 0xa5, 0x4c);
 
 pub fn main() -> iced::Result {
     iced::application(LogLens::new, LogLens::update, LogLens::view)
@@ -57,6 +61,8 @@ struct LogLens {
     /// The Search settings modal, when editing an existing Saved Search's
     /// name / Target / timestamp field.
     search_settings: Option<SearchForm>,
+    /// The Highlight rules modal, when open.
+    rules_form: Option<RulesForm>,
     /// A prompt for a secret the keyring can't give us this session.
     secret_prompt: Option<SecretPrompt>,
     /// Transient status line (config save failures, keyring notices).
@@ -250,6 +256,31 @@ enum Message {
     ResultSortMove(u64, usize, isize),
     /// Clear the whole sort order.
     ResultSortClear(u64),
+    // Result tab: Layout mode + raw text template
+    /// Switch a Result Tab between Table and raw text mode.
+    ResultLayoutMode(u64, line::LayoutMode),
+    /// A keystroke in the raw text template input.
+    ResultTemplateDraft(u64, String),
+    /// Commit the raw text template draft (Enter).
+    ResultTemplateSubmit(u64),
+    // Highlight rules modal
+    OpenRulesForm,
+    RulesFormCancel,
+    RulesFormSave,
+    RulesEditRule(usize),
+    RulesDeleteRule(usize),
+    RulesToggleRule(usize),
+    RulesMoveRule(usize, isize),
+    RulesDraftName(String),
+    RulesDraftKind(MatcherKind),
+    RulesDraftPath(String),
+    RulesDraftOp(line::Op),
+    RulesDraftValue(String),
+    RulesDraftPattern(String),
+    RulesDraftFg(String),
+    RulesDraftBg(String),
+    RulesDraftCommit,
+    RulesDraftReset,
     // Hit detail panel
     HitClicked(u64, usize),
     CloseHitDetail,
@@ -317,6 +348,7 @@ impl LogLens {
             expanded,
             connection_form: None,
             search_settings: None,
+            rules_form: None,
             secret_prompt: None,
             status: None,
             id_seq: 0,
@@ -738,11 +770,15 @@ impl LogLens {
                 }
             }
             Message::ResultFieldsLoaded { run_id, result } => {
-                if let Ok(caps) = result
-                    && let Some(rt) = self.result_mut(run_id)
-                {
-                    rt.all_fields = caps.all;
-                    rt.sortable_fields = caps.sortable;
+                if let Ok(caps) = result {
+                    let resolved = self.result_mut(run_id).map(|rt| {
+                        rt.all_fields = caps.all;
+                        rt.sortable_fields = caps.sortable;
+                        rt.resolve_template()
+                    });
+                    if resolved == Some(true) {
+                        self.sync_saved_from_result(run_id);
+                    }
                 }
             }
             Message::ResultColumnDraft(run_id, v) => {
@@ -845,6 +881,121 @@ impl LogLens {
                 if changed {
                     self.sync_saved_from_result(run_id);
                     return self.start_run(run_id);
+                }
+            }
+
+            Message::ResultLayoutMode(run_id, mode) => {
+                let changed = self
+                    .result_mut(run_id)
+                    .map(|rt| {
+                        let changed = rt.mode != mode;
+                        rt.mode = mode;
+                        rt.resolve_template();
+                        changed
+                    })
+                    .unwrap_or(false);
+                // Switching display mode never needs a new Elasticsearch query —
+                // only a re-render, which happens automatically. Persist so the
+                // choice survives a restart.
+                if changed {
+                    self.sync_saved_from_result(run_id);
+                }
+            }
+            Message::ResultTemplateDraft(run_id, v) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.template_draft = v;
+                }
+            }
+            Message::ResultTemplateSubmit(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.template = rt.template_draft.trim().to_string();
+                    // An emptied template falls back to the computed default.
+                    rt.resolve_template();
+                    rt.template_draft = rt.template.clone();
+                }
+                self.sync_saved_from_result(run_id);
+            }
+
+            Message::OpenRulesForm => {
+                self.rules_form = Some(RulesForm::new(self.config.rules.clone()));
+            }
+            Message::RulesFormCancel => self.rules_form = None,
+            Message::RulesFormSave => {
+                if let Some(form) = self.rules_form.take() {
+                    self.config.rules = form.rules;
+                    if let Err(err) = config::save(&self.config) {
+                        self.status = Some(format!("Could not save config: {err}"));
+                    }
+                }
+            }
+            Message::RulesEditRule(i) => {
+                if let Some(form) = &mut self.rules_form {
+                    form.load(i);
+                }
+            }
+            Message::RulesDeleteRule(i) => {
+                if let Some(form) = &mut self.rules_form {
+                    form.delete(i);
+                }
+            }
+            Message::RulesToggleRule(i) => {
+                if let Some(form) = &mut self.rules_form {
+                    form.toggle(i);
+                }
+            }
+            Message::RulesMoveRule(i, delta) => {
+                if let Some(form) = &mut self.rules_form {
+                    form.move_rule(i, delta);
+                }
+            }
+            Message::RulesDraftName(v) => {
+                if let Some(form) = &mut self.rules_form {
+                    form.draft_name = v;
+                }
+            }
+            Message::RulesDraftKind(kind) => {
+                if let Some(form) = &mut self.rules_form {
+                    form.draft_kind = kind;
+                }
+            }
+            Message::RulesDraftPath(v) => {
+                if let Some(form) = &mut self.rules_form {
+                    form.draft_path = v;
+                }
+            }
+            Message::RulesDraftOp(op) => {
+                if let Some(form) = &mut self.rules_form {
+                    form.draft_op = op;
+                }
+            }
+            Message::RulesDraftValue(v) => {
+                if let Some(form) = &mut self.rules_form {
+                    form.draft_value = v;
+                }
+            }
+            Message::RulesDraftPattern(v) => {
+                if let Some(form) = &mut self.rules_form {
+                    form.draft_pattern = v;
+                }
+            }
+            Message::RulesDraftFg(v) => {
+                if let Some(form) = &mut self.rules_form {
+                    form.draft_fg = v;
+                }
+            }
+            Message::RulesDraftBg(v) => {
+                if let Some(form) = &mut self.rules_form {
+                    form.draft_bg = v;
+                }
+            }
+            Message::RulesDraftCommit => {
+                if let Some(form) = &mut self.rules_form {
+                    form.commit_draft();
+                }
+            }
+            Message::RulesDraftReset => {
+                if let Some(form) = &mut self.rules_form {
+                    form.reset_draft();
                 }
             }
 
@@ -1260,18 +1411,29 @@ impl LogLens {
     /// Writes a Result Tab's live Target / query string / timeframe / Column /
     /// sort choices back onto its Saved Search and persists the config.
     fn sync_saved_from_result(&mut self, run_id: u64) {
-        let Some((conn_id, saved_id, target, query_string, timeframe, columns, sort)) =
-            self.result_mut(run_id).map(|rt| {
-                (
-                    rt.connection_id.clone(),
-                    rt.saved_id.clone(),
-                    rt.target.clone(),
-                    rt.query_string.clone(),
-                    rt.timeframe.clone(),
-                    rt.columns.clone(),
-                    rt.sort.clone(),
-                )
-            })
+        let Some((
+            conn_id,
+            saved_id,
+            target,
+            query_string,
+            timeframe,
+            columns,
+            sort,
+            mode,
+            template,
+        )) = self.result_mut(run_id).map(|rt| {
+            (
+                rt.connection_id.clone(),
+                rt.saved_id.clone(),
+                rt.target.clone(),
+                rt.query_string.clone(),
+                rt.timeframe.clone(),
+                rt.columns.clone(),
+                rt.sort.clone(),
+                rt.mode,
+                rt.template.clone(),
+            )
+        })
         else {
             return;
         };
@@ -1283,6 +1445,8 @@ impl LogLens {
             saved.timeframe = timeframe;
             saved.columns = columns;
             saved.sort = sort;
+            saved.mode = mode;
+            saved.template = template;
         }
         if let Err(err) = config::save(&self.config) {
             self.status = Some(format!("Could not save config: {err}"));
@@ -1366,6 +1530,7 @@ impl LogLens {
         rt.target_error = None;
         rt.all_fields = caps.all;
         rt.sortable_fields = caps.sortable;
+        rt.resolve_template();
         self.sync_saved_from_result(run_id);
         self.start_run(run_id)
     }
@@ -1510,6 +1675,9 @@ impl LogLens {
                         rt.timestamp_field = saved.timestamp_field.clone();
                         rt.columns = saved.columns.clone();
                         rt.sort = saved.sort.clone();
+                        rt.mode = saved.mode;
+                        rt.template = saved.template.clone();
+                        rt.template_draft = saved.template.clone();
                         rt.timeframe = saved.timeframe.clone();
                         rt.tf = TimeframeDraft::from_timeframe(&saved.timeframe);
                         rt.gte = gte;
@@ -1560,7 +1728,7 @@ impl LogLens {
         let run_id = self.next_id();
         let (gte, lte) = saved.timeframe.bounds();
         let (all_fields, sortable_fields) = caps.map(|c| (c.all, c.sortable)).unwrap_or_default();
-        let tab = ResultTab {
+        let mut tab = ResultTab {
             run_id,
             connection_id: conn_id.clone(),
             saved_id,
@@ -1600,7 +1768,14 @@ impl LogLens {
             detail_content: text_editor::Content::new(),
             detail_height: results::DETAIL_DEFAULT_H,
             utc: self.config.utc_timestamps,
+            mode: saved.mode,
+            template: saved.template.clone(),
+            template_draft: saved.template.clone(),
         };
+        // Resolve the raw text template up front if the field list is already
+        // known; otherwise it is resolved lazily when `ResultFieldsLoaded`
+        // lands (see that handler).
+        tab.resolve_template();
         let need_fields = tab.all_fields.is_empty();
         let target = tab.target.clone();
 
@@ -1827,6 +2002,9 @@ impl LogLens {
         }
         if let Some(form) = &self.search_settings {
             layers.push(self.search_settings_modal(form));
+        }
+        if let Some(form) = &self.rules_form {
+            layers.push(self.rules_form_modal(form));
         }
         if let Some(prompt) = &self.secret_prompt {
             layers.push(self.secret_prompt_modal(prompt));
@@ -2142,6 +2320,10 @@ impl LogLens {
             row![
                 text("File").size(13.0).color(TEXT_DIM),
                 text("View").size(13.0).color(TEXT_DIM),
+                button(text("Highlight rules\u{2026}").size(13.0).color(TEXT_DIM))
+                    .on_press(Message::OpenRulesForm)
+                    .padding(0.0)
+                    .style(style::bare_button()),
             ]
             .spacing(18.0)
             .align_y(iced::Alignment::Center),
@@ -2238,7 +2420,47 @@ impl LogLens {
         .width(Fill)
         .padding(Padding::new(6.0).left(12.0).right(12.0));
 
+        // In raw text mode a second row carries the template input and its
+        // live "unknown field" warning, right below the query string.
+        if tab.mode == line::LayoutMode::RawText {
+            return Some(column![row1, self.template_bar(tab)].width(Fill).into());
+        }
         Some(row1.into())
+    }
+
+    /// The raw text template input plus its non-blocking validation warning,
+    /// shown below the Search bar's first row while a Result Tab is in raw
+    /// text mode.
+    fn template_bar<'a>(&self, tab: &'a ResultTab) -> Element<'a, Message> {
+        let run_id = tab.run_id;
+        let input = text_input("%{field.path} template", &tab.template_draft)
+            .on_input(move |v| Message::ResultTemplateDraft(run_id, v))
+            .on_submit(Message::ResultTemplateSubmit(run_id))
+            .size(12.0)
+            .padding(4.0)
+            .font(Font::MONOSPACE)
+            .width(Fill);
+
+        let mut strip = row![input].spacing(12.0).align_y(iced::Alignment::Center);
+        let unknown = line::unknown_template_fields(&tab.template_draft, &tab.all_fields);
+        if !unknown.is_empty() {
+            let list = unknown
+                .iter()
+                .map(|f| format!("\u{201c}{f}\u{201d}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            strip = strip.push(
+                text(format!("Unknown field: {list}"))
+                    .size(11.0)
+                    .color(WARN_AMBER),
+            );
+        }
+
+        container(strip)
+            .style(|_| style::panel(PANEL))
+            .width(Fill)
+            .padding(Padding::new(6.0).left(12.0).right(12.0))
+            .into()
     }
 
     /// The floating "Custom\u{2026}" timeframe editor, anchored under the Search
@@ -2604,13 +2826,213 @@ impl LogLens {
         modal_card(card.into())
     }
 
+    /// The Highlight rules modal: a reorderable list of rules over a sub-form
+    /// for adding or editing one. Save writes the working copy onto
+    /// `Config.rules`; Cancel discards it.
+    fn rules_form_modal<'a>(&'a self, form: &'a RulesForm) -> Element<'a, Message> {
+        let last = form.rules.len().saturating_sub(1);
+
+        let mut list = column![].spacing(4.0);
+        if form.rules.is_empty() {
+            list = list.push(text("No rules yet.").size(11.0).color(TEXT_DIM));
+        }
+        for (i, rule) in form.rules.iter().enumerate() {
+            let summary = match &rule.matcher {
+                line::Matcher::Field { path, op, value } => format!("{path} {op} {value}"),
+                line::Matcher::Text { pattern } => format!("text \u{201c}{pattern}\u{201d}"),
+            };
+            let mut up = button(text("\u{25b4}").size(10.0).color(TEXT_DIM))
+                .padding(1.0)
+                .style(style::bare_button());
+            if i > 0 {
+                up = up.on_press(Message::RulesMoveRule(i, -1));
+            }
+            let mut down = button(text("\u{25be}").size(10.0).color(TEXT_DIM))
+                .padding(1.0)
+                .style(style::bare_button());
+            if i < last {
+                down = down.on_press(Message::RulesMoveRule(i, 1));
+            }
+            list = list.push(
+                row![
+                    checkbox(rule.enabled)
+                        .on_toggle(move |_| Message::RulesToggleRule(i))
+                        .size(13.0),
+                    column![
+                        text(rule.name.clone()).size(12.0).color(TEXT),
+                        text(summary).size(10.0).color(TEXT_DIM),
+                    ]
+                    .spacing(1.0),
+                    space().width(Fill),
+                    swatch(rule.style.fg),
+                    swatch(rule.style.bg),
+                    button(text("Edit").size(11.0).color(ACCENT))
+                        .on_press(Message::RulesEditRule(i))
+                        .padding(2.0)
+                        .style(style::bare_button()),
+                    button(text("\u{00d7}").size(12.0).color(TEXT_DIM))
+                        .on_press(Message::RulesDeleteRule(i))
+                        .padding(2.0)
+                        .style(style::bare_button()),
+                    column![up, down].spacing(0.0),
+                ]
+                .spacing(8.0)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+
+        let kind_btn = |label: &'static str, kind: MatcherKind| {
+            button(text(label).size(11.0).color(TEXT))
+                .on_press(Message::RulesDraftKind(kind))
+                .padding(Padding::new(3.0).left(10.0).right(10.0))
+                .style(style::picker_row(form.draft_kind == kind))
+        };
+
+        let matcher_fields: Element<'a, Message> = match form.draft_kind {
+            MatcherKind::Field => row![
+                text_input("field.path", &form.draft_path)
+                    .on_input(Message::RulesDraftPath)
+                    .size(12.0)
+                    .padding(4.0)
+                    .width(Fill),
+                pick_list(
+                    &line::Op::ALL[..],
+                    Some(form.draft_op),
+                    Message::RulesDraftOp
+                )
+                .text_size(12.0)
+                .padding(4.0),
+                text_input("value", &form.draft_value)
+                    .on_input(Message::RulesDraftValue)
+                    .size(12.0)
+                    .padding(4.0)
+                    .width(Length::Fixed(120.0)),
+            ]
+            .spacing(6.0)
+            .align_y(iced::Alignment::Center)
+            .into(),
+            MatcherKind::Text => text_input("substring to highlight", &form.draft_pattern)
+                .on_input(Message::RulesDraftPattern)
+                .size(12.0)
+                .padding(4.0)
+                .width(Fill)
+                .into(),
+        };
+
+        let colour_field = |title: &'static str, val: &'a str, msg: fn(String) -> Message| {
+            column![
+                text(title).size(10.0).color(TEXT_DIM),
+                row![
+                    text_input("#rrggbb", val)
+                        .on_input(msg)
+                        .size(12.0)
+                        .padding(4.0)
+                        .width(Length::Fixed(110.0)),
+                    swatch(line::parse_hex(val.trim())),
+                ]
+                .spacing(6.0)
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(2.0)
+        };
+
+        let sub_form = column![
+            text(if form.editing.is_some() {
+                "Edit rule"
+            } else {
+                "Add rule"
+            })
+            .size(12.0)
+            .color(TEXT_DIM),
+            text_input("Rule name", &form.draft_name)
+                .on_input(Message::RulesDraftName)
+                .size(12.0)
+                .padding(4.0)
+                .width(Fill),
+            row![
+                kind_btn("Field", MatcherKind::Field),
+                kind_btn("Text", MatcherKind::Text),
+            ]
+            .spacing(1.0),
+            matcher_fields,
+            row![
+                colour_field("Foreground", &form.draft_fg, Message::RulesDraftFg),
+                colour_field("Background", &form.draft_bg, Message::RulesDraftBg),
+            ]
+            .spacing(12.0),
+            row![
+                button(
+                    text(if form.editing.is_some() {
+                        "Update"
+                    } else {
+                        "Add"
+                    })
+                    .size(12.0)
+                    .color(TEXT)
+                )
+                .on_press(Message::RulesDraftCommit)
+                .padding(Padding::new(4.0).left(12.0).right(12.0))
+                .style(style::picker_row(true)),
+                button(text("Clear").size(12.0).color(TEXT_DIM))
+                    .on_press(Message::RulesDraftReset)
+                    .padding(4.0)
+                    .style(style::bare_button()),
+            ]
+            .spacing(8.0),
+        ]
+        .spacing(6.0);
+
+        let mut card = column![
+            text("Highlight rules").size(16.0).color(TEXT),
+            text(
+                "Applied to every Result Tab, in order. The first matching field \
+                 rule colours the whole line; text rules layer on top."
+            )
+            .size(11.0)
+            .color(TEXT_DIM),
+            space().height(2.0),
+            list,
+            rule::horizontal(1.0),
+            sub_form,
+        ]
+        .spacing(8.0)
+        .width(Fill);
+
+        if let Some(err) = &form.error {
+            card = card.push(text(err.clone()).size(12.0).color(ERR_RED));
+        }
+        card = card.push(space().height(4.0));
+        card = card.push(
+            row![
+                space().width(Fill),
+                button(text("Cancel").size(13.0).color(TEXT_DIM))
+                    .on_press(Message::RulesFormCancel)
+                    .padding(Padding::new(6.0).left(14.0).right(14.0))
+                    .style(style::bare_button()),
+                button(text("Save").size(13.0).color(TEXT))
+                    .on_press(Message::RulesFormSave)
+                    .padding(Padding::new(6.0).left(14.0).right(14.0))
+                    .style(style::picker_row(true)),
+            ]
+            .spacing(8.0),
+        );
+
+        modal_card(card.into())
+    }
+
     // --- Result tab view ---------------------------------------------
 
     fn result_view<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
+        let hits_view = |this: &'a Self| -> Element<'a, Message> {
+            match tab.mode {
+                line::LayoutMode::Table => this.hit_table(tab),
+                line::LayoutMode::RawText => this.raw_text_view(tab),
+            }
+        };
         let body: Element<'_, Message> = match &tab.state {
             // A refresh over an already-populated tab keeps the old table on
             // screen until the new first Page lands, so nothing flashes.
-            _ if tab.table_visible() => self.hit_table(tab),
+            _ if tab.table_visible() => hits_view(self),
             RunState::Loading => centered("Running\u{2026}", TEXT_DIM),
             RunState::Empty => centered("No hits for this query and timeframe", TEXT_DIM),
             RunState::Error(err) => container(
@@ -2630,7 +3052,7 @@ impl LogLens {
             .padding(12.0)
             .width(Fill)
             .into(),
-            RunState::Loaded => self.hit_table(tab),
+            RunState::Loaded => hits_view(self),
         };
 
         let mut layout = column![body].width(Fill).height(Fill);
@@ -2715,8 +3137,20 @@ impl LogLens {
         )
         .gap(4.0);
 
+        let mode_btn = |label: &'static str, mode: line::LayoutMode| {
+            button(text(label).size(11.0).color(TEXT))
+                .on_press(Message::ResultLayoutMode(run_id, mode))
+                .padding(Padding::new(4.0).left(10.0).right(10.0))
+                .style(style::picker_row(tab.mode == mode))
+        };
+        let mode_ctl = row![
+            mode_btn("Table", line::LayoutMode::Table),
+            mode_btn("Raw text", line::LayoutMode::RawText),
+        ]
+        .spacing(1.0);
+
         container(
-            row![sort_ctl, space().width(Fill)]
+            row![sort_ctl, mode_ctl, space().width(Fill)]
                 .spacing(8.0)
                 .align_y(iced::Alignment::Center),
         )
@@ -2974,6 +3408,8 @@ impl LogLens {
         // Only build widgets for the slice around the viewport; pad the rest
         // with spacers so the scrollbar still spans every loaded Hit.
         let (start, end) = tab.row_window();
+        let layout = tab.layout();
+        let prepared = line::Prepared::from_rules(&self.config.rules);
         let mut body: Vec<Element<'_, Message>> = Vec::with_capacity(end - start + 2);
         if start > 0 {
             body.push(space().height(start as f32 * ROW_H).into());
@@ -2981,28 +3417,23 @@ impl LogLens {
         for (offset, hit) in tab.hits[start..end].iter().enumerate() {
             let index = start + offset;
             let selected = tab.selected_hit == Some(index);
+            let rendered = line::render(hit, &layout, &prepared);
             let cells = container(
                 row(tab
                     .columns
                     .iter()
                     .enumerate()
                     .map(|(i, col)| -> Element<'_, Message> {
-                        let value = results::cell(&hit.source, col, &tab.timestamp_field, tab.utc);
                         let width = if i == last {
                             Length::Fill
                         } else {
                             Length::Fixed(tab.col_width(col))
                         };
-                        container(
-                            text(value)
-                                .size(12.0)
-                                .font(Font::MONOSPACE)
-                                .wrapping(text::Wrapping::None),
-                        )
-                        .width(width)
-                        .padding(Padding::new(3.0).left(6.0))
-                        .clip(true)
-                        .into()
+                        container(part_widget(&rendered.parts[i]))
+                            .width(width)
+                            .padding(Padding::new(3.0).left(6.0))
+                            .clip(true)
+                            .into()
                     }))
                 .spacing(8.0),
             )
@@ -3066,6 +3497,77 @@ impl LogLens {
             self.header_menu_overlay(tab, menu_col),
         ])
         .into()
+    }
+
+    /// Raw text mode's answer to [`Self::hit_table`]: one fixed-height,
+    /// non-wrapping row per Hit rendering the template's single Part, with no
+    /// headers and horizontal overflow reachable by scrolling. Row clicks open
+    /// the same Hit-detail panel as Table mode.
+    fn raw_text_view<'a>(&'a self, tab: &'a ResultTab) -> Element<'a, Message> {
+        let run_id = tab.run_id;
+        let layout = tab.layout();
+        let prepared = line::Prepared::from_rules(&self.config.rules);
+
+        let (start, end) = tab.row_window();
+        let mut body: Vec<Element<'_, Message>> = Vec::with_capacity(end - start + 2);
+        if start > 0 {
+            body.push(space().height(start as f32 * ROW_H).into());
+        }
+        for (offset, hit) in tab.hits[start..end].iter().enumerate() {
+            let index = start + offset;
+            let selected = tab.selected_hit == Some(index);
+            let rendered = line::render(hit, &layout, &prepared);
+            let content: Element<'_, Message> = match rendered.parts.first() {
+                Some(part) => part_widget(part),
+                None => text("").size(12.0).font(Font::MONOSPACE).into(),
+            };
+
+            let row_el = container(content)
+                .height(Length::Fixed(ROW_H))
+                .padding(Padding::new(3.0).left(6.0))
+                .style(move |_| {
+                    if selected {
+                        style::panel(ACCENT)
+                    } else {
+                        container::Style::default()
+                    }
+                });
+
+            body.push(
+                mouse_area(row_el)
+                    .on_press(Message::HitClicked(run_id, index))
+                    .into(),
+            );
+        }
+        let trailing = tab.hits.len().saturating_sub(end);
+        if trailing > 0 {
+            body.push(space().height(trailing as f32 * ROW_H).into());
+        }
+
+        let view = scrollable(column(body))
+            .id(tab.scroll_id.clone())
+            .width(Fill)
+            .height(Fill)
+            .direction(scrollable::Direction::Both {
+                vertical: scrollable::Scrollbar::default(),
+                horizontal: scrollable::Scrollbar::default(),
+            })
+            .on_scroll(move |viewport| {
+                let offset = viewport.absolute_offset();
+                Message::ResultScrolled {
+                    run_id,
+                    offset_y: offset.y,
+                    viewport_h: viewport.bounds().height,
+                    content_h: viewport.content_bounds().height,
+                }
+            });
+
+        let mut stacked = column![view].width(Fill).height(Fill);
+        if let Some(footer) = self.paging_footer(tab) {
+            stacked = stacked.push(rule::horizontal(1.0));
+            stacked = stacked.push(footer);
+        }
+        stacked.into()
     }
 
     /// The floating "\u{22ee}" column-settings menu, dropped under the header of
@@ -3516,6 +4018,39 @@ fn test_result(state: &TestState) -> Element<'_, Message> {
             .color(ERR_RED)
             .into(),
     }
+}
+
+/// One `Line` Part as a widget. When no Highlight rule touched the Part it is
+/// a plain `text` — cheap `Auto`/`Basic` shaping. Only a Part a rule actually
+/// split or recoloured goes through `rich_text`, which forces `Advanced`
+/// shaping on the whole run (measurably slower on long log lines).
+fn part_widget<'a>(part: &line::Part) -> Element<'a, Message> {
+    match part.plain() {
+        Some(s) => text(s.to_string())
+            .size(12.0)
+            .font(Font::MONOSPACE)
+            .wrapping(text::Wrapping::None)
+            .into(),
+        None => iced::widget::rich_text(
+            part.segments
+                .iter()
+                .map(line::Segment::to_span)
+                .collect::<Vec<_>>(),
+        )
+        .size(12.0)
+        .font(Font::MONOSPACE)
+        .wrapping(text::Wrapping::None)
+        .into(),
+    }
+}
+
+/// A small colour chip for the Highlight rules modal: the colour itself, or
+/// `PANEL_ALT` when unset / unparsed.
+fn swatch<'a>(color: Option<Color>) -> Element<'a, Message> {
+    let fill = color.unwrap_or(PANEL_ALT);
+    container(space().width(14.0).height(14.0))
+        .style(move |_| style::panel(fill))
+        .into()
 }
 
 /// Centres `content` in a panel card over a dimmed backdrop.
