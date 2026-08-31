@@ -1,0 +1,383 @@
+name: Release
+
+# Pushing a version tag cuts a Release: both platforms are built, every
+# Artifact is uploaded to a *draft*, and only then is the Release published.
+#
+# Plan: docs/plans/d1-distribution-pipeline.md, step 6.
+# Decisions: docs/adr/0003-user-scope-distribution.md.
+#
+# The three properties this file exists to guarantee, in order of how much
+# damage getting them wrong does:
+#
+#  1. A partially-published Release is worse than none. The Update check
+#     (step 7) reads `/releases/latest` and downloads assets by name, so a
+#     Release visible with one Artifact missing hands every user on that
+#     platform a failed update. Hence draft → upload everything → publish, and
+#     hence `needs: [build-linux, build-windows]`: one platform failing to
+#     build publishes nothing at all. Fix and re-tag.
+#  2. The tag and the version the binary reports must agree, exactly. A
+#     Release that says v0.2.0 while its binary says 0.1.0 is a pipeline that
+#     lies, and every bug report filed against it inherits the lie. The
+#     `verify-version` job gates everything else and needs no toolchain, so it
+#     fails within seconds rather than after two builds.
+#  3. Artifact names are a compatibility contract (plan 4.4), not a formatting
+#     choice — the Update check matches Release assets by name, so renaming
+#     one breaks self-update for every already-installed copy, the single
+#     population that cannot fix itself.
+#
+# There is deliberately no `Swatinem/rust-cache` here, unlike ci.yml. A Release
+# is cut a handful of times a year and ships bytes that outlive this repository
+# checkout; building from a cold target/ costs a few minutes and removes any
+# question of what went into it.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# `gh release create` / `upload` / `edit` all write to the repository.
+permissions:
+  contents: write
+
+jobs:
+  verify-version:
+    name: Verify tag matches Cargo.toml
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      # v4 rather than v5: the only difference is the Node runtime the action
+      # itself runs on, and v4 is the version every runner image still ships
+      # support for. Same choice as ci.yml.
+      - uses: actions/checkout@v4
+
+      - name: Compare the tag against the package version
+        id: check
+        run: |
+          set -euo pipefail
+
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+
+          # Read the version out of the [package] table by hand rather than
+          # with `cargo metadata`: this job installs no toolchain precisely so
+          # that a mismatched tag fails before anything is built.
+          cargo_version="$(
+            awk -F'"' '
+              /^\[/ { in_package = ($0 == "[package]") }
+              in_package && /^version[[:space:]]*=/ { print $2; exit }
+            ' Cargo.toml
+          )"
+
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::Tag $tag does not match Cargo.toml version $cargo_version. Expected the tag v$cargo_version, or bump Cargo.toml to $version and re-tag."
+            exit 1
+          fi
+
+          # Release candidates and betas publish as pre-releases. This is not
+          # cosmetic: GitHub's /releases/latest excludes pre-releases
+          # server-side, which is the whole of how the Update check (step 7.2)
+          # avoids offering an rc to users — there is no client-side filter to
+          # get wrong.
+          prerelease=false
+          case "$tag" in
+            *-rc* | *-beta*) prerelease=true ;;
+          esac
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+          echo "Tag $tag matches Cargo.toml version $cargo_version (prerelease: $prerelease)."
+
+  build-linux:
+    name: Linux archive
+    needs: verify-version
+    # Pinned, and this is a product decision rather than a CI convenience: the
+    # runner's glibc becomes the oldest Linux Log Lens runs on. A binary built
+    # against 24.04's glibc 2.39 refuses to start on Ubuntu 22.04 or Debian 12
+    # with `GLIBC_2.39 not found`; newer glibc runs older binaries, never the
+    # reverse. 22.04 gives glibc 2.35, which covers Ubuntu 22.04+ and Debian
+    # 12+. Moving this to `ubuntu-latest` silently drops those users.
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.verify-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        # Shallow (depth 1) is fine: build.rs only needs
+        # `git rev-parse --short HEAD`, which resolves in a shallow clone, and
+        # that SHA is what `--version` reports.
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # No `apt-get` step, for the reason spelled out in ci.yml: nothing in the
+      # tree links a C library, and winit/wgpu `dlopen` their X11, Wayland and
+      # EGL libraries at runtime rather than linking them.
+      - name: Build
+        run: cargo build --release --locked
+
+      # `--locked` above and this staging step together define the Artifact.
+      # Everything below operates on `dist/$stage/`, so the binary that is
+      # smoke-tested is byte-for-byte the one that ships.
+      - name: Stage the archive
+        run: |
+          set -euo pipefail
+
+          stage="LogLens-$VERSION-linux-x86_64"
+          mkdir -p "dist/$stage"
+
+          # Strip before staging: debug symbols roughly quadruple the download
+          # for something no user can act on, and the crash log (step 3.2)
+          # records the panic message and location, not a symbolised backtrace.
+          strip --strip-all target/release/loglens
+
+          # The layout install.sh requires, checked against its own header
+          # (packaging/linux/install.sh, "CONTRACT 1"). It refuses to run
+          # unless all four of the files beside it are present under exactly
+          # these names, and the icon must be the app ID, not `icon.png`.
+          install -m 755 target/release/loglens "dist/$stage/loglens"
+          install -m 755 packaging/linux/install.sh "dist/$stage/install.sh"
+          install -m 755 packaging/linux/uninstall.sh "dist/$stage/uninstall.sh"
+          install -m 644 assets/io.github.dennisdms.LogLens.desktop \
+            "dist/$stage/io.github.dennisdms.LogLens.desktop"
+          install -m 644 assets/app-icon/icon.png \
+            "dist/$stage/io.github.dennisdms.LogLens.png"
+
+          ls -l "dist/$stage"
+
+      # The smoke test (plan 6.4). An iced window cannot be launched on a
+      # headless runner, but a binary that prints the version it claims to be
+      # and exits 0 has proved it loaded, linked and ran on this platform —
+      # which catches the failures that actually happen: a missing shared
+      # library, a bad link, a wrong-architecture build, a `strip` that ate
+      # something it should not have.
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+
+          exe="dist/LogLens-$VERSION-linux-x86_64/loglens"
+          out="$("$exe" --version)"
+          echo "$exe --version -> $out"
+
+          # `Log Lens <version> (<sha>)`, from src/main.rs. Matching the
+          # version too is the point: it is the second half of the tag gate,
+          # proving the binary in the Artifact reports what the tag claims.
+          case "$out" in
+            "Log Lens $VERSION ("*")") ;;
+            *)
+              echo "::error::Expected 'Log Lens $VERSION (<sha>)' from --version, got: '$out'"
+              exit 1
+              ;;
+          esac
+
+      # Tar in the build job, not in the release job: actions/upload-artifact
+      # does not preserve the executable bit, so the modes install.sh relies on
+      # have to be sealed inside the archive here. `-C dist` keeps the single
+      # top-level directory and nothing above it — no tarbombs (plan 4.4).
+      - name: Create the tarball
+        run: |
+          set -euo pipefail
+
+          stage="LogLens-$VERSION-linux-x86_64"
+          tar -C dist -czf "dist/$stage.tar.gz" "$stage"
+          tar -tvzf "dist/$stage.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-archive
+          path: dist/LogLens-*-linux-x86_64.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  build-windows:
+    name: Windows installer and portable archive
+    needs: verify-version
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      VERSION: ${{ needs.verify-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # build.rs compiles assets/app-icon/icon.ico and the version information
+      # block into the exe here — that only happens on a Windows host, which is
+      # why the shipped binary is built on one rather than cross-compiled.
+      - name: Build
+        run: cargo build --release --locked
+
+      # The smoke test (plan 6.4), and the one step in this file whose
+      # mechanics are subtle.
+      #
+      # A release build is a GUI subsystem executable
+      # (`windows_subsystem = "windows"`), so it starts with no console. Ticket
+      # 04 added `attach_parent_console()` — AttachConsole(ATTACH_PARENT_PROCESS)
+      # plus SetStdHandle over CONOUT$ — so that `loglens.exe --version` typed
+      # at a prompt still prints. That has a consequence here: when the attach
+      # succeeds, the standard handles are repointed at the *console*, which
+      # overrides any redirection the launcher set up, and a capture comes back
+      # empty. When there is no parent console the attach fails, the inherited
+      # (redirected) handles are left alone, and the capture works normally.
+      #
+      # Which of those happens depends on whether the shell running this step
+      # has a console attached, so the test tries the plain capture first and,
+      # if it comes back empty, retries from a child shell that has detached
+      # itself from its console — where the attach cannot succeed and the
+      # redirected pipe survives. Empty output is never treated as a pass: a
+      # smoke test that goes green on nothing at all is worse than no smoke
+      # test, because it is believed.
+      #
+      # If the retry is what keeps passing, the fix belongs in
+      # `attach_parent_console`, not here: repoint only those standard handles
+      # that are invalid, leaving a redirected one in place.
+      - name: Smoke test
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = 'target\release\loglens.exe'
+
+          $out = (& $exe --version 2>&1 | Out-String).Trim()
+          if (-not $out) {
+              Write-Host 'Direct capture came back empty; retrying with the console detached.'
+              $detached = @"
+          Add-Type -Name Console -Namespace LogLensSmoke -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool FreeConsole();'
+          [LogLensSmoke.Console]::FreeConsole() | Out-Null
+          & '$((Resolve-Path $exe).Path)' --version
+          "@
+              $out = (pwsh -NoProfile -NonInteractive -Command $detached 2>&1 | Out-String).Trim()
+          }
+
+          Write-Host "$exe --version -> $out"
+
+          # `Log Lens <version> (<sha>)`, from src/main.rs.
+          if ($out -notmatch "^Log Lens $([regex]::Escape($env:VERSION)) \(.+\)$") {
+              Write-Host "::error::Expected 'Log Lens $env:VERSION (<sha>)' from --version, got: '$out'"
+              exit 1
+          }
+
+      # Inno Setup 6 is preinstalled on GitHub's Windows runners and puts iscc
+      # on PATH; the fallback covers the image dropping it from PATH without
+      # dropping the tool. If it ever disappears entirely, the fix named in
+      # packaging/windows/loglens.iss is `choco install innosetup -y`.
+      #
+      # `/DAppVersion=` is the only define the script needs — SourceExe and
+      # OutputDir default to target\release\loglens.exe and dist\, both
+      # resolved relative to the .iss file, which is where this job builds and
+      # where the release job expects the Artifact. iscc exits 2 on a failed
+      # compile.
+      - name: Build the installer
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+              $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          }
+          if (-not (Test-Path -LiteralPath $iscc)) {
+              Write-Host '::error::Inno Setup (iscc) not found on this runner. Add `choco install innosetup -y` before this step.'
+              exit 1
+          }
+
+          & $iscc "/DAppVersion=$env:VERSION" packaging\windows\loglens.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Same binary as the installer ships, staged and zipped by the script
+      # that owns that layout. It writes no install-manifest.json, which is
+      # what keeps a portable copy from claiming to be installer-managed.
+      - name: Build the portable archive
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\packaging\windows\make-portable.ps1 -Version $env:VERSION
+
+      # Both Artifacts land in dist\ under the names fixed by plan 4.4:
+      # LogLens-<version>-windows-x86_64-setup.exe and -portable.zip. They are
+      # uploaded as-is — the release job never renames anything.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: |
+            dist/LogLens-*-windows-x86_64-setup.exe
+            dist/LogLens-*-windows-x86_64-portable.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish the Release
+    needs: [verify-version, build-linux, build-windows]
+    runs-on: ubuntu-22.04
+    env:
+      # `gh` needs a token and a repository. Both come from the workflow
+      # context, so this job never checks the source out — it only moves files
+      # the build jobs produced.
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.verify-version.outputs.version }}
+      PRERELEASE: ${{ needs.verify-version.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Naming all three files explicitly rather than globbing does double
+      # duty: it produces the checksums, and it fails the job if any Artifact
+      # is missing or arrived under a name other than the contracted one —
+      # before a draft exists, let alone a published Release.
+      #
+      # Plain `sha256sum` output (hash, two spaces, bare filename) so that
+      # `sha256sum --check` and the Update's own verifier (step 7.1) can both
+      # read it. Generated from inside dist/ so no directory prefix leaks into
+      # the names.
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+
+          sha256sum \
+            "LogLens-$VERSION-linux-x86_64.tar.gz" \
+            "LogLens-$VERSION-windows-x86_64-setup.exe" \
+            "LogLens-$VERSION-windows-x86_64-portable.zip" \
+            > SHA256SUMS
+
+          cat SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      # Draft first. Until the publish step below runs, this Release is
+      # invisible to users and to `/releases/latest`, so no Update check can
+      # ever see it half-uploaded.
+      #
+      # A re-run against a tag that already has a Release fails here, on
+      # purpose: deleting an existing Release automatically would mean a rerun
+      # could quietly destroy a published one. Delete it by hand, or re-tag.
+      - name: Create the draft Release
+        run: |
+          set -euo pipefail
+
+          args=(--draft --generate-notes --title "$TAG")
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+
+          gh release create "$TAG" "${args[@]}"
+
+      - name: Upload the Artifacts
+        run: |
+          set -euo pipefail
+
+          gh release upload "$TAG" \
+            "dist/LogLens-$VERSION-linux-x86_64.tar.gz" \
+            "dist/LogLens-$VERSION-windows-x86_64-setup.exe" \
+            "dist/LogLens-$VERSION-windows-x86_64-portable.zip" \
+            dist/SHA256SUMS
+
+      # Last, and only now. Everything above can fail without a user ever
+      # having seen this Release.
+      - name: Publish
+        run: |
+          set -euo pipefail
+
+          gh release edit "$TAG" --draft=false
+          echo "Published $TAG (prerelease: $PRERELEASE)."
