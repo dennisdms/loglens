@@ -209,46 +209,21 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
-      # The smoke test (plan 6.4), and the one step in this file whose
-      # mechanics are subtle.
+      # The smoke test (plan 6.4). Capturing the output of a GUI subsystem
+      # executable is the subtle part, and it rests on `attach_parent_console()`
+      # in src/main.rs repointing only those standard handles that are
+      # *invalid*: this step's stdout is a pipe, so the binary inherits a valid
+      # handle for it and the attach leaves it alone, and the capture below
+      # gets the output whether or not the step's shell has a console.
       #
-      # A release build is a GUI subsystem executable
-      # (`windows_subsystem = "windows"`), so it starts with no console. Ticket
-      # 04 added `attach_parent_console()` — AttachConsole(ATTACH_PARENT_PROCESS)
-      # plus SetStdHandle over CONOUT$ — so that `loglens.exe --version` typed
-      # at a prompt still prints. That has a consequence here: when the attach
-      # succeeds, the standard handles are repointed at the *console*, which
-      # overrides any redirection the launcher set up, and a capture comes back
-      # empty. When there is no parent console the attach fails, the inherited
-      # (redirected) handles are left alone, and the capture works normally.
-      #
-      # Which of those happens depends on whether the shell running this step
-      # has a console attached, so the test tries the plain capture first and,
-      # if it comes back empty, retries from a child shell that has detached
-      # itself from its console — where the attach cannot succeed and the
-      # redirected pipe survives. Empty output is never treated as a pass: a
-      # smoke test that goes green on nothing at all is worse than no smoke
-      # test, because it is believed.
-      #
-      # If the retry is what keeps passing, the fix belongs in
-      # `attach_parent_console`, not here: repoint only those standard handles
-      # that are invalid, leaving a redirected one in place.
+      # Empty output is never treated as a pass — a smoke test that goes green
+      # on nothing at all is worse than no smoke test, because it is believed.
       - name: Smoke test
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = 'target\release\loglens.exe'
 
           $out = (& $exe --version 2>&1 | Out-String).Trim()
-          if (-not $out) {
-              Write-Host 'Direct capture came back empty; retrying with the console detached.'
-              $detached = @"
-          Add-Type -Name Console -Namespace LogLensSmoke -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool FreeConsole();'
-          [LogLensSmoke.Console]::FreeConsole() | Out-Null
-          & '$((Resolve-Path $exe).Path)' --version
-          "@
-              $out = (pwsh -NoProfile -NonInteractive -Command $detached 2>&1 | Out-String).Trim()
-          }
-
           Write-Host "$exe --version -> $out"
 
           # `Log Lens <version> (<sha>)`, from src/main.rs.

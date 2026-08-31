@@ -137,6 +137,14 @@ fn handle_cli_flags() -> bool {
 /// Deliberately *not* `AllocConsole`: that would create the very console window
 /// the GUI subsystem attribute exists to remove.
 ///
+/// Only the standard handles that are *invalid* are repointed at the console.
+/// A GUI subsystem process launched with a redirection — `loglens.exe
+/// --version > out.txt`, or a CI step capturing the output — inherits a valid
+/// handle for the redirected stream, and overwriting that with `CONOUT$` would
+/// send the output to the console and leave the file empty. Which handles
+/// arrive valid is exactly the question being asked, so the check is per
+/// handle: redirect stdout alone and stderr still lands on the console.
+///
 /// A debug build is a console subsystem executable and already has its own
 /// console, so the attach fails there and this leaves its streams untouched.
 ///
@@ -146,8 +154,9 @@ fn handle_cli_flags() -> bool {
 fn attach_parent_console() {
     use std::os::windows::io::IntoRawHandle;
 
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::{
-        ATTACH_PARENT_PROCESS, AttachConsole, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
         STD_OUTPUT_HANDLE, SetStdHandle,
     };
 
@@ -167,6 +176,15 @@ fn attach_parent_console() {
         ("CONOUT$", STD_OUTPUT_HANDLE),
         ("CONOUT$", STD_ERROR_HANDLE),
     ] {
+        // SAFETY: a plain FFI call taking one constant. A process that was
+        // handed this stream — by a redirection, a pipe, or a parent that set
+        // `STARTF_USESTDHANDLES` — gets a valid handle back and keeps it.
+        // One with nothing on the stream gets null or `INVALID_HANDLE_VALUE`.
+        let existing = unsafe { GetStdHandle(id) };
+        if !existing.is_null() && existing != INVALID_HANDLE_VALUE {
+            continue;
+        }
+
         let Ok(file) = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
