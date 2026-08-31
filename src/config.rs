@@ -21,6 +21,13 @@ pub struct Config {
     /// Elasticsearch fetch limits, tuned from the Settings window.
     #[serde(default)]
     pub es: EsSettings,
+    /// When the last Update check ran, so the startup check happens at most
+    /// once a day rather than once a launch. Recorded whether the check
+    /// succeeded or not — a failing check that did not record itself would run
+    /// again on every launch, which is precisely the behaviour a shared office
+    /// IP's GitHub rate limit cannot afford. `None` until the first check.
+    #[serde(default)]
+    pub last_update_check: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Hard ceiling on the batch size Elasticsearch will return in one `_search`.

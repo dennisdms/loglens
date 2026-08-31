@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+# `serde` is on for one field: `Config.last_update_check`, an RFC 3339
+# `DateTime<Utc>` in the config file.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
 dirs = "6.0.0"
 iced = { version = "0.14", features = ["tokio", "svg"] }
 keyring = { version = "3", features = [

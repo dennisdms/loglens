@@ -18,6 +18,7 @@ mod search;
 mod secrets;
 mod style;
 mod tab;
+mod update;
 
 use std::collections::{HashMap, HashSet};
 
@@ -45,6 +46,24 @@ use tab::Tab;
 /// set like a folder. The control char keeps it from colliding with a real
 /// Connection name.
 const ES_ROOT: &str = "\u{1}Elasticsearch";
+
+/// Menu bar geometry, shared by the bar and by every dropdown anchored under
+/// it. A dropdown is a free-floating overlay layer over the whole window and
+/// has no way to ask where its label ended up, so the two have to agree on one
+/// set of numbers instead.
+const MENU_BAR_PAD_LEFT: f32 = 8.0;
+/// The width every Menu bar label occupies, whether or not its text fills it.
+const MENU_LABEL_W: f32 = 46.0;
+/// Gap between two Menu bar labels.
+const MENU_LABEL_GAP: f32 = 12.0;
+/// Distance from the top of the window to the underside of the Menu bar, which
+/// is where a dropdown starts.
+const MENU_BAR_H: f32 = 26.0;
+
+/// The x offset of the `index`-th Menu bar label, for anchoring its dropdown.
+fn menu_anchor_x(index: usize) -> f32 {
+    MENU_BAR_PAD_LEFT + index as f32 * (MENU_LABEL_W + MENU_LABEL_GAP)
+}
 
 const OK_GREEN: Color = Color::from_rgb8(0x6c, 0xc0, 0x7a);
 const ERR_RED: Color = Color::from_rgb8(0xe0, 0x6c, 0x6c);
@@ -302,6 +321,21 @@ struct LogLens {
     settings_window: Option<window::Id>,
     /// Whether the Menu bar's "File" dropdown is showing.
     file_menu_open: bool,
+    /// Whether the Menu bar's "Help" dropdown is showing.
+    help_menu_open: bool,
+    /// The newer Release an Update check turned up, until the user dismisses
+    /// the banner showing it.
+    ///
+    /// Session state on purpose. Dismissing means "not now", not "never tell
+    /// me again": a dismissal written to the config file would have to be
+    /// invalidated against a version to avoid hiding every future Release too,
+    /// and that rule buys nothing over simply asking again at the next check.
+    new_release: Option<update::Release>,
+    /// Whether an Update check is in flight, so `Check for updates\u{2026}` can
+    /// say so and go inert while it is.
+    checking_for_updates: bool,
+    /// Whether the About dialog is open.
+    about_open: bool,
     /// Editable copy of `config.es`, backing the Settings window's fields.
     settings_draft: SettingsDraft,
 }
@@ -581,6 +615,27 @@ enum Message {
     SettingsSave,
     /// Close the Settings window without saving.
     SettingsClose,
+    // Help menu + Update check
+    /// Toggle the Menu bar's "Help" dropdown.
+    HelpMenuToggle,
+    /// Close the "Help" dropdown (click outside).
+    HelpMenuDismiss,
+    /// `Help > Check for updates\u{2026}`: an Update check the user asked for,
+    /// which runs regardless of when the last one did.
+    CheckForUpdates,
+    /// An Update check finished. The [`update::Trigger`] rides along with the
+    /// result because it, and not the result, decides whether a failure is
+    /// allowed to be seen \u{2014} see [`update::outcome`].
+    UpdateCheckDone {
+        trigger: update::Trigger,
+        result: Result<Option<update::Release>, String>,
+    },
+    /// Hide the Update banner for the rest of the session.
+    DismissUpdateBanner,
+    /// Open the About dialog from the "Help" dropdown.
+    OpenAbout,
+    /// Close the About dialog.
+    CloseAbout,
     /// An OS window was closed. Exits the app when it is the main window.
     WindowClosed(window::Id),
     // Misc
@@ -599,6 +654,11 @@ impl LogLens {
 
         let config = config::load();
         let (main_window, open_main) = window::open(main_window_settings());
+
+        // The startup Update check, which runs at most once a day. The cadence
+        // is decided here rather than inside `update::check`, so that the
+        // manual path can simply not ask.
+        let due = update::is_due(config.last_update_check, chrono::Utc::now());
 
         let app = Self {
             settings_draft: SettingsDraft::from_settings(config.es),
@@ -624,8 +684,18 @@ impl LogLens {
             main_window,
             settings_window: None,
             file_menu_open: false,
+            help_menu_open: false,
+            new_release: None,
+            checking_for_updates: due,
+            about_open: false,
         };
-        (app, open_main.discard())
+
+        let startup_check = if due {
+            update_check_task(update::Trigger::Background)
+        } else {
+            Task::none()
+        };
+        (app, Task::batch([open_main.discard(), startup_check]))
     }
 
     fn theme(&self, _window: window::Id) -> Theme {
@@ -1493,6 +1563,53 @@ impl LogLens {
                     return window::close(id);
                 }
             }
+            Message::HelpMenuToggle => self.help_menu_open = !self.help_menu_open,
+            Message::HelpMenuDismiss => self.help_menu_open = false,
+            Message::CheckForUpdates => {
+                self.help_menu_open = false;
+                // A second check while one is already in flight would spend
+                // another of the hour's 60 unauthenticated GitHub requests to
+                // answer a question already being asked.
+                if self.checking_for_updates {
+                    return Task::none();
+                }
+                self.checking_for_updates = true;
+                self.status = Some("Checking for updates\u{2026}".to_string());
+                return update_check_task(update::Trigger::Manual);
+            }
+            Message::UpdateCheckDone { trigger, result } => {
+                self.checking_for_updates = false;
+                self.record_update_check();
+                match update::outcome(trigger, result) {
+                    update::Outcome::Found(release) => {
+                        // Clears the manual path's "Checking\u{2026}" line; the
+                        // banner is the answer now.
+                        self.status = None;
+                        self.new_release = Some(release);
+                    }
+                    update::Outcome::UpToDate => {
+                        self.status = Some(format!(
+                            "Log Lens {} is the latest version.",
+                            update::RUNNING_VERSION
+                        ));
+                    }
+                    update::Outcome::Failed(err) => {
+                        self.status = Some(format!("Could not check for updates: {err}"));
+                    }
+                    // A background check that found nothing, or failed. Nobody
+                    // asked, so nothing is said \u{2014} and nothing needs
+                    // clearing either, since only the manual path ever put a
+                    // "Checking\u{2026}" line up.
+                    update::Outcome::Silent => {}
+                }
+            }
+            Message::DismissUpdateBanner => self.new_release = None,
+            Message::OpenAbout => {
+                self.help_menu_open = false;
+                self.about_open = true;
+            }
+            Message::CloseAbout => self.about_open = false,
+
             Message::WindowClosed(id) => {
                 if id == self.main_window {
                     return iced::exit();
@@ -1515,6 +1632,28 @@ impl LogLens {
         }
 
         Task::none()
+    }
+
+    // --- Update check ------------------------------------------------------
+
+    /// Stamps "a check just ran" into the config, whether the check succeeded
+    /// or not.
+    ///
+    /// Recording a failure matters as much as recording a hit. A timestamp
+    /// written only on success would leave anyone permanently behind a proxy
+    /// that blocks api.github.com checking again on every single launch \u{2014}
+    /// the population a failing check is least entitled to bother, and the one
+    /// that would burn a shared office IP's 60-an-hour GitHub budget fastest.
+    ///
+    /// A failed write is swallowed rather than shown. This timestamp is
+    /// scheduling bookkeeping nobody asked to persist, and a config-file error
+    /// raised on startup by a check the user did not request is the exact
+    /// interruption the failure policy exists to prevent. Every save the user
+    /// *did* ask for still reports its own failures; the only cost here is one
+    /// redundant check tomorrow.
+    fn record_update_check(&mut self) {
+        self.config.last_update_check = Some(chrono::Utc::now());
+        let _ = config::save(&self.config);
     }
 
     // --- Settings window ---------------------------------------------------
@@ -2378,21 +2517,30 @@ impl LogLens {
         ]
         .height(Fill);
 
-        let base: Element<'_, Message> = container(column![
-            self.menu_bar(),
-            rule::horizontal(1.0),
-            container(body).width(Fill).height(Fill),
-            self.status_bar(),
-            rule::horizontal(1.0),
-            self.info_bar(),
-        ])
-        .style(|_| style::panel(BG))
-        .width(Fill)
-        .height(Fill)
-        .into();
+        // Built as a Vec rather than a `column!` so the Update banner and the
+        // rule beneath it appear together or not at all.
+        let mut chrome: Vec<Element<'_, Message>> =
+            vec![self.menu_bar(), rule::horizontal(1.0).into()];
+        if let Some(banner) = self.update_banner() {
+            chrome.push(banner);
+            chrome.push(rule::horizontal(1.0).into());
+        }
+        chrome.push(container(body).width(Fill).height(Fill).into());
+        chrome.push(self.status_bar());
+        chrome.push(rule::horizontal(1.0).into());
+        chrome.push(self.info_bar());
+
+        let base: Element<'_, Message> = container(column(chrome))
+            .style(|_| style::panel(BG))
+            .width(Fill)
+            .height(Fill)
+            .into();
 
         let mut layers: Vec<Element<'_, Message>> = vec![base];
         if let Some(menu) = self.file_menu_overlay() {
+            layers.push(menu);
+        }
+        if let Some(menu) = self.help_menu_overlay() {
             layers.push(menu);
         }
         if let Some(menu) = self.tree_menu_overlay() {
@@ -2427,6 +2575,9 @@ impl LogLens {
         }
         if let Some(confirm) = &self.confirm {
             layers.push(self.confirm_modal(confirm));
+        }
+        if self.about_open {
+            layers.push(self.about_modal());
         }
 
         // Always wrap in a `stack`, even with no overlays: collapsing to the
@@ -2729,24 +2880,193 @@ impl LogLens {
             .into()
     }
 
-    /// The always-present Menu bar across the top of the window. `File` opens a
-    /// dropdown (see [`Self::file_menu_overlay`]); `View` is still inert.
+    /// The always-present Menu bar across the top of the window. `File` and
+    /// `Help` open dropdowns (see [`Self::file_menu_overlay`] and
+    /// [`Self::help_menu_overlay`]); `View` is still inert.
+    ///
+    /// Every label occupies the same fixed cell width. A dropdown is a
+    /// free-floating overlay layer stacked over the whole window, so nothing
+    /// tells it where the label it hangs under actually landed; uniform cells
+    /// turn the anchor into [`menu_anchor_x`] arithmetic instead of a number
+    /// measured off a screenshot and re-measured whenever a label is renamed.
     fn menu_bar(&self) -> Element<'_, Message> {
         container(
             row![
-                button(text("File").size(13.0).color(TEXT))
-                    .on_press(Message::FileMenuToggle)
-                    .padding(Padding::new(2.0).left(6.0).right(6.0))
-                    .style(style::picker_row(self.file_menu_open)),
-                text("View").size(13.0).color(TEXT_DIM),
+                menu_bar_label("File", self.file_menu_open, Message::FileMenuToggle),
+                // Inert, so it is rendered as dimmed text in a cell of the same
+                // width rather than as a button that does nothing when pressed.
+                container(text("View").size(13.0).color(TEXT_DIM))
+                    .width(Length::Fixed(MENU_LABEL_W))
+                    .center_x(Fill),
+                menu_bar_label("Help", self.help_menu_open, Message::HelpMenuToggle),
             ]
-            .spacing(12.0)
+            .spacing(MENU_LABEL_GAP)
             .align_y(iced::Alignment::Center),
         )
         .style(|_| style::panel(PANEL_ALT))
         .width(Fill)
-        .padding(Padding::new(4.0).left(8.0).right(12.0))
+        .padding(Padding::new(4.0).left(MENU_BAR_PAD_LEFT).right(12.0))
         .into()
+    }
+
+    /// The floating "Help" dropdown, anchored under its Menu bar label.
+    fn help_menu_overlay(&self) -> Option<Element<'_, Message>> {
+        if !self.help_menu_open {
+            return None;
+        }
+
+        // While a check is in flight the item says so and stops responding.
+        // The unauthenticated GitHub API allows 60 requests an hour per IP,
+        // shared by everyone behind an office NAT, and a menu item that looks
+        // like it did nothing invites exactly the repeated clicking that spends
+        // them.
+        let checking = self.checking_for_updates;
+        let check = button(
+            text(if checking {
+                "Checking for updates\u{2026}"
+            } else {
+                "Check for updates\u{2026}"
+            })
+            .size(12.0)
+            .color(if checking { TEXT_DIM } else { TEXT }),
+        )
+        .on_press_maybe((!checking).then_some(Message::CheckForUpdates))
+        .width(Fill)
+        .padding(Padding::new(4.0).left(10.0).right(10.0))
+        .style(style::picker_row(false));
+
+        let block = container(
+            column![
+                check,
+                button(text("About").size(12.0).color(TEXT))
+                    .on_press(Message::OpenAbout)
+                    .width(Fill)
+                    .padding(Padding::new(4.0).left(10.0).right(10.0))
+                    .style(style::picker_row(false)),
+            ]
+            .spacing(1.0),
+        )
+        .width(178.0)
+        .padding(3.0)
+        .style(|_| style::menu_popup());
+
+        let anchored = container(block)
+            .width(Fill)
+            .height(Fill)
+            // Index 2: the bar reads File, View, Help.
+            .padding(Padding::new(0.0).left(menu_anchor_x(2)).top(MENU_BAR_H));
+
+        Some(
+            mouse_area(anchored)
+                .on_press(Message::HelpMenuDismiss)
+                .on_right_press(Message::HelpMenuDismiss)
+                .into(),
+        )
+    }
+
+    /// The Update banner: a strip directly below the Menu bar naming the newer
+    /// Release, showing its notes, and carrying a \u{00d7} that hides it.
+    ///
+    /// A banner rather than a modal, because a new Release is never urgent and
+    /// a modal would take the window away from whatever query the user is in
+    /// the middle of reading. A banner rather than an indicator dot, because a
+    /// dot is too easy to never notice at all.
+    ///
+    /// Dismissing hides it for the rest of the session only \u{2014} see
+    /// `new_release`.
+    ///
+    /// The trailing row deliberately has room for one more control: the Update
+    /// button belonging to the Update-applying step goes between the spacer and
+    /// the \u{00d7}. It is not here yet because nothing can apply an Update yet,
+    /// and a button that does nothing is worse than none.
+    fn update_banner(&self) -> Option<Element<'_, Message>> {
+        let release = self.new_release.as_ref()?;
+
+        let mut left = column![
+            text(format!("{APP_NAME} {} is available.", release.version))
+                .size(13.0)
+                .color(Color::WHITE),
+        ]
+        .spacing(4.0);
+
+        let notes = release.notes.trim();
+        if !notes.is_empty() {
+            // GitHub's generated notes are markdown of no fixed length, shown
+            // as the plain text they are. Bounded and scrollable so a long
+            // changelog cannot push the tab strip off the bottom of the window.
+            left = left.push(
+                container(scrollable(text(notes.to_string()).size(12.0).color(
+                    Color {
+                        a: 0.85,
+                        ..Color::WHITE
+                    },
+                )))
+                .max_height(72.0),
+            );
+        }
+
+        Some(
+            container(
+                row![
+                    left.width(Fill),
+                    space().width(12.0),
+                    button(text("\u{00d7}").size(14.0).color(Color::WHITE))
+                        .on_press(Message::DismissUpdateBanner)
+                        .padding(Padding::new(2.0).left(6.0).right(6.0))
+                        .style(style::bare_button()),
+                ]
+                .align_y(iced::Alignment::Start),
+            )
+            .style(|_| style::panel(ACCENT))
+            .width(Fill)
+            .padding(Padding::new(8.0).left(12.0).right(8.0))
+            .into(),
+        )
+    }
+
+    /// The About dialog: what this build is, where it came from, and where it
+    /// leaves a trace when it crashes.
+    ///
+    /// An overlay modal in the main window rather than a second OS window like
+    /// Settings. Settings earns a window of its own because it is an editor
+    /// people leave open beside the app while they work; About is read once and
+    /// dismissed, and giving four lines of text its own taskbar button and
+    /// alt-tab entry costs more than it returns.
+    fn about_modal(&self) -> Element<'_, Message> {
+        // Shown as a path rather than opened, so a user asked for the crash log
+        // can find the file. `None` only on a system with no data directory at
+        // all, where there is no crash log to point at.
+        let crash_log = crashlog::log_path().map_or_else(
+            || "unavailable: no data directory on this system".to_string(),
+            |path| path.display().to_string(),
+        );
+
+        let card = column![
+            text("About Log Lens").size(16.0).color(TEXT),
+            space().height(2.0),
+            // `VERSION`, not the crate version the Update check compares
+            // against: the commit hash is what makes the first bug report
+            // against "0.1.0" say which 0.1.0.
+            text(format!("{APP_NAME} {VERSION}")).size(13.0).color(TEXT),
+            space().height(8.0),
+            field_label("Repository"),
+            text(update::REPOSITORY_URL).size(12.0).color(TEXT_DIM),
+            space().height(8.0),
+            field_label("Crash log"),
+            text(crash_log).size(12.0).color(TEXT_DIM),
+            space().height(12.0),
+            row![
+                space().width(Fill),
+                button(text("Close").size(13.0).color(TEXT))
+                    .on_press(Message::CloseAbout)
+                    .padding(Padding::new(6.0).left(14.0).right(14.0))
+                    .style(style::picker_row(true)),
+            ],
+        ]
+        .spacing(4.0)
+        .width(Fill);
+
+        modal_card(card.into())
     }
 
     /// The floating "File" dropdown, anchored under its Menu bar label.
@@ -2768,7 +3088,7 @@ impl LogLens {
         let anchored = container(block)
             .width(Fill)
             .height(Fill)
-            .padding(Padding::new(0.0).left(8.0).top(26.0));
+            .padding(Padding::new(0.0).left(menu_anchor_x(0)).top(MENU_BAR_H));
 
         Some(
             mouse_area(anchored)
@@ -4620,6 +4940,26 @@ impl LogLens {
 }
 
 // --- Small view helpers ----------------------------------------------------
+
+/// One Menu bar label that opens a dropdown, in a cell of the shared width so
+/// [`menu_anchor_x`] can place that dropdown underneath it.
+fn menu_bar_label<'a>(label: &'a str, open: bool, toggle: Message) -> Element<'a, Message> {
+    button(text(label).size(13.0).color(TEXT).width(Fill).center())
+        .on_press(toggle)
+        .width(Length::Fixed(MENU_LABEL_W))
+        .padding(Padding::new(2.0))
+        .style(style::picker_row(open))
+        .into()
+}
+
+/// Runs one Update check, tagging the result with why it ran so that
+/// [`update::outcome`] can decide what may be shown.
+fn update_check_task(trigger: update::Trigger) -> Task<Message> {
+    Task::perform(update::check(), move |result| Message::UpdateCheckDone {
+        trigger,
+        result,
+    })
+}
 
 fn field_label<'a>(label: &'a str) -> Element<'a, Message> {
     text(label).size(12.0).color(TEXT_DIM).into()
