@@ -24,13 +24,26 @@ png = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# Verifying a downloaded Artifact against the Release's SHA256SUMS. With
+# nothing code-signed this is the only integrity check there is: it does not
+# defend against someone who controls the Release, since they would control the
+# checksums too, but it catches a truncated or corrupted download and a
+# tampered hop on the way.
+sha2 = "0.10"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
 
-# Only for `attach_parent_console` in main.rs: a GUI subsystem release build has
-# no console, so `--version` has to borrow the parent terminal's to print
-# anything at all.
+# Two Win32 calls, both in main.rs. `Win32_Foundation` and `Win32_System_Console`
+# are for `attach_parent_console`: a GUI subsystem release build has no console,
+# so `--version` has to borrow the parent terminal's to print anything at all.
+# `Win32_System_Recovery` is for `register_for_restart`, which tells the Restart
+# Manager how to start Log Lens again after a silent in-app Update has closed
+# it.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Recovery",
+] }
 
 # Compiles the icon and the version information block into the exe. Build
 # scripts run on the host, so this is gated on the host being Windows, matching

@@ -74,8 +74,9 @@ _Avoid_: page size, batch size
 
 **Menu bar**:
 A strip across the top of the window holding application-wide actions, grouped as
-menus (File, View). Always present, independent of which Saved Search is open.
-`File` opens a dropdown with `Settings`; `View` is still inert.
+menus (File, View, Help). Always present, independent of which Saved Search is
+open. `File` opens a dropdown with `Settings`; `Help` opens one with `Check for
+updates…` and `About`; `View` is still inert.
 _Avoid_: toolbar, ribbon
 
 **Settings window**:
@@ -185,6 +186,14 @@ Asking GitHub whether a Release newer than the running version exists. Happens
 at most once a day on startup, and on demand from the Help menu. Pre-releases
 are never offered.
 _Avoid_: version check, poll
+
+**Update banner**:
+The strip below the Menu bar that appears when an Update check finds a newer
+Release: the version, its notes, and what this copy may do about it — an Update
+button on an installer-managed copy, a link to the Release for a Portable one.
+Also where a failed Update is reported, since the user pressed the button that
+started it. Dismissing it hides it for the session, not for good.
+_Avoid_: notification, toast, update dialog
 
 **Update** (verb):
 Replacing the running copy with a newer Release by running that Release's own

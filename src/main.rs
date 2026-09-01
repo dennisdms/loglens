@@ -21,6 +21,7 @@ mod tab;
 mod update;
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use iced::widget::scrollable::RelativeOffset;
 use iced::widget::svg::Handle;
@@ -94,6 +95,11 @@ pub fn main() -> iced::Result {
     if handle_cli_flags() {
         return Ok(());
     }
+
+    // Anything a previous run's Update left in the temp directory, cleared
+    // before this run can create one of its own.
+    update::clean_stale_downloads();
+    register_for_restart();
 
     // A daemon rather than a plain application: Settings opens in its own OS
     // window, and only `daemon`'s `view` / `title` are handed the `window::Id`
@@ -222,6 +228,43 @@ fn attach_parent_console() {
 #[cfg(not(windows))]
 fn attach_parent_console() {}
 
+/// Tells Windows how to start Log Lens again after the Restart Manager has
+/// closed it.
+///
+/// This is the other half of the Windows Update path. `update::apply` spawns
+/// the Release's installer with `/SILENT`, and `CloseApplications=yes` /
+/// `RestartApplications=yes` in `packaging/windows/loglens.iss` have Setup ask
+/// the Restart Manager to close Log Lens — Windows will not overwrite a
+/// running `.exe` — and to bring it back once the new files are in place.
+///
+/// The Restart Manager restarts a process it closed by running the command
+/// line that process registered here. Registering is what makes the relaunch
+/// something Log Lens has asked for and can rely on, rather than something the
+/// Restart Manager may or may not manage on its own; "the app closed itself
+/// during an update and never came back" is the one outcome the silent path
+/// must not have.
+///
+/// A null command line means "restart me with no arguments", which is exactly
+/// how the Start-menu shortcut starts it. Flags of 0 mean "restart for any
+/// reason", which includes the patching this exists for.
+///
+/// Best effort: the `HRESULT` is deliberately dropped. There is nothing a user
+/// could do about a failure to register, and the cost of one is a relaunch
+/// they can do by hand.
+#[cfg(windows)]
+fn register_for_restart() {
+    use windows_sys::Win32::System::Recovery::RegisterApplicationRestart;
+
+    // SAFETY: a plain FFI call. A null command line is documented as "restart
+    // with no command-line arguments"; nothing here is borrowed or freed.
+    let _ = unsafe { RegisterApplicationRestart(std::ptr::null(), 0) };
+}
+
+/// Only Windows has a Restart Manager. Linux Updates hand over to the new
+/// binary themselves (`update::restart`).
+#[cfg(not(windows))]
+fn register_for_restart() {}
+
 /// The X11 `WM_CLASS` / Wayland `app_id` for every Log Lens window. Desktop
 /// environments key alt-tab grouping, the taskbar label, and the `.desktop`
 /// match off this, so it stays constant across windows. It is the
@@ -334,10 +377,36 @@ struct LogLens {
     /// Whether an Update check is in flight, so `Check for updates\u{2026}` can
     /// say so and go inert while it is.
     checking_for_updates: bool,
+    /// How this copy of Log Lens was installed, and therefore whether it may
+    /// replace itself.
+    ///
+    /// Decided once, at startup, and never asked again. It reads the Install
+    /// flavour marker off disk, which the banner (redrawn every frame) has no
+    /// business doing \u{2014} and on Linux an Update unlinks the running binary
+    /// partway through, after which its own path can no longer be read back.
+    flavour: update::Flavour,
+    /// How far an Update the user started from the banner has got. `None`
+    /// until they press it.
+    updating: Option<Updating>,
     /// Whether the About dialog is open.
     about_open: bool,
     /// Editable copy of `config.es`, backing the Settings window's fields.
     settings_draft: SettingsDraft,
+}
+
+/// How far the Update the user started from the banner has got.
+///
+/// An Update is only ever started by pressing a button, so unlike an Update
+/// *check* there is no silent half to it: every state here is on screen, and a
+/// failure stays on screen with a way to reach the releases page. The
+/// check-time silent/loud split lives in `update::outcome` and stops there.
+#[derive(Debug, Clone)]
+enum Updating {
+    /// Downloading and verifying, or waiting on an installer that is now
+    /// running. The banner says which and the Update button goes away.
+    Busy(&'static str),
+    /// It failed, and the reason is shown until the banner is dismissed.
+    Failed(String),
 }
 
 /// Draft text for the Settings window's Elasticsearch page. Committed back into
@@ -632,6 +701,16 @@ enum Message {
     },
     /// Hide the Update banner for the rest of the session.
     DismissUpdateBanner,
+    /// The banner's Update button: download this Release's Artifact for this
+    /// platform, verify it against the Release's `SHA256SUMS`, and run it.
+    /// Only ever reachable on an installer-managed copy.
+    ApplyUpdate,
+    /// An Update got as far as a background task can take it, or failed
+    /// trying.
+    UpdateApplied(Result<update::Applied, String>),
+    /// Open the Release's page: the only route a Portable copy is offered, and
+    /// the way out of a failed Update.
+    OpenReleasesPage,
     /// Open the About dialog from the "Help" dropdown.
     OpenAbout,
     /// Close the About dialog.
@@ -687,6 +766,8 @@ impl LogLens {
             help_menu_open: false,
             new_release: None,
             checking_for_updates: due,
+            flavour: update::flavour(),
+            updating: None,
             about_open: false,
         };
 
@@ -1585,6 +1666,10 @@ impl LogLens {
                         // Clears the manual path's "Checking\u{2026}" line; the
                         // banner is the answer now.
                         self.status = None;
+                        // A newer Release than the one an earlier Update failed
+                        // on: that failure is about a Release nobody is being
+                        // offered any more.
+                        self.updating = None;
                         self.new_release = Some(release);
                     }
                     update::Outcome::UpToDate => {
@@ -1603,7 +1688,69 @@ impl LogLens {
                     update::Outcome::Silent => {}
                 }
             }
-            Message::DismissUpdateBanner => self.new_release = None,
+            Message::DismissUpdateBanner => {
+                self.new_release = None;
+                self.updating = None;
+            }
+            Message::ApplyUpdate => {
+                // A Portable copy is shown no Update button at all; this is the
+                // same rule stated where it is enforced rather than only where
+                // it is drawn.
+                let Some(exe) = self.flavour.installed_exe().map(Path::to_path_buf) else {
+                    return Task::none();
+                };
+                let Some(release) = self.new_release.clone() else {
+                    return Task::none();
+                };
+                if matches!(self.updating, Some(Updating::Busy(_))) {
+                    return Task::none();
+                }
+
+                // Persist before starting: from here on this process ends
+                // without warning. On Windows the Restart Manager closes Log
+                // Lens, forcefully if it does not go quietly; on Linux the
+                // hand-over replaces the process image outright. Neither gives
+                // the app a chance to write anything on the way out.
+                //
+                // It writes what is already on disk — every save the user asked
+                // for has happened at the moment they asked for it, and this
+                // touches nothing else: an Update never goes near Connections,
+                // Saved Searches, settings or the keyring. Its own failure is
+                // swallowed, because nobody asked for this save and it must not
+                // take the place of the Update they are waiting on.
+                let _ = config::save(&self.config);
+
+                self.updating = Some(Updating::Busy("Downloading\u{2026}"));
+                return Task::perform(update::apply(release, exe), Message::UpdateApplied);
+            }
+            Message::UpdateApplied(result) => match result {
+                // Linux: the new version is installed and this process hands
+                // over to it. `restart` replaces the process image, so it only
+                // returns when the hand-over itself failed.
+                Ok(update::Applied::HandOver(exe)) => {
+                    self.updating = Some(Updating::Failed(update::restart(&exe)));
+                }
+                // Windows: the installer is running and the Restart Manager
+                // will close and reopen the app. Nothing left to do but say so
+                // until it does.
+                Ok(update::Applied::InstallerRunning) => {
+                    self.updating = Some(Updating::Busy(
+                        "Installing\u{2026} Log Lens will close and reopen.",
+                    ));
+                }
+                // Always shown, whatever went wrong: the user pressed a button
+                // and is owed an answer, and the banner keeps a route to the
+                // releases page beside it.
+                Err(err) => self.updating = Some(Updating::Failed(err)),
+            },
+            Message::OpenReleasesPage => {
+                if let Some(release) = &self.new_release
+                    && let Err(err) = update::open_in_browser(&release.html_url)
+                {
+                    // No browser to hand: the address itself is the fallback.
+                    self.status = Some(format!("{err} \u{2014} open {}", release.html_url));
+                }
+            }
             Message::OpenAbout => {
                 self.help_menu_open = false;
                 self.about_open = true;
@@ -2975,10 +3122,11 @@ impl LogLens {
     /// Dismissing hides it for the rest of the session only \u{2014} see
     /// `new_release`.
     ///
-    /// The trailing row deliberately has room for one more control: the Update
-    /// button belonging to the Update-applying step goes between the spacer and
-    /// the \u{00d7}. It is not here yet because nothing can apply an Update yet,
-    /// and a button that does nothing is worse than none.
+    /// What it offers depends on the Install flavour. An installer-managed copy
+    /// gets an Update button. A Portable copy gets the releases page and no
+    /// button: running the installer from a copy on a USB stick would install a
+    /// second one into `%LOCALAPPDATA%` while the user carried on running this
+    /// one, so the honest offer is the download.
     fn update_banner(&self) -> Option<Element<'_, Message>> {
         let release = self.new_release.as_ref()?;
 
@@ -3005,11 +3153,81 @@ impl LogLens {
             );
         }
 
+        let portable = self.flavour.installed_exe().is_none();
+        if portable {
+            left = left.push(
+                text(
+                    "This copy is portable, so it does not update itself. \
+                     Download the new version from the releases page.",
+                )
+                .size(12.0)
+                .color(Color {
+                    a: 0.85,
+                    ..Color::WHITE
+                }),
+            );
+        }
+
+        // A failed download or a failed apply is always shown: the user pressed
+        // a button, and unlike a background Update check nobody is being
+        // spared an interruption they did not ask for.
+        if let Some(Updating::Failed(err)) = &self.updating {
+            left = left.push(
+                text(format!("Update failed: {err}"))
+                    .size(12.0)
+                    .color(ERR_RED),
+            );
+        }
+
+        // The Update button belongs to installer-managed copies only, and goes
+        // away while one is running so it cannot be pressed twice.
+        let mut trailing: Vec<Element<'_, Message>> = Vec::new();
+        if let Some(Updating::Busy(step)) = &self.updating {
+            trailing.push(
+                text(*step)
+                    .size(12.0)
+                    .color(Color {
+                        a: 0.85,
+                        ..Color::WHITE
+                    })
+                    .into(),
+            );
+        } else if !portable {
+            // Pressing it again after a failure is the user's call to make;
+            // what must never happen is a retry they did not ask for.
+            let again = matches!(self.updating, Some(Updating::Failed(_)));
+            trailing.push(
+                button(
+                    text(if again { "Try again" } else { "Update" })
+                        .size(12.0)
+                        .color(TEXT),
+                )
+                .on_press(Message::ApplyUpdate)
+                .padding(Padding::new(4.0).left(12.0).right(12.0))
+                .style(style::icon_button(false))
+                .into(),
+            );
+        }
+
+        // The way to the Release for anyone who cannot, or could not, be
+        // updated in place. Every failure path keeps this beside it.
+        if portable || matches!(self.updating, Some(Updating::Failed(_))) {
+            trailing.push(
+                button(text("Releases page").size(12.0).color(TEXT))
+                    .on_press(Message::OpenReleasesPage)
+                    .padding(Padding::new(4.0).left(12.0).right(12.0))
+                    .style(style::icon_button(false))
+                    .into(),
+            );
+        }
+
         Some(
             container(
                 row![
                     left.width(Fill),
                     space().width(12.0),
+                    row(trailing).spacing(6.0).align_y(iced::Alignment::Center),
+                    space().width(8.0),
                     button(text("\u{00d7}").size(14.0).color(Color::WHITE))
                         .on_press(Message::DismissUpdateBanner)
                         .padding(Padding::new(2.0).left(6.0).right(6.0))
