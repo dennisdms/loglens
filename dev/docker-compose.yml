@@ -1,7 +1,8 @@
 name: loglens-dev
 
 # A throwaway Elasticsearch cluster plus a log generator, for exercising
-# Log Lens against a live cluster. See dev/README.md.
+# Log Lens against a live cluster. The generator fills several data streams
+# with differently shaped logs (multi-line, CRLF, very long). See dev/README.md.
 
 services:
   elasticsearch:
@@ -33,8 +34,9 @@ services:
         condition: service_healthy
     environment:
       - ES_URL=http://elasticsearch:9200
-      - DATA_STREAM=logs-loglens
-      - RATE=20            # hits per tick
+      - DATA_STREAM_PREFIX=logs-loglens
+      # - STREAMS=app,nginx,java,winevent,payloads   # subset; default is all
+      - RATE=20            # hits per tick, spread across the streams
       - INTERVAL=3         # seconds per tick
       - BACKFILL_MINUTES=60
     volumes:
