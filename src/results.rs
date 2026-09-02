@@ -77,6 +77,20 @@ pub const DETAIL_MAX_H: f32 = 680.0;
 /// row must be the same height for scroll maths to line up.
 pub const ROW_H: f32 = 22.0;
 
+/// Font size Hit text renders at, in Table and Text mode alike. The one input
+/// [`crate::advance_cache::AdvanceCache::shared`] is built from.
+pub const CELL_TEXT_SIZE: f32 = 12.0;
+
+/// A cell-text truncation budget for a `Length::Fill` table Column, in
+/// pixels, wider than any real viewport. `hit_table` doesn't track live
+/// window width, so the flexible last Column can't ask
+/// [`crate::advance_cache::AdvanceCache`] for its true available width — this
+/// stands in as a safe upper bound instead: nothing a real window could show
+/// is wider than this, so nothing visible is ever cut off, while a
+/// pathologically long Hit still gets bounded rather than shaping its entire
+/// length every scroll frame.
+pub const FILL_COLUMN_MAX_W: f32 = 4000.0;
+
 /// Default table Column width, in pixels, and the range a drag-resize is
 /// clamped to. The timestamp Column starts wider than the rest.
 pub const COL_DEFAULT_W: f32 = 200.0;

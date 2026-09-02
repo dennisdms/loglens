@@ -7,8 +7,18 @@ edition = "2024"
 # `serde` is on for one field: `Config.last_update_check`, an RFC 3339
 # `DateTime<Utc>` in the config file.
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
+# Pinned to the exact version iced_graphics 0.14 depends on (see Cargo.lock):
+# `advance_cache.rs` shapes single grapheme clusters through iced's own global
+# `FontSystem` (`iced::advanced::graphics::text::font_system()`) rather than
+# opening a second one, so its cosmic-text types must be the same ones iced's
+# renderer uses.
+cosmic-text = "=0.15.0"
 dirs = "6.0.0"
-iced = { version = "0.14", features = ["tokio", "svg"] }
+# `advanced` exposes `iced::advanced::graphics::text::{font_system, measure}` —
+# iced's own global cosmic-text `FontSystem` and its buffer-measuring helper —
+# which `advance_cache.rs` shapes single grapheme clusters through, rather
+# than opening a second `FontSystem` of its own.
+iced = { version = "0.14", features = ["tokio", "svg", "advanced"] }
 keyring = { version = "3", features = [
     "apple-native",
     "windows-native",
@@ -31,6 +41,10 @@ serde_json = "1.0.151"
 # tampered hop on the way.
 sha2 = "0.10"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+# Grapheme-cluster segmentation for `advance_cache.rs`, per UAX #29 — already a
+# transitive dependency of cosmic-text, pulled in directly here for the same
+# reason.
+unicode-segmentation = "1"
 
 # Two Win32 calls, both in main.rs. `Win32_Foundation` and `Win32_System_Console`
 # are for `attach_parent_console`: a GUI subsystem release build has no console,
