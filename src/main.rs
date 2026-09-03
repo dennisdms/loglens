@@ -2665,11 +2665,25 @@ impl LogLens {
                 rt.scroll_y = 0.0;
                 rt.total_hits = TotalHits::Loading;
             }
+            let repeat = perf::hits_repeat();
             return Task::perform(
                 async move {
                     std::fs::read_to_string(&path)
                         .map_err(|e| e.to_string())
                         .and_then(|body| es::parse_page(&body))
+                        .map(|mut page| {
+                            // Stand in for a set `repeat`× the size by
+                            // concatenating the fixture onto itself, rather
+                            // than checking in a `repeat`× bigger file.
+                            if repeat > 1 {
+                                let base = page.hits.clone();
+                                page.hits.reserve(base.len() * (repeat - 1));
+                                for _ in 1..repeat {
+                                    page.hits.extend(base.iter().cloned());
+                                }
+                            }
+                            page
+                        })
                 },
                 move |result| Message::PageLoaded {
                     run_id,

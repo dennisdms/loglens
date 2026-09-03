@@ -47,8 +47,14 @@ p99/max for `update`, `view`, and the windowed row-build loop, plus the
 realized frame interval. Runs are comparable, so item 1 (and anything else)
 can be A/B'd properly.
 
-First numbers, release build, `nginx-800.json`, Table mode, this dev machine
-(`WINDOW_BUFFER` 40, i.e. pre-item-1 — see item 1 for the after):
+The default run is bigger now than when the numbers below were taken:
+`LOGLENS_HITS_REPEAT` concatenates the fixture onto itself, default 10 (≈ 8k
+rows from `nginx-800.json`), so the same 12s scroll moves the row window 10×
+further per frame. The fixture files and the 12s duration are unchanged.
+
+First numbers, release build, `nginx-800.json` (no repeat), Table mode, this
+dev machine (`WINDOW_BUFFER` 40, i.e. pre-item-1 — see item 1 for the
+after):
 
 - `perf.frame_interval` p50 16.7ms, p99 17.6ms — **60Hz, no missed frames.**
 - `view` p50 1.3ms, `view.hit_table_rows` p50 1.2ms — the row loop is ~94%

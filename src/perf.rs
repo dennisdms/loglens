@@ -42,13 +42,37 @@ pub fn scroll_harness() -> bool {
 }
 
 /// How long the scripted scroll should take, top to bottom, in seconds.
-/// `LOGLENS_PERF_SCROLL_SECS`, default 12.
+/// `LOGLENS_PERF_SCROLL_SECS`, default 12. Kept long on purpose: the harness
+/// is for A/B'ing a change, which needs a fat sample behind p99 / max and
+/// enough runway to leave startup transients (first-frame shaping, font-
+/// system load, GPU warmup) behind. The scroll gets *faster* per frame from
+/// a larger loaded set (`LOGLENS_HITS_REPEAT`) — 10× the rows over the same
+/// 12s is a 10× scroll velocity — not from shrinking this.
 pub fn scroll_secs() -> f32 {
     std::env::var("LOGLENS_PERF_SCROLL_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|s: &f32| *s > 0.0)
         .unwrap_or(12.0)
+}
+
+/// How many times to concatenate the loaded fixture onto itself, so a small
+/// checked-in file stands in for a result set that many times larger without
+/// a bigger blob in git. `LOGLENS_HITS_REPEAT`, default 10 — the standard
+/// harness run is the ~10× set. Set it to 1 for the file as-is. Values below
+/// 1 are treated as 1. Only consulted when `LOGLENS_HITS` is set.
+///
+/// The copies are *identical* — 10× `nginx-800.json` is 800 distinct Hits,
+/// not 8000. `AdvanceCache` doesn't care (it keys per grapheme cluster, warm
+/// almost immediately on any data), but a future per-Hit render / height
+/// cache (followups items 3/4/6) keyed by Hit *content* rather than position
+/// would show a hit rate a real result set of the same size wouldn't give.
+pub fn hits_repeat() -> usize {
+    std::env::var("LOGLENS_HITS_REPEAT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n: &usize| *n >= 1)
+        .unwrap_or(10)
 }
 
 /// A file of Hits to load instead of querying Elasticsearch — a saved

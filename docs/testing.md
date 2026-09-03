@@ -38,7 +38,12 @@ LOGLENS_PERF_MODE=table \
 ```
 
 A window opens, scrolls itself top to bottom, prints a table to stderr, and
-exits.
+exits. By default the fixture is loaded **10×** (`LOGLENS_HITS_REPEAT`) — ~8k
+rows from the 800-row file — so the 12s scroll covers 10× the content at 10×
+the per-frame velocity, jumping the row window far enough each frame to
+actually stress the renderer. The 12s stays long on purpose: A/B'ing a
+change needs a fat sample behind p99 / max. Set `LOGLENS_HITS_REPEAT=1` for
+the file as-is.
 
 ### Environment variables
 
@@ -48,6 +53,7 @@ exits.
 | `LOGLENS_PERF_SCROLL=1` | run the scripted scroll (implies `LOGLENS_PERF`) |
 | `LOGLENS_PERF_SCROLL_SECS=N` | scroll duration, top to bottom (default 12) |
 | `LOGLENS_HITS=<path>` | load Hits from a saved `_search` response instead of querying a cluster |
+| `LOGLENS_HITS_REPEAT=N` | concatenate that fixture onto itself `N` times (default 10) — a small checked-in file standing in for an `N`× larger result set. `1` = the file as-is |
 | `LOGLENS_PERF_SEARCH=<id or name>` | which Saved Search to open (default: the first one configured) |
 | `LOGLENS_PERF_MODE=table\|text` | force the tab's Layout mode, overriding the Saved Search's |
 
@@ -64,6 +70,17 @@ runs.
 `benches/fixtures/*.json` are saved `_search` responses (`hits.hits[]` with
 `_source` and `sort`) captured once from the dev cluster and checked into git,
 so a run is byte-identical every time and needs no cluster.
+
+They're kept small and representative rather than large — each already spans
+the full spread of line lengths and special characters its stream produces.
+To benchmark against a bigger result set, don't grow the file: the loader
+concatenates it onto itself `LOGLENS_HITS_REPEAT` times (default 10). The
+copies are **identical**, though — 10× `nginx-800.json` is 800 distinct
+Hits, not 8000. `AdvanceCache` is unaffected (it keys per grapheme cluster),
+but if a future per-Hit render / height cache (followups items 3/4/6) is
+keyed by Hit *content* rather than position, it will look better here than
+against a real result set the same size. Regenerate a genuinely larger
+fixture from the dev cluster if that ever matters.
 
 - `nginx-800.json` — 800 `logs-loglens-nginx` Hits; ~15% carry a several-KB
   query string, ~8% a huge user agent. The Table-mode case item 0 is about.
@@ -84,11 +101,15 @@ curl -s -XPOST 'localhost:9200/logs-loglens-nginx/_search?filter_path=hits.hits.
 ```
 metric                        n        p50        p90        p99        max       mean
 --------------------------------------------------------------------------------------
-perf.frame_interval         722   16.694ms   16.790ms   18.402ms   51.584ms   16.618ms
-update                     1450    0.001ms    0.001ms    0.002ms    0.041ms    0.001ms
-view                       1447    0.733ms    0.799ms    0.932ms    1.643ms    0.733ms
-view.hit_table_rows        1445    0.688ms    0.751ms    0.876ms    1.606ms    0.688ms
+perf.frame_interval         721   16.677ms   16.823ms   19.234ms   34.107ms   16.522ms
+update                     1451    0.001ms    0.001ms    0.002ms    0.043ms    0.001ms
+view                       1447    0.800ms    0.935ms    1.190ms    2.136ms    0.811ms
+view.hit_table_rows        1444    0.753ms    0.882ms    1.091ms    2.095ms    0.764ms
 ```
+
+(`nginx-800.json` × 10, Table mode, default 12s scroll, this dev machine —
+Table mode stays 60Hz here even at ~8k rows; the reproducible stutter is
+raw-text mode, item 5.)
 
 - **`perf.frame_interval`** — wall time between rendered frames. Near 16.7ms
   with a tight p99 means 60Hz with no missed frames. p99 / max well above the
