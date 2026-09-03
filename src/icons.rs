@@ -28,7 +28,6 @@ icon!(REFRESH => "refresh.svg");
 icon!(WARNING => "warning-triangle.svg");
 icon!(TABLE => "table.svg");
 icon!(RAW_TEXT => "raw-text.svg");
-icon!(HIGHLIGHT_RULES => "highlight-rules.svg");
 icon!(FORMAT => "format.svg");
 
 /// The window / taskbar icon: a magnifier over a dim log stream, one row in

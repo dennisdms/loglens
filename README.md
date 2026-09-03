@@ -3,8 +3,7 @@
 A cross-platform desktop IDE for browsing logs, built in Rust with
 [iced](https://iced.rs). Its first iteration is built around querying
 Elasticsearch: you configure a Connection, save named searches against it, and
-read the results as a virtualized table or as templated raw text, with
-highlight rules colouring what matters.
+read the results as a virtualized table or as templated raw text.
 
 The vocabulary this document uses — Release, Artifact, Install flavour, Update
 check — is defined in [`CONTEXT.md`](CONTEXT.md).

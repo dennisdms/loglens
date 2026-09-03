@@ -16,7 +16,6 @@ mod line;
 mod perf;
 mod results;
 mod results_view;
-mod rules;
 mod search;
 mod secrets;
 mod style;
@@ -39,7 +38,6 @@ use config::{Auth, Config, Connection};
 use config::{TimeUnit, TimeframeChoice, TimeframeMode};
 use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
 use results::{Paging, ResultTab, RunState, TimeframeDraft, TotalHits};
-use rules::{MatcherKind, RulesForm};
 use search::{Fields, SearchForm};
 use style::{ACCENT, BG, BORDER, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
 use tab::Tab;
@@ -329,8 +327,6 @@ struct LogLens {
     /// The Search settings modal, when editing an existing Saved Search's
     /// name / Target / timestamp field.
     search_settings: Option<SearchForm>,
-    /// The Highlight rules modal, when open.
-    rules_form: Option<RulesForm>,
     /// A prompt for a secret the keyring can't give us this session.
     secret_prompt: Option<SecretPrompt>,
     /// Transient status line (config save failures, keyring notices).
@@ -631,24 +627,6 @@ enum Message {
     CloseFormat(u64),
     /// Discard the template draft and close the "Format" modal.
     FormatCancel(u64),
-    // Highlight rules modal
-    OpenRulesForm,
-    RulesFormCancel,
-    RulesFormSave,
-    RulesEditRule(usize),
-    RulesDeleteRule(usize),
-    RulesToggleRule(usize),
-    RulesMoveRule(usize, isize),
-    RulesDraftName(String),
-    RulesDraftKind(MatcherKind),
-    RulesDraftPath(String),
-    RulesDraftOp(line::Op),
-    RulesDraftValue(String),
-    RulesDraftPattern(String),
-    RulesDraftFg(String),
-    RulesDraftBg(String),
-    RulesDraftCommit,
-    RulesDraftReset,
     // Hit detail panel
     HitClicked(u64, usize),
     CloseHitDetail,
@@ -782,7 +760,6 @@ impl LogLens {
             expanded,
             connection_form: None,
             search_settings: None,
-            rules_form: None,
             secret_prompt: None,
             status: None,
             id_seq: 0,
@@ -1431,89 +1408,6 @@ impl LogLens {
                 if let Some(rt) = self.result_mut(run_id) {
                     rt.template_draft = rt.template.clone();
                     rt.format_open = false;
-                }
-            }
-
-            Message::OpenRulesForm => {
-                self.rules_form = Some(RulesForm::new(self.config.rules.clone()));
-            }
-            Message::RulesFormCancel => self.rules_form = None,
-            Message::RulesFormSave => {
-                if let Some(form) = self.rules_form.take() {
-                    self.config.rules = form.rules;
-                    if let Err(err) = config::save(&self.config) {
-                        self.status = Some(format!("Could not save config: {err}"));
-                    }
-                }
-            }
-            Message::RulesEditRule(i) => {
-                if let Some(form) = &mut self.rules_form {
-                    form.load(i);
-                }
-            }
-            Message::RulesDeleteRule(i) => {
-                if let Some(form) = &mut self.rules_form {
-                    form.delete(i);
-                }
-            }
-            Message::RulesToggleRule(i) => {
-                if let Some(form) = &mut self.rules_form {
-                    form.toggle(i);
-                }
-            }
-            Message::RulesMoveRule(i, delta) => {
-                if let Some(form) = &mut self.rules_form {
-                    form.move_rule(i, delta);
-                }
-            }
-            Message::RulesDraftName(v) => {
-                if let Some(form) = &mut self.rules_form {
-                    form.draft_name = v;
-                }
-            }
-            Message::RulesDraftKind(kind) => {
-                if let Some(form) = &mut self.rules_form {
-                    form.draft_kind = kind;
-                }
-            }
-            Message::RulesDraftPath(v) => {
-                if let Some(form) = &mut self.rules_form {
-                    form.draft_path = v;
-                }
-            }
-            Message::RulesDraftOp(op) => {
-                if let Some(form) = &mut self.rules_form {
-                    form.draft_op = op;
-                }
-            }
-            Message::RulesDraftValue(v) => {
-                if let Some(form) = &mut self.rules_form {
-                    form.draft_value = v;
-                }
-            }
-            Message::RulesDraftPattern(v) => {
-                if let Some(form) = &mut self.rules_form {
-                    form.draft_pattern = v;
-                }
-            }
-            Message::RulesDraftFg(v) => {
-                if let Some(form) = &mut self.rules_form {
-                    form.draft_fg = v;
-                }
-            }
-            Message::RulesDraftBg(v) => {
-                if let Some(form) = &mut self.rules_form {
-                    form.draft_bg = v;
-                }
-            }
-            Message::RulesDraftCommit => {
-                if let Some(form) = &mut self.rules_form {
-                    form.commit_draft();
-                }
-            }
-            Message::RulesDraftReset => {
-                if let Some(form) = &mut self.rules_form {
-                    form.reset_draft();
                 }
             }
 
@@ -2897,15 +2791,11 @@ impl LogLens {
         if let Some(form) = &self.search_settings {
             layers.push(self.search_settings_modal(form));
         }
-        if let Some(form) = &self.rules_form {
-            layers.push(self.rules_form_modal(form));
-        }
         if let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t))
             && tab.format_open
             && tab.mode == line::LayoutMode::RawText
         {
-            let prepared = line::Prepared::from_rules(&self.config.rules);
-            layers.push(results_view::format_modal(tab, &prepared));
+            layers.push(results_view::format_modal(tab));
         }
         if let Some(prompt) = &self.secret_prompt {
             layers.push(self.secret_prompt_modal(prompt));
@@ -2929,16 +2819,12 @@ impl LogLens {
     fn main_area(&self) -> Element<'_, Message> {
         match self.active_tab.and_then(|t| self.open_tabs.get(t)) {
             Some(Tab::SearchForm(form)) => self.search_form_view(form),
-            Some(Tab::Result(tab)) => {
-                let prepared = line::Prepared::from_rules(&self.config.rules);
-                results_view::result_view(
-                    tab,
-                    &prepared,
-                    self.header_hover,
-                    self.grip_hover,
-                    self.column_drag.as_ref(),
-                )
-            }
+            Some(Tab::Result(tab)) => results_view::result_view(
+                tab,
+                self.header_hover,
+                self.grip_hover,
+                self.column_drag.as_ref(),
+            ),
             None => centered("Open a Saved Search from the sidebar", TEXT_DIM),
         }
     }
@@ -3602,10 +3488,7 @@ impl LogLens {
         // The "Sort fields" popover is *not* pushed inline here — it floats as a
         // stack layer (`sort_fields_popover_overlay`) so opening it never reflows
         // the strips or table below.
-        Some(results_view::result_sort_bar(
-            tab,
-            self.rules_form.is_some(),
-        ))
+        Some(results_view::result_sort_bar(tab))
     }
 
     /// The Search bar shown at the top of the right column, above the options
@@ -3941,200 +3824,6 @@ impl LogLens {
         modal_card(card.into())
     }
 
-    /// The Highlight rules modal: a reorderable list of rules over a sub-form
-    /// for adding or editing one. Save writes the working copy onto
-    /// `Config.rules`; Cancel discards it.
-    fn rules_form_modal<'a>(&'a self, form: &'a RulesForm) -> Element<'a, Message> {
-        let last = form.rules.len().saturating_sub(1);
-
-        let mut list = column![].spacing(4.0);
-        if form.rules.is_empty() {
-            list = list.push(text("No rules yet.").size(11.0).color(TEXT_DIM));
-        }
-        for (i, rule) in form.rules.iter().enumerate() {
-            let summary = match &rule.matcher {
-                line::Matcher::Field { path, op, value } => format!("{path} {op} {value}"),
-                line::Matcher::Text { pattern } => format!("text \u{201c}{pattern}\u{201d}"),
-            };
-            let mut up = button(text("\u{25b4}").size(10.0).color(TEXT_DIM))
-                .padding(1.0)
-                .style(style::bare_button());
-            if i > 0 {
-                up = up.on_press(Message::RulesMoveRule(i, -1));
-            }
-            let mut down = button(text("\u{25be}").size(10.0).color(TEXT_DIM))
-                .padding(1.0)
-                .style(style::bare_button());
-            if i < last {
-                down = down.on_press(Message::RulesMoveRule(i, 1));
-            }
-            list = list.push(
-                row![
-                    checkbox(rule.enabled)
-                        .on_toggle(move |_| Message::RulesToggleRule(i))
-                        .size(13.0),
-                    column![
-                        text(rule.name.clone()).size(12.0).color(TEXT),
-                        text(summary).size(10.0).color(TEXT_DIM),
-                    ]
-                    .spacing(1.0),
-                    space().width(Fill),
-                    swatch(rule.style.fg),
-                    swatch(rule.style.bg),
-                    button(text("Edit").size(11.0).color(ACCENT))
-                        .on_press(Message::RulesEditRule(i))
-                        .padding(2.0)
-                        .style(style::bare_button()),
-                    button(text("\u{00d7}").size(12.0).color(TEXT_DIM))
-                        .on_press(Message::RulesDeleteRule(i))
-                        .padding(2.0)
-                        .style(style::bare_button()),
-                    column![up, down].spacing(0.0),
-                ]
-                .spacing(8.0)
-                .align_y(iced::Alignment::Center),
-            );
-        }
-
-        let kind_btn = |label: &'static str, kind: MatcherKind| {
-            button(text(label).size(11.0).color(TEXT))
-                .on_press(Message::RulesDraftKind(kind))
-                .padding(Padding::new(3.0).left(10.0).right(10.0))
-                .style(style::picker_row(form.draft_kind == kind))
-        };
-
-        let matcher_fields: Element<'a, Message> = match form.draft_kind {
-            MatcherKind::Field => row![
-                text_input("field.path", &form.draft_path)
-                    .on_input(Message::RulesDraftPath)
-                    .size(12.0)
-                    .padding(4.0)
-                    .width(Fill),
-                pick_list(
-                    &line::Op::ALL[..],
-                    Some(form.draft_op),
-                    Message::RulesDraftOp
-                )
-                .text_size(12.0)
-                .padding(4.0),
-                text_input("value", &form.draft_value)
-                    .on_input(Message::RulesDraftValue)
-                    .size(12.0)
-                    .padding(4.0)
-                    .width(Length::Fixed(120.0)),
-            ]
-            .spacing(6.0)
-            .align_y(iced::Alignment::Center)
-            .into(),
-            MatcherKind::Text => text_input("substring to highlight", &form.draft_pattern)
-                .on_input(Message::RulesDraftPattern)
-                .size(12.0)
-                .padding(4.0)
-                .width(Fill)
-                .into(),
-        };
-
-        let colour_field = |title: &'static str, val: &'a str, msg: fn(String) -> Message| {
-            column![
-                text(title).size(10.0).color(TEXT_DIM),
-                row![
-                    text_input("#rrggbb", val)
-                        .on_input(msg)
-                        .size(12.0)
-                        .padding(4.0)
-                        .width(Length::Fixed(110.0)),
-                    swatch(line::parse_hex(val.trim())),
-                ]
-                .spacing(6.0)
-                .align_y(iced::Alignment::Center),
-            ]
-            .spacing(2.0)
-        };
-
-        let sub_form = column![
-            text(if form.editing.is_some() {
-                "Edit rule"
-            } else {
-                "Add rule"
-            })
-            .size(12.0)
-            .color(TEXT_DIM),
-            text_input("Rule name", &form.draft_name)
-                .on_input(Message::RulesDraftName)
-                .size(12.0)
-                .padding(4.0)
-                .width(Fill),
-            row![
-                kind_btn("Field", MatcherKind::Field),
-                kind_btn("Text", MatcherKind::Text),
-            ]
-            .spacing(1.0),
-            matcher_fields,
-            row![
-                colour_field("Foreground", &form.draft_fg, Message::RulesDraftFg),
-                colour_field("Background", &form.draft_bg, Message::RulesDraftBg),
-            ]
-            .spacing(12.0),
-            row![
-                button(
-                    text(if form.editing.is_some() {
-                        "Update"
-                    } else {
-                        "Add"
-                    })
-                    .size(12.0)
-                    .color(TEXT)
-                )
-                .on_press(Message::RulesDraftCommit)
-                .padding(Padding::new(4.0).left(12.0).right(12.0))
-                .style(style::picker_row(true)),
-                button(text("Clear").size(12.0).color(TEXT_DIM))
-                    .on_press(Message::RulesDraftReset)
-                    .padding(4.0)
-                    .style(style::bare_button()),
-            ]
-            .spacing(8.0),
-        ]
-        .spacing(6.0);
-
-        let mut card = column![
-            text("Highlight rules").size(16.0).color(TEXT),
-            text(
-                "Applied to every Result Tab, in order. The first matching field \
-                 rule colours the whole line; text rules layer on top."
-            )
-            .size(11.0)
-            .color(TEXT_DIM),
-            space().height(2.0),
-            list,
-            rule::horizontal(1.0),
-            sub_form,
-        ]
-        .spacing(8.0)
-        .width(Fill);
-
-        if let Some(err) = &form.error {
-            card = card.push(text(err.clone()).size(12.0).color(ERR_RED));
-        }
-        card = card.push(space().height(4.0));
-        card = card.push(
-            row![
-                space().width(Fill),
-                button(text("Cancel").size(13.0).color(TEXT_DIM))
-                    .on_press(Message::RulesFormCancel)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::bare_button()),
-                button(text("Save").size(13.0).color(TEXT))
-                    .on_press(Message::RulesFormSave)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::picker_row(true)),
-            ]
-            .spacing(8.0),
-        );
-
-        modal_card(card.into())
-    }
-
     // --- Result tab view -----------------------------------------------
     //
     // The Hit table, raw text mode, Hit detail panel, header menu, Sort
@@ -4437,15 +4126,6 @@ fn test_result(state: &TestState) -> Element<'_, Message> {
             .color(ERR_RED)
             .into(),
     }
-}
-
-/// A small colour chip for the Highlight rules modal: the colour itself, or
-/// `PANEL_ALT` when unset / unparsed.
-fn swatch<'a>(color: Option<Color>) -> Element<'a, Message> {
-    let fill = color.unwrap_or(PANEL_ALT);
-    container(space().width(14.0).height(14.0))
-        .style(move |_| style::panel(fill))
-        .into()
 }
 
 /// Centres `content` in a panel card over a dimmed backdrop.

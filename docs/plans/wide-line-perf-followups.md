@@ -17,10 +17,13 @@ cited there.
 ## What's already true — don't re-litigate or accidentally revert
 
 - Cell text in **Table mode** is truncated to its column's pixel width
-  before being handed to `text`/`rich_text` — see `part_widget` and
+  before being handed to a `text` widget — see `part_widget` and
   `hit_table` in `src/results_view.rs`, backed by
   `AdvanceCache::take_width` in `src/advance_cache.rs`. Measured 110 rows ×
   200px column: **10.5ms → 103µs**.
+- **Highlight rules were removed** (item 2). A `Part` is plain text;
+  everything renders through a `text` widget — no `rich_text`, no
+  `Segment`/`Style`, no `matching` pass.
 - **Raw text mode is deliberately still untruncated.** It has real
   horizontal scrolling with no tracked offset; truncating blind would hide
   content a user could otherwise reach. This is item 6 below, not a bug.
@@ -65,16 +68,15 @@ after):
   (layout/draw), i.e. item 5, and a profiler pass is the next step there.
 
 So on this hardware Table-mode scrolling is already smooth; the reproducible
-stutter is raw-text mode (item 5), or needs heavier data / rules / slower
-hardware to show in Table mode. Confirm on the machine that actually stutters
-before picking up items 2–4.
+stutter is raw-text mode (item 5), or needs heavier data / slower hardware to
+show in Table mode. Confirm on the machine that actually stutters before
+picking up items 3–4.
 
 Still open under item 0:
 
-- **Criterion microbenchmarks** for `line::render` / `take_width` / the rules
-  path (isolated, headless, statistical before/after). Needs a `src/lib.rs`
-  split first — the modules are only reachable from the `main.rs` bin crate
-  today. Not done.
+- **Criterion microbenchmarks** for `line::render` / `take_width` (isolated,
+  headless, statistical before/after). Needs a `src/lib.rs` split first — the
+  modules are only reachable from the `main.rs` bin crate today. Not done.
 - **Profiler pass** (`samply record` over the scripted scroll) to attribute
   the raw-text-mode frame time to a specific cosmic-text / wgpu call.
 
@@ -109,22 +111,21 @@ cure.
 ¹ raw-text "before" is the same-machine baseline recorded under item 0
 above, not a fresh A/B on the reverted constant.
 
-## 2. Highlight rules will be the next dominant cost, the moment any exist
+## 2. Highlight rules — DONE (feature removed)
 
-The current config has `"rules": []`, so this isn't today's problem — but
-it's a landmine. Measured earlier (see git history / conversation): with a
-single enabled text rule, rendering a 110-row window went from **80µs to
-900µs** — an 11× jump. `src/line.rs`, `matching::apply`
-(around line 487) and `match_ranges` (around line 603) lowercase the full
-haystack **once per rule per Hit**, not once per Hit. With *N* enabled
-rules that's *N* redundant lowercasing passes over the same string.
+Rather than optimize the matching path, the Highlight rules feature was
+removed outright (this session). `Config.rules`, `src/rules.rs`, the
+`line::matching` module, `Rule`/`Matcher`/`Op`/`Style`/`Segment`/`Prepared`,
+the rules modal and its `Message` variants, and the options-strip button
+are all gone. `Part` is now just `text: String`; `line::render(hit,
+layout)` no longer takes a `Prepared`; `part_widget` renders a plain `text`
+widget only (no `rich_text` branch). The landmine measured here — *N*
+redundant lowercasing passes per Hit with *N* enabled rules — is moot: no
+rules can exist.
 
-Fix direction: lowercase each Part's text once per Hit (e.g. compute it
-once at the top of `apply`, pass the lowered string down to each rule's
-matcher) rather than re-lowering inside `match_ranges` for every rule.
-Verify with a version of the existing `line::matching::tests` bench-style
-comparison (the codebase already has real unit tests here — extend them,
-don't just spot-check manually).
+If highlighting comes back, re-derive the fix direction from git history
+(the `matching::apply` / `match_ranges` lowercasing) rather than this
+paragraph.
 
 ## 3. `line::render` itself reruns on every scroll frame, not just shaping
 
@@ -137,15 +138,15 @@ upstream of the shaping-cache fix, so it survives untouched.
 
 Potential fix: a per-Hit rendered-`Line` cache, keyed by Hit identity plus
 something that changes when the *inputs* to `render` change (the active
-`Layout` — mode/columns/template/timestamp_field/utc — and the rules
-generation). Complications worth thinking through before starting:
+`Layout` — mode/columns/template/timestamp_field/utc). Complications worth
+thinking through before starting:
 
 - `Hit` (`src/es/mod.rs`) has no stable id today beyond its position in
   `tab.hits`, which is stable *within* a loaded page but needs a cache-key
   story once paging appends more Hits or a refresh replaces them.
-- Cache invalidation on `Layout`/rules change needs to be correct, not
-  just "usually fires" — a stale cached `Line` after a column add/remove or
-  a rule edit would be a visible bug, not just a missed optimization.
+- Cache invalidation on `Layout` change needs to be correct, not just
+  "usually fires" — a stale cached `Line` after a column add/remove would be
+  a visible bug, not just a missed optimization.
 - Worth measuring (per item 0) whether this is actually worth the
   complexity before building it — it may turn out item 1 alone, or item 1 +
   4, gets scrolling smooth enough that this isn't needed.
@@ -214,11 +215,7 @@ This interacts with items 3 and 4 above: a render cache and a height cache
 are naturally the same shape of per-Hit cache, so if this gets picked up,
 worth designing items 3/4/6 together rather than three separate caches.
 
-## 7. Minor: `Prepared::from_rules` rebuilds redundantly per frame
+## 7. Minor: `Prepared::from_rules` rebuilds redundantly per frame — MOOT
 
-`main_area`, `main_view`, and `options_bar` in `main.rs` each independently
-call `line::Prepared::from_rules(&self.config.rules)` when building the
-active tab's view. With `rules: []` this is nearly free today, but it's
-unforced per-frame allocation. Low priority — compute once per `view()`
-call and thread it through, or cache on `LogLens` invalidated on
-`config.rules` change. Not worth doing before items 0–2 are tried.
+`Prepared` no longer exists — Highlight rules were removed (item 2). Nothing
+is rebuilt per frame here any more.

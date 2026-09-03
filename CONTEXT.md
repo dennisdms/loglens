@@ -87,8 +87,8 @@ _Avoid_: preferences pane, settings tab, modal
 
 **Options strip**:
 The row of display controls directly above an active Result Tab: sort fields, the
-Table/Text mode toggle, the Highlight rules editor, and — in Text mode only — the
-Format modal. Shown once a run has loaded.
+Table/Text mode toggle, and — in Text mode only — the Format modal. Shown once a
+run has loaded.
 _Avoid_: toolbar
 
 **Format modal**:
@@ -138,20 +138,8 @@ _Avoid_: row, formatted hit, output
 
 **Part**:
 One addressable piece of a Line — a Column's worth of text under a Columns
-Layout, or the whole rendered line under a template. Holds one or more Segments.
-
-**Segment**:
-A run of text within a Part carrying one style. A Part is a single Segment until
-a Highlight rule splits it. Named to stay out of the way of iced's own `Span`.
+Layout, or the whole rendered line under a template. Holds plain text.
 _Avoid_: span, chunk, token
-
-**Highlight rule**:
-A rule that colours a Line. Matches either a field predicate (`level == ERROR`),
-which colours the whole Line, or a text pattern, which colours just the Segments
-it matches. Ordered: the first matching field predicate wins, and text patterns
-layer over it. Global to the application, not per Saved Search. Edited from the
-options strip's "Highlight rules" button (both Table and Text mode).
-_Avoid_: filter, formatter, theme rule
 
 ### Distribution
 

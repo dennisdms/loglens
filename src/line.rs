@@ -1,7 +1,6 @@
 //! A Hit rendered for display: the one seam the table, raw text mode, and
-//! GREP all read through. See CONTEXT.md: Layout, Line, Part, Segment.
+//! GREP all read through. See CONTEXT.md: Layout, Line, Part.
 
-use iced::Color;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -43,50 +42,7 @@ pub struct Line {
 /// Layout, or the whole line under a template Layout.
 #[derive(Debug, Clone, Default)]
 pub struct Part {
-    pub segments: Vec<Segment>,
-}
-
-impl Part {
-    /// The Part's text when it is a single unstyled run — i.e. no Highlight
-    /// rule touched it. Lets the caller render it with a plain `text` widget
-    /// (cheap `Auto` shaping) instead of `rich_text` (which forces the much
-    /// slower `Advanced` shaping on every line). `None` once a rule has split
-    /// or recoloured it, where `rich_text` over `segments` is required.
-    pub fn plain(&self) -> Option<&str> {
-        match self.segments.as_slice() {
-            [only] if only.style == Style::default() => Some(&only.text),
-            _ => None,
-        }
-    }
-}
-
-/// A run of text carrying one Style. A Part is a single Segment until a
-/// Highlight rule splits it.
-#[derive(Debug, Clone)]
-pub struct Segment {
     pub text: String,
-    pub style: Style,
-}
-
-impl Segment {
-    /// Owned so the resulting Span, and anything built from it, doesn't borrow
-    /// this Segment or the Line it came from — Lines are rebuilt on every
-    /// render and dropped immediately after.
-    pub fn to_span(&self) -> iced::widget::text::Span<'static> {
-        iced::widget::text::Span::new(self.text.clone())
-            .color_maybe(self.style.fg)
-            .background_maybe(self.style.bg)
-    }
-}
-
-/// What a Highlight rule can set on a Segment. Maps directly onto
-/// `iced::widget::text::Span`'s `color` and `highlight` fields — see step 6.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
-pub struct Style {
-    #[serde(default, with = "hex_color_opt")]
-    pub fg: Option<Color>,
-    #[serde(default, with = "hex_color_opt")]
-    pub bg: Option<Color>,
 }
 
 impl Layout {
@@ -103,141 +59,22 @@ impl Layout {
     }
 }
 
-// --- Highlight rules --------------------------------------------------------
-
-/// A Highlight rule. Global to the application (`Config.rules`), never per
-/// Saved Search.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Rule {
-    pub name: String,
-    pub enabled: bool,
-    pub matcher: Matcher,
-    pub style: Style,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Matcher {
-    /// Colors the whole Line.
-    Field { path: String, op: Op, value: String },
-    /// Colors only the matched text, within whichever Part it falls in.
-    Text { pattern: String },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Op {
-    Eq,
-    Ne,
-    Gt,
-    Gte,
-    Lt,
-    Lte,
-}
-
-impl Op {
-    pub const ALL: [Op; 6] = [Op::Eq, Op::Ne, Op::Gt, Op::Gte, Op::Lt, Op::Lte];
-}
-
-impl std::fmt::Display for Op {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Op::Eq => "==",
-            Op::Ne => "!=",
-            Op::Gt => ">",
-            Op::Gte => ">=",
-            Op::Lt => "<",
-            Op::Lte => "<=",
-        };
-        f.write_str(s)
-    }
-}
-
-/// The rule set, normalized once when it changes rather than re-normalized on
-/// every render. Rebuild this only when `Config.rules` changes (a rule added,
-/// edited, deleted, reordered, or toggled) — not per Hit, not per frame.
-#[derive(Debug, Clone, Default)]
-pub struct Prepared {
-    rules: Vec<PreparedRule>,
-}
-
-#[derive(Debug, Clone)]
-struct PreparedRule {
-    matcher: PreparedMatcher,
-    style: Style,
-}
-
-#[derive(Debug, Clone)]
-enum PreparedMatcher {
-    Field {
-        path: String,
-        op: Op,
-        value: PreparedValue,
-    },
-    /// Lowercased once, so matching does a lowercase-vs-lowercase compare
-    /// without re-lowercasing the pattern on every Hit.
-    Text { pattern_lower: String },
-}
-
-/// A Field matcher's `value`, pre-parsed as a number where possible so
-/// matching doesn't re-attempt the parse on every Hit.
-#[derive(Debug, Clone)]
-enum PreparedValue {
-    Number(f64),
-    Text(String),
-}
-
-impl Prepared {
-    pub fn from_rules(rules: &[Rule]) -> Self {
-        let rules = rules
-            .iter()
-            .filter(|r| r.enabled)
-            .map(|r| PreparedRule {
-                matcher: match &r.matcher {
-                    Matcher::Field { path, op, value } => PreparedMatcher::Field {
-                        path: path.clone(),
-                        op: *op,
-                        value: match value.parse::<f64>() {
-                            Ok(n) => PreparedValue::Number(n),
-                            Err(_) => PreparedValue::Text(value.to_lowercase()),
-                        },
-                    },
-                    Matcher::Text { pattern } => PreparedMatcher::Text {
-                        pattern_lower: pattern.to_lowercase(),
-                    },
-                },
-                style: r.style,
-            })
-            .collect();
-        Prepared { rules }
-    }
-}
-
 // --- Render ----------------------------------------------------------------
 
-/// Everything this module exposes: renders `hit` under `layout`, then applies
-/// `rules` to the freshly-built Line.
-pub fn render(hit: &Hit, layout: &Layout, rules: &Prepared) -> Line {
-    let mut line = match layout.mode {
+/// Everything this module exposes: renders `hit` under `layout`.
+pub fn render(hit: &Hit, layout: &Layout) -> Line {
+    match layout.mode {
         LayoutMode::Table => render_table(hit, layout),
         LayoutMode::RawText => render_raw_text(hit, layout),
-    };
-    matching::apply(&mut line, hit, rules);
-    line
+    }
 }
 
 fn render_table(hit: &Hit, layout: &Layout) -> Line {
     let parts = layout
         .columns
         .iter()
-        .map(|col| {
-            let text = cell_text(&hit.source, col, &layout.timestamp_field, layout.utc);
-            Part {
-                segments: vec![Segment {
-                    text,
-                    style: Style::default(),
-                }],
-            }
+        .map(|col| Part {
+            text: cell_text(&hit.source, col, &layout.timestamp_field, layout.utc),
         })
         .collect();
     Line { parts }
@@ -255,12 +92,7 @@ fn render_raw_text(hit: &Hit, layout: &Layout) -> Line {
         })
         .collect();
     Line {
-        parts: vec![Part {
-            segments: vec![Segment {
-                text,
-                style: Style::default(),
-            }],
-        }],
+        parts: vec![Part { text }],
     }
 }
 
@@ -415,469 +247,6 @@ fn format_dt(dt: chrono::DateTime<chrono::Utc>, utc: bool) -> String {
     }
 }
 
-// --- Hex colour serde ----------------------------------------------------
-
-mod hex_color {
-    use iced::Color;
-    use serde::{Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(color: &Color, s: S) -> Result<S::Ok, S::Error> {
-        let [r, g, b, _a] = color.into_rgba8();
-        format!("#{r:02x}{g:02x}{b:02x}").serialize(s)
-    }
-
-    /// `#rrggbb` → `Color`. `None` for anything else (bad prefix, wrong
-    /// length, non-hex digits).
-    pub fn parse_hex(s: &str) -> Option<Color> {
-        let s = s.strip_prefix('#')?;
-        if s.len() != 6 {
-            return None;
-        }
-        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-        Some(Color::from_rgb8(r, g, b))
-    }
-}
-
-mod hex_color_opt {
-    use super::hex_color;
-    use iced::Color;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(c: &Option<Color>, s: S) -> Result<S::Ok, S::Error> {
-        match c {
-            Some(c) => hex_color::serialize(c, s),
-            None => s.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Color>, D::Error> {
-        Option::<String>::deserialize(d)?
-            .map(|s| {
-                hex_color::parse_hex(&s)
-                    .ok_or_else(|| serde::de::Error::custom(format!("invalid color: {s}")))
-            })
-            .transpose()
-    }
-}
-
-/// `#rrggbb` → `Color`; `None` for anything malformed. Used by the Highlight
-/// rules modal's colour inputs (step 6).
-pub fn parse_hex(s: &str) -> Option<Color> {
-    hex_color::parse_hex(s)
-}
-
-// --- Matching ------------------------------------------------------------
-
-mod matching {
-    use super::*;
-
-    /// Applies `prepared` to a freshly-rendered `Line` in place. Called once
-    /// per Line, after the Table/RawText render arm has built it.
-    ///
-    /// Precedence: the *first* Field-matcher rule (in rule order) whose
-    /// predicate matches the Hit sets the style for every Segment in the
-    /// Line. Then, in rule order, every Text-matcher rule's pattern is
-    /// searched for in each Segment's text and matching runs are split out
-    /// into their own Segment with that rule's style layered on. Where two
-    /// Text rules' matches would overlap, the earlier rule owns the
-    /// overlapping text: once a rule has claimed a span as its own Segment,
-    /// later rules do not re-split it.
-    pub fn apply(line: &mut Line, hit: &Hit, prepared: &Prepared) {
-        if prepared.rules.is_empty() {
-            return;
-        }
-
-        // 1. First matching Field rule colours the whole Line.
-        for rule in &prepared.rules {
-            if let PreparedMatcher::Field { path, op, value } = &rule.matcher
-                && field_predicate(hit, path, *op, value)
-            {
-                for part in &mut line.parts {
-                    for seg in &mut part.segments {
-                        seg.style = rule.style;
-                    }
-                }
-                break;
-            }
-        }
-
-        // 2. Text rules, in order. `claimed` tracks Segments a prior Text
-        //    rule has already split out and restyled, so a later rule scans
-        //    only what is left.
-        for part in &mut line.parts {
-            let mut claimed = vec![false; part.segments.len()];
-            for rule in &prepared.rules {
-                let PreparedMatcher::Text { pattern_lower } = &rule.matcher else {
-                    continue;
-                };
-                if pattern_lower.is_empty() {
-                    continue;
-                }
-                let mut next_segments: Vec<Segment> = Vec::new();
-                let mut next_claimed: Vec<bool> = Vec::new();
-                for (seg, was_claimed) in
-                    std::mem::take(&mut part.segments).into_iter().zip(claimed)
-                {
-                    if was_claimed {
-                        next_segments.push(seg);
-                        next_claimed.push(true);
-                        continue;
-                    }
-                    match split_segment(&seg, pattern_lower, &rule.style) {
-                        Some(pieces) => {
-                            for (piece, matched) in pieces {
-                                next_segments.push(piece);
-                                next_claimed.push(matched);
-                            }
-                        }
-                        None => {
-                            next_segments.push(seg);
-                            next_claimed.push(false);
-                        }
-                    }
-                }
-                part.segments = next_segments;
-                claimed = next_claimed;
-            }
-        }
-    }
-
-    /// Splits `seg` on every non-overlapping case-insensitive occurrence of
-    /// `needle` (already lowercased). Matched pieces carry `seg.style` with
-    /// the rule's `fg`/`bg` layered over it. `None` when there is no match.
-    fn split_segment(
-        seg: &Segment,
-        needle: &str,
-        rule_style: &Style,
-    ) -> Option<Vec<(Segment, bool)>> {
-        let ranges = match_ranges(&seg.text, needle);
-        if ranges.is_empty() {
-            return None;
-        }
-        let mut matched_style = seg.style;
-        if rule_style.fg.is_some() {
-            matched_style.fg = rule_style.fg;
-        }
-        if rule_style.bg.is_some() {
-            matched_style.bg = rule_style.bg;
-        }
-
-        let mut out: Vec<(Segment, bool)> = Vec::new();
-        let mut cursor = 0;
-        for (start, end) in ranges {
-            if start > cursor {
-                out.push((
-                    Segment {
-                        text: seg.text[cursor..start].to_string(),
-                        style: seg.style,
-                    },
-                    false,
-                ));
-            }
-            out.push((
-                Segment {
-                    text: seg.text[start..end].to_string(),
-                    style: matched_style,
-                },
-                true,
-            ));
-            cursor = end;
-        }
-        if cursor < seg.text.len() {
-            out.push((
-                Segment {
-                    text: seg.text[cursor..].to_string(),
-                    style: seg.style,
-                },
-                false,
-            ));
-        }
-        Some(out)
-    }
-
-    /// Byte ranges in `haystack` of every non-overlapping case-insensitive
-    /// match of `needle` (already lowercased). O(n*m), which is fine at
-    /// log-line lengths.
-    fn match_ranges(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
-        let mut ranges = Vec::new();
-        if needle.is_empty() {
-            return ranges;
-        }
-        let needle_chars: Vec<char> = needle.chars().collect();
-        let indices: Vec<(usize, char)> = haystack.char_indices().collect();
-        let mut i = 0;
-        while i < indices.len() {
-            let mut j = 0; // index into needle_chars
-            let mut k = i; // index into indices
-            let mut ok = true;
-            while j < needle_chars.len() {
-                let Some(&(_, hc)) = indices.get(k) else {
-                    ok = false;
-                    break;
-                };
-                for lc in hc.to_lowercase() {
-                    if needle_chars.get(j) != Some(&lc) {
-                        ok = false;
-                        break;
-                    }
-                    j += 1;
-                }
-                if !ok {
-                    break;
-                }
-                k += 1;
-            }
-            if ok && j == needle_chars.len() {
-                let start = indices[i].0;
-                let end = indices.get(k).map(|&(b, _)| b).unwrap_or(haystack.len());
-                ranges.push((start, end));
-                i = k.max(i + 1);
-            } else {
-                i += 1;
-            }
-        }
-        ranges
-    }
-
-    fn field_predicate(hit: &Hit, path: &str, op: Op, value: &PreparedValue) -> bool {
-        let resolved = resolve(&hit.source, path);
-        match op {
-            Op::Eq | Op::Ne => {
-                let lhs = resolved
-                    .map(render_value)
-                    .unwrap_or_default()
-                    .to_lowercase();
-                let rhs = match value {
-                    PreparedValue::Number(n) => n.to_string(),
-                    PreparedValue::Text(t) => t.clone(),
-                };
-                let equal = lhs == rhs;
-                if matches!(op, Op::Eq) { equal } else { !equal }
-            }
-            Op::Gt | Op::Gte | Op::Lt | Op::Lte => {
-                let PreparedValue::Number(threshold) = value else {
-                    return false;
-                };
-                let Some(lhs) = resolved.and_then(value_as_f64) else {
-                    return false;
-                };
-                match op {
-                    Op::Gt => lhs > *threshold,
-                    Op::Gte => lhs >= *threshold,
-                    Op::Lt => lhs < *threshold,
-                    Op::Lte => lhs <= *threshold,
-                    _ => unreachable!(),
-                }
-            }
-        }
-    }
-
-    fn value_as_f64(v: &Value) -> Option<f64> {
-        v.as_f64()
-            .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use serde_json::json;
-
-        fn hit(source: Value) -> Hit {
-            Hit {
-                source,
-                sort: Vec::new(),
-            }
-        }
-
-        fn fg(hex: &str) -> Style {
-            Style {
-                fg: parse_hex(hex),
-                bg: None,
-            }
-        }
-
-        fn bg(hex: &str) -> Style {
-            Style {
-                fg: None,
-                bg: parse_hex(hex),
-            }
-        }
-
-        fn one_part(text: &str) -> Line {
-            Line {
-                parts: vec![Part {
-                    segments: vec![Segment {
-                        text: text.to_string(),
-                        style: Style::default(),
-                    }],
-                }],
-            }
-        }
-
-        fn field_rule(path: &str, op: Op, value: &str, style: Style) -> Rule {
-            Rule {
-                name: "f".to_string(),
-                enabled: true,
-                matcher: Matcher::Field {
-                    path: path.to_string(),
-                    op,
-                    value: value.to_string(),
-                },
-                style,
-            }
-        }
-
-        fn text_rule(pattern: &str, style: Style) -> Rule {
-            Rule {
-                name: "t".to_string(),
-                enabled: true,
-                matcher: Matcher::Text {
-                    pattern: pattern.to_string(),
-                },
-                style,
-            }
-        }
-
-        #[test]
-        fn field_eq_case_insensitive_colours_whole_line() {
-            let prepared =
-                Prepared::from_rules(&[field_rule("level", Op::Eq, "error", fg("#ff0000"))]);
-            let mut line = Line {
-                parts: vec![
-                    Part {
-                        segments: vec![Segment {
-                            text: "a".into(),
-                            style: Style::default(),
-                        }],
-                    },
-                    Part {
-                        segments: vec![Segment {
-                            text: "b".into(),
-                            style: Style::default(),
-                        }],
-                    },
-                ],
-            };
-            matching::apply(&mut line, &hit(json!({ "level": "ERROR" })), &prepared);
-            for part in &line.parts {
-                for seg in &part.segments {
-                    assert_eq!(seg.style, fg("#ff0000"));
-                }
-            }
-        }
-
-        #[test]
-        fn field_gte_numeric_threshold() {
-            let prepared =
-                Prepared::from_rules(&[field_rule("status", Op::Gte, "500", fg("#ff0000"))]);
-
-            let mut hi = one_part("x");
-            matching::apply(&mut hi, &hit(json!({ "status": 500 })), &prepared);
-            assert_eq!(hi.parts[0].segments[0].style, fg("#ff0000"));
-
-            let mut lo = one_part("x");
-            matching::apply(&mut lo, &hit(json!({ "status": 499 })), &prepared);
-            assert_eq!(lo.parts[0].segments[0].style, Style::default());
-        }
-
-        #[test]
-        fn field_gte_non_numeric_value_never_matches() {
-            let prepared =
-                Prepared::from_rules(&[field_rule("status", Op::Gte, "oops", fg("#ff0000"))]);
-            let mut line = one_part("x");
-            matching::apply(&mut line, &hit(json!({ "status": 9000 })), &prepared);
-            assert_eq!(line.parts[0].segments[0].style, Style::default());
-        }
-
-        #[test]
-        fn text_rule_splits_exactly_the_matched_run() {
-            let prepared = Prepared::from_rules(&[text_rule("Timeout", bg("#ffff00"))]);
-            let mut line = one_part("a timeout here");
-            matching::apply(&mut line, &hit(json!({})), &prepared);
-            let segs = &line.parts[0].segments;
-            assert_eq!(
-                segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
-                vec!["a ", "timeout", " here"]
-            );
-            assert_eq!(segs[0].style, Style::default());
-            assert_eq!(segs[1].style, bg("#ffff00"));
-            assert_eq!(segs[2].style, Style::default());
-        }
-
-        #[test]
-        fn overlapping_text_rules_earlier_wins_the_overlap() {
-            // "abcabc": rule 1 matches "bca", rule 2 matches "cab". Rule 1
-            // claims [1,4); rule 2 then only sees "a" + "bc" and finds no
-            // full "cab", so only rule 1's style lands.
-            let prepared = Prepared::from_rules(&[
-                text_rule("bca", fg("#111111")),
-                text_rule("cab", fg("#222222")),
-            ]);
-            let mut line = one_part("abcabc");
-            matching::apply(&mut line, &hit(json!({})), &prepared);
-            let segs = &line.parts[0].segments;
-            assert_eq!(
-                segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
-                vec!["a", "bca", "bc"]
-            );
-            assert_eq!(segs[1].style, fg("#111111"));
-            assert_eq!(segs[0].style, Style::default());
-            assert_eq!(segs[2].style, Style::default());
-        }
-
-        #[test]
-        fn disabled_rule_never_matches() {
-            let mut rule = field_rule("level", Op::Eq, "error", fg("#ff0000"));
-            rule.enabled = false;
-            let prepared = Prepared::from_rules(&[rule]);
-            let mut line = one_part("x");
-            matching::apply(&mut line, &hit(json!({ "level": "error" })), &prepared);
-            assert_eq!(line.parts[0].segments[0].style, Style::default());
-        }
-
-        #[test]
-        fn no_rule_matches_keeps_default_style() {
-            let prepared = Prepared::from_rules(&[
-                field_rule("level", Op::Eq, "warn", fg("#ff0000")),
-                text_rule("absent", bg("#00ff00")),
-            ]);
-            let mut line = one_part("nothing here");
-            matching::apply(&mut line, &hit(json!({ "level": "info" })), &prepared);
-            for seg in &line.parts[0].segments {
-                assert_eq!(seg.style, Style::default());
-            }
-        }
-
-        #[test]
-        fn field_then_text_compose() {
-            let prepared = Prepared::from_rules(&[
-                field_rule("level", Op::Eq, "error", fg("#ff0000")),
-                text_rule("timeout", bg("#ffff00")),
-            ]);
-            let mut line = one_part("request timeout reached");
-            matching::apply(&mut line, &hit(json!({ "level": "error" })), &prepared);
-            let segs = &line.parts[0].segments;
-            assert_eq!(
-                segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
-                vec!["request ", "timeout", " reached"]
-            );
-            // Field's fg survives on every piece; the matched piece also
-            // picks up the Text rule's bg.
-            assert_eq!(segs[0].style, fg("#ff0000"));
-            assert_eq!(
-                segs[1].style,
-                Style {
-                    fg: parse_hex("#ff0000"),
-                    bg: parse_hex("#ffff00"),
-                }
-            );
-            assert_eq!(segs[2].style, fg("#ff0000"));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -911,15 +280,7 @@ mod tests {
     }
 
     fn only_text(line: &Line) -> Vec<String> {
-        line.parts
-            .iter()
-            .map(|p| {
-                p.segments
-                    .iter()
-                    .map(|s| s.text.clone())
-                    .collect::<String>()
-            })
-            .collect()
+        line.parts.iter().map(|p| p.text.clone()).collect()
     }
 
     fn cell(source: &Value, path: &str) -> String {
@@ -998,7 +359,7 @@ mod tests {
     fn render_table_maps_one_part_per_column() {
         let source = json!({ "level": "INFO", "message": "hello" });
         let layout = table_layout(&["level", "message"], "@timestamp", false);
-        let line = render(&hit(source), &layout, &Prepared::default());
+        let line = render(&hit(source), &layout);
         assert_eq!(only_text(&line), vec!["INFO", "hello"]);
     }
 
@@ -1010,21 +371,13 @@ mod tests {
             parse_template("plain text"),
             vec![Piece::Literal("plain text".to_string())]
         );
-        let line = render(
-            &hit(json!({})),
-            &raw_layout("plain text"),
-            &Prepared::default(),
-        );
+        let line = render(&hit(json!({})), &raw_layout("plain text"));
         assert_eq!(only_text(&line), vec!["plain text"]);
     }
 
     #[test]
     fn single_placeholder_resolves() {
-        let line = render(
-            &hit(json!({ "message": "hi" })),
-            &raw_layout("%{message}"),
-            &Prepared::default(),
-        );
+        let line = render(&hit(json!({ "message": "hi" })), &raw_layout("%{message}"));
         assert_eq!(only_text(&line), vec!["hi"]);
     }
 
@@ -1061,18 +414,13 @@ mod tests {
         let line = render(
             &hit(json!({ "message": "hi" })),
             &raw_layout("[%{nope}] tail"),
-            &Prepared::default(),
         );
         assert_eq!(only_text(&line), vec!["[] tail"]);
     }
 
     #[test]
     fn source_placeholder_renders_compact_json() {
-        let line = render(
-            &hit(json!({ "a": 1, "b": "x" })),
-            &raw_layout("%{_source}"),
-            &Prepared::default(),
-        );
+        let line = render(&hit(json!({ "a": 1, "b": "x" })), &raw_layout("%{_source}"));
         assert_eq!(only_text(&line), vec![r#"{"a":1,"b":"x"}"#]);
     }
 
@@ -1084,33 +432,5 @@ mod tests {
         );
         assert_eq!(Layout::default_template(&["a".to_string()]), "%{_source}");
         assert_eq!(Layout::default_template(&[]), "%{_source}");
-    }
-
-    // --- hex colour serde ---
-
-    #[test]
-    fn style_colour_round_trips_through_json() {
-        let style = Style {
-            fg: parse_hex("#e06c6c"),
-            bg: parse_hex("#1a1a1a"),
-        };
-        let json = serde_json::to_string(&style).unwrap();
-        let back: Style = serde_json::from_str(&json).unwrap();
-        assert_eq!(style, back);
-    }
-
-    #[test]
-    fn style_defaults_when_colours_absent() {
-        let back: Style = serde_json::from_str("{}").unwrap();
-        assert_eq!(back, Style::default());
-    }
-
-    #[test]
-    fn malformed_hex_is_rejected_not_panicking() {
-        assert!(parse_hex("not-a-color").is_none());
-        assert!(parse_hex("#zz0000").is_none());
-        assert!(parse_hex("#12345").is_none());
-        let bad = serde_json::from_str::<Style>("{\"fg\":\"#12345\"}");
-        assert!(bad.is_err());
     }
 }

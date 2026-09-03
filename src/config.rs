@@ -15,9 +15,6 @@ pub struct Config {
     /// Render Hit timestamps in UTC rather than local time.
     #[serde(default)]
     pub utc_timestamps: bool,
-    /// Highlight rules, applied globally across every Result Tab.
-    #[serde(default)]
-    pub rules: Vec<crate::line::Rule>,
     /// Elasticsearch fetch limits, tuned from the Settings window.
     #[serde(default)]
     pub es: EsSettings,

@@ -26,15 +26,14 @@ use crate::{ColumnDrag, ERR_RED, Message, WARN_AMBER, centered, field_label, ico
 
 pub(crate) fn result_view<'a>(
     tab: &'a ResultTab,
-    rules: &line::Prepared,
     header_hover: Option<usize>,
     grip_hover: Option<usize>,
     column_drag: Option<&ColumnDrag>,
 ) -> Element<'a, Message> {
     let hits_view = || -> Element<'a, Message> {
         match tab.mode {
-            line::LayoutMode::Table => hit_table(tab, rules, header_hover, grip_hover, column_drag),
-            line::LayoutMode::RawText => raw_text_view(tab, rules),
+            line::LayoutMode::Table => hit_table(tab, header_hover, grip_hover, column_drag),
+            line::LayoutMode::RawText => raw_text_view(tab),
         }
     };
     let body: Element<'_, Message> = match &tab.state {
@@ -116,14 +115,11 @@ fn hit_detail<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
 }
 
 /// The live options strip above a Result Tab's table, left-aligned:
-/// "Sort fields", "Highlight rules", then the Layout options group — the
-/// Table/Text mode toggle, joined by "Format" while in Text mode, wrapped
-/// in one bordered surface so they read as a unit. (Column add / remove /
-/// reorder live in each header's "\u{22ee}" menu.)
-pub(crate) fn result_sort_bar<'a>(
-    tab: &'a ResultTab,
-    rules_form_open: bool,
-) -> Element<'a, Message> {
+/// "Sort fields", then the Layout options group — the Table/Text mode
+/// toggle, joined by "Format" while in Text mode, wrapped in one bordered
+/// surface so they read as a unit. (Column add / remove / reorder live in
+/// each header's "\u{22ee}" menu.)
+pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     let run_id = tab.run_id;
 
     // The icon sits in a box as tall as the sort button's size-14 digit, so
@@ -160,14 +156,6 @@ pub(crate) fn result_sort_bar<'a>(
     .style(style::icon_button(tab.sort_panel_open));
     let sort_ctl = tooltip(sort_btn, tip("Sort fields"), tooltip::Position::Bottom).gap(4.0);
 
-    // Highlight rules apply in both modes, so this button is always shown;
-    // it opens the global rules modal (formerly reached from the Menu bar).
-    let rules_btn = button(icon_box(&icons::HIGHLIGHT_RULES, style::TEXT))
-        .on_press(Message::OpenRulesForm)
-        .padding(Padding::new(5.0).left(9.0).right(9.0))
-        .style(style::icon_button(rules_form_open));
-    let rules_ctl = tooltip(rules_btn, tip("Highlight rules"), tooltip::Position::Bottom).gap(4.0);
-
     // Layout options group: the Table/Text mode toggle, joined by the
     // "Format" button while in Text mode — Format edits the raw-text
     // template, so it is meaningless (and hidden) in Table mode. The shared
@@ -198,7 +186,7 @@ pub(crate) fn result_sort_bar<'a>(
         .padding(3.0)
         .style(|_| style::options_group());
 
-    let controls = row![sort_ctl, rules_ctl, layout_group, space().width(Fill)]
+    let controls = row![sort_ctl, layout_group, space().width(Fill)]
         .spacing(8.0)
         .align_y(iced::Alignment::Center);
 
@@ -213,13 +201,12 @@ pub(crate) fn result_sort_bar<'a>(
 /// visible slice of `tab.hits` (see [`ResultTab::row_window`]).
 ///
 /// Each cell's text is truncated to what its Column's width could ever show
-/// before being handed to a `text`/`rich_text` widget — see
-/// [`AdvanceCache::take_width`]. Without this, a cell holding an 11,000-
-/// character Hit message gets fully shaped just to render ~30 visible
-/// characters, on every one of the ~100 rows rebuilt on every scroll frame.
+/// before being handed to a `text` widget — see [`AdvanceCache::take_width`].
+/// Without this, a cell holding an 11,000-character Hit message gets fully
+/// shaped just to render ~30 visible characters, on every one of the ~100
+/// rows rebuilt on every scroll frame.
 fn hit_table<'a>(
     tab: &'a ResultTab,
-    rules: &line::Prepared,
     header_hover: Option<usize>,
     grip_hover: Option<usize>,
     column_drag: Option<&ColumnDrag>,
@@ -315,7 +302,6 @@ fn hit_table<'a>(
     // with spacers so the scrollbar still spans every loaded Hit.
     let (start, end) = tab.row_window();
     let layout = tab.layout();
-    let prepared = rules;
     let mut body: Vec<Element<'_, Message>> = Vec::with_capacity(end - start + 2);
     if start > 0 {
         body.push(space().height(start as f32 * ROW_H).into());
@@ -327,7 +313,7 @@ fn hit_table<'a>(
     for (offset, hit) in tab.hits[start..end].iter().enumerate() {
         let index = start + offset;
         let selected = tab.selected_hit == Some(index);
-        let rendered = line::render(hit, &layout, prepared);
+        let rendered = line::render(hit, &layout);
         let cells = container(
             row(tab
                 .columns
@@ -417,10 +403,9 @@ fn hit_table<'a>(
 /// doesn't track its scroll offset — truncating without knowing what's
 /// currently scrolled into view would hide content a user could otherwise
 /// reach. Left as a known follow-up (see `docs/wide-line-rendering-resources.md`).
-fn raw_text_view<'a>(tab: &'a ResultTab, rules: &line::Prepared) -> Element<'a, Message> {
+fn raw_text_view<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     let run_id = tab.run_id;
     let layout = tab.layout();
-    let prepared = rules;
 
     let (start, end) = tab.row_window();
     let mut body: Vec<Element<'_, Message>> = Vec::with_capacity(end - start + 2);
@@ -433,7 +418,7 @@ fn raw_text_view<'a>(tab: &'a ResultTab, rules: &line::Prepared) -> Element<'a, 
     for (offset, hit) in tab.hits[start..end].iter().enumerate() {
         let index = start + offset;
         let selected = tab.selected_hit == Some(index);
-        let rendered = line::render(hit, &layout, prepared);
+        let rendered = line::render(hit, &layout);
         let content: Element<'_, Message> = match rendered.parts.first() {
             Some(part) => part_widget(part, None),
             None => text("").size(12.0).font(Font::MONOSPACE).into(),
@@ -706,67 +691,23 @@ fn paging_footer<'a>(tab: &'a ResultTab) -> Option<Element<'a, Message>> {
 /// and the Format modal's small fixed-size preview, neither of which is safe
 /// or worth truncating; see the doc comment on [`raw_text_view`]).
 fn part_widget<'a>(part: &line::Part, max_width: Option<f32>) -> Element<'a, Message> {
-    let Some(max_width) = max_width else {
-        return match part.plain() {
-            Some(s) => text(s.to_string())
-                .size(results::CELL_TEXT_SIZE)
-                .font(Font::MONOSPACE)
-                .wrapping(text::Wrapping::None)
-                .into(),
-            None => iced::widget::rich_text(
-                part.segments
-                    .iter()
-                    .map(line::Segment::to_span)
-                    .collect::<Vec<_>>(),
-            )
-            .size(results::CELL_TEXT_SIZE)
-            .font(Font::MONOSPACE)
-            .wrapping(text::Wrapping::None)
-            .into(),
-        };
+    let visible = match max_width {
+        None => part.text.as_str(),
+        Some(max_width) => {
+            let (len, _) = AdvanceCache::shared().take_width(&part.text, max_width);
+            &part.text[..len]
+        }
     };
-
-    let cache = AdvanceCache::shared();
-    match part.plain() {
-        Some(s) => {
-            let (len, _) = cache.take_width(s, max_width);
-            text(s[..len].to_string())
-                .size(results::CELL_TEXT_SIZE)
-                .font(Font::MONOSPACE)
-                .wrapping(text::Wrapping::None)
-                .into()
-        }
-        None => {
-            let mut remaining = max_width;
-            let mut spans = Vec::with_capacity(part.segments.len());
-            for seg in &part.segments {
-                let (len, w) = cache.take_width(&seg.text, remaining);
-                if len == 0 {
-                    break;
-                }
-                let visible = line::Segment {
-                    text: seg.text[..len].to_string(),
-                    style: seg.style,
-                };
-                spans.push(visible.to_span());
-                remaining -= w;
-                if len < seg.text.len() {
-                    // This Segment was cut short — nothing after it fits.
-                    break;
-                }
-            }
-            iced::widget::rich_text(spans)
-                .size(results::CELL_TEXT_SIZE)
-                .font(Font::MONOSPACE)
-                .wrapping(text::Wrapping::None)
-                .into()
-        }
-    }
+    text(visible.to_string())
+        .size(results::CELL_TEXT_SIZE)
+        .font(Font::MONOSPACE)
+        .wrapping(text::Wrapping::None)
+        .into()
 }
 
 // --- Format modal --------------------------------------------------------
 
-pub(crate) fn format_modal<'a>(tab: &'a ResultTab, rules: &line::Prepared) -> Element<'a, Message> {
+pub(crate) fn format_modal<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     let run_id = tab.run_id;
 
     let mut card = column![
@@ -864,7 +805,7 @@ pub(crate) fn format_modal<'a>(tab: &'a ResultTab, rules: &line::Prepared) -> El
     } else {
         let mut lines = column![];
         for hit in tab.hits.iter().take(10) {
-            let rendered = line::render(hit, &preview_layout, rules);
+            let rendered = line::render(hit, &preview_layout);
             let content: Element<'_, Message> = match rendered.parts.first() {
                 Some(part) => part_widget(part, None),
                 None => text("").size(12.0).font(Font::MONOSPACE).into(),
