@@ -84,10 +84,10 @@ curl -s -XPOST 'localhost:9200/logs-loglens-nginx/_search?filter_path=hits.hits.
 ```
 metric                        n        p50        p90        p99        max       mean
 --------------------------------------------------------------------------------------
-perf.frame_interval         603   16.692ms   16.911ms   17.653ms   41.612ms   16.575ms
-update                     1210    0.001ms    0.001ms    0.002ms    0.080ms    0.001ms
-view                       1210    1.304ms    1.491ms    1.627ms    1.958ms    1.319ms
-view.hit_table_rows        1208    1.228ms    1.408ms    1.522ms    1.921ms    1.244ms
+perf.frame_interval         722   16.694ms   16.790ms   18.402ms   51.584ms   16.618ms
+update                     1450    0.001ms    0.001ms    0.002ms    0.041ms    0.001ms
+view                       1447    0.733ms    0.799ms    0.932ms    1.643ms    0.733ms
+view.hit_table_rows        1445    0.688ms    0.751ms    0.876ms    1.606ms    0.688ms
 ```
 
 - **`perf.frame_interval`** — wall time between rendered frames. Near 16.7ms

@@ -47,7 +47,8 @@ p99/max for `update`, `view`, and the windowed row-build loop, plus the
 realized frame interval. Runs are comparable, so item 1 (and anything else)
 can be A/B'd properly.
 
-First numbers, release build, `nginx-800.json`, Table mode, this dev machine:
+First numbers, release build, `nginx-800.json`, Table mode, this dev machine
+(`WINDOW_BUFFER` 40, i.e. pre-item-1 — see item 1 for the after):
 
 - `perf.frame_interval` p50 16.7ms, p99 17.6ms — **60Hz, no missed frames.**
 - `view` p50 1.3ms, `view.hit_table_rows` p50 1.2ms — the row loop is ~94%
@@ -71,17 +72,36 @@ Still open under item 0:
 - **Profiler pass** (`samply record` over the scripted scroll) to attribute
   the raw-text-mode frame time to a specific cosmic-text / wgpu call.
 
-## 1. `WINDOW_BUFFER` is still 40 — try shrinking it first
+## 1. `WINDOW_BUFFER` was 40 — shrunk to 8 — DONE
 
-`src/results.rs:102`. This was flagged in the very first pass over this
-problem and never changed. At the default window size, roughly 30 rows are
-actually visible; `WINDOW_BUFFER = 40` above *and* below means
-`row_window()` builds widgets for up to ~110 rows — **3.7× the visible
-count** — on every scroll frame, regardless of any other fix in this list.
+`src/results.rs`. Was flagged in the very first pass and never changed. At
+the default window size roughly 30 rows are visible; `WINDOW_BUFFER = 40`
+above *and* below meant `row_window()` built widgets for up to ~110 rows —
+**3.7× the visible count** — every scroll frame, regardless of any other fix
+in this list.
 
-Try 5–10. This is a one-line change with no architectural risk, so it
-should be the first thing tried and measured (per item 0), before anything
-below.
+Now `8` (~175px of fling slack each way, roughly half the built-row count of
+the visible slice). One-line change, no architectural risk.
+
+Measured with the item-0 harness, release build, this dev machine:
+
+| metric (p50)                         | buffer 40 | buffer 8 |             |
+| ------------------------------------ | --------- | -------- | ----------- |
+| `view`, `nginx-800.json` table       | 1.31ms    | 0.74ms   | **−44%**    |
+| `view.hit_table_rows`                | 1.24ms    | 0.70ms   | **−44%**    |
+| `view` p99, table                    | ~1.72ms   | ~0.94ms  | −45%        |
+| `view`, `payloads-150.json` raw text | ~0.30ms¹  | ~0.17ms  | ~−45%       |
+| `frame_interval` p99, raw text       | ~37ms¹    | ~28ms    | still drops |
+
+`frame_interval` in **Table** mode was already a tight 16.7ms/60Hz on this
+hardware both before and after — the win is headroom (nearly half of
+`view()` reclaimed), not a fixed stutter. **Raw text** mode still drops
+frames (item 5): the per-row cost below `view()` is iced shaping the
+untruncated multi-KB lines, and 8 is just fewer of them per frame, not a
+cure.
+
+¹ raw-text "before" is the same-machine baseline recorded under item 0
+above, not a fresh A/B on the reverted constant.
 
 ## 2. Highlight rules will be the next dominant cost, the moment any exist
 

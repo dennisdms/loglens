@@ -98,8 +98,13 @@ pub const COL_TIMESTAMP_W: f32 = 210.0;
 pub const COL_MIN_W: f32 = 60.0;
 pub const COL_MAX_W: f32 = 1200.0;
 
-/// Rows rendered above and below the visible viewport as scroll slack.
-const WINDOW_BUFFER: usize = 40;
+/// Rows rendered above and below the visible viewport as scroll slack. Kept
+/// small on purpose: at the default window ~30 rows are visible, so every extra
+/// buffer row is a per-frame widget build (and, below `view()`, an iced
+/// layout/draw pass) for a row the user cannot see. 8 gives ~175px of fling
+/// slack each way while roughly halving the built-row count versus the visible
+/// slice — see `docs/plans/wide-line-perf-followups.md` item 1.
+const WINDOW_BUFFER: usize = 8;
 
 /// Where a Result Tab's run currently stands.
 #[derive(Debug, Clone)]
