@@ -320,6 +320,10 @@ fn hit_table<'a>(
     if start > 0 {
         body.push(space().height(start as f32 * ROW_H).into());
     }
+    // Timed as a unit: this loop is the windowed-render cost the wide-line
+    // work is chasing — `line::render` per Hit plus the per-cell truncation
+    // and widget building. See `docs/plans/wide-line-perf-followups.md`.
+    let rows_span = crate::perf::span("view.hit_table_rows");
     for (offset, hit) in tab.hits[start..end].iter().enumerate() {
         let index = start + offset;
         let selected = tab.selected_hit == Some(index);
@@ -361,6 +365,7 @@ fn hit_table<'a>(
                 .into(),
         );
     }
+    drop(rows_span);
     let trailing = tab.hits.len().saturating_sub(end);
     if trailing > 0 {
         body.push(space().height(trailing as f32 * ROW_H).into());
@@ -422,6 +427,9 @@ fn raw_text_view<'a>(tab: &'a ResultTab, rules: &line::Prepared) -> Element<'a, 
     if start > 0 {
         body.push(space().height(start as f32 * ROW_H).into());
     }
+    // Timed as a unit, mirroring `hit_table` — raw text mode renders each
+    // Hit's whole (untruncated) line, so this is where item 5's cost lives.
+    let rows_span = crate::perf::span("view.raw_text_rows");
     for (offset, hit) in tab.hits[start..end].iter().enumerate() {
         let index = start + offset;
         let selected = tab.selected_hit == Some(index);
@@ -448,6 +456,7 @@ fn raw_text_view<'a>(tab: &'a ResultTab, rules: &line::Prepared) -> Element<'a, 
                 .into(),
         );
     }
+    drop(rows_span);
     let trailing = tab.hits.len().saturating_sub(end);
     if trailing > 0 {
         body.push(space().height(trailing as f32 * ROW_H).into());

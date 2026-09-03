@@ -13,6 +13,7 @@ mod crashlog;
 mod es;
 mod icons;
 mod line;
+mod perf;
 mod results;
 mod results_view;
 mod rules;
@@ -25,7 +26,7 @@ mod update;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use iced::widget::scrollable::RelativeOffset;
+use iced::widget::scrollable::{AbsoluteOffset, RelativeOffset};
 use iced::widget::svg::Handle;
 use iced::widget::{
     Id, button, checkbox, column, container, mouse_area, opaque, operation, pick_list, radio, row,
@@ -392,6 +393,32 @@ struct LogLens {
     about_open: bool,
     /// Editable copy of `config.es`, backing the Settings window's fields.
     settings_draft: SettingsDraft,
+    /// The scripted-scroll performance harness, when `LOGLENS_PERF_SCROLL=1`.
+    /// Drives a fixed scroll over one Saved Search, then prints timings and
+    /// exits. See `src/perf.rs`.
+    perf: Option<PerfHarness>,
+}
+
+/// Drives a deterministic scroll over a Result Tab so scroll-performance
+/// numbers are comparable run to run. Active only under `LOGLENS_PERF_SCROLL=1`
+/// (see [`perf`]); otherwise this is `None` and every hook below is skipped.
+struct PerfHarness {
+    /// Seconds the scroll should take from top to bottom.
+    secs: f32,
+    /// Wall time of the previous [`Message::PerfTick`], to measure the
+    /// realized frame interval under scroll load.
+    last_tick: Option<std::time::Instant>,
+    /// `None` until the target tab's first Page lands and the scroll starts.
+    run: Option<PerfRun>,
+}
+
+struct PerfRun {
+    run_id: u64,
+    /// When the scripted scroll began.
+    start: std::time::Instant,
+    /// Set once the scroll has reached the bottom and the timings are printed,
+    /// so the ticker subscription stops and no second exit is issued.
+    done: bool,
 }
 
 /// How far the Update the user started from the banner has got.
@@ -638,6 +665,8 @@ enum Message {
     },
     /// Advance the Hit-count spinner one frame.
     SpinnerTick,
+    /// One frame of the scripted-scroll performance harness (see `PerfHarness`).
+    PerfTick,
     PageLoaded {
         run_id: u64,
         result: Result<es::Page, String>,
@@ -739,6 +768,12 @@ impl LogLens {
         // manual path can simply not ask.
         let due = update::is_due(config.last_update_check, chrono::Utc::now());
 
+        let perf = perf::scroll_harness().then(|| PerfHarness {
+            secs: perf::scroll_secs(),
+            last_tick: None,
+            run: None,
+        });
+
         let app = Self {
             settings_draft: SettingsDraft::from_settings(config.es),
             config,
@@ -769,6 +804,7 @@ impl LogLens {
             flavour: update::flavour(),
             updating: None,
             about_open: false,
+            perf,
         };
 
         let startup_check = if due {
@@ -776,7 +812,29 @@ impl LogLens {
         } else {
             Task::none()
         };
-        (app, Task::batch([open_main.discard(), startup_check]))
+
+        // Under the scroll-perf harness, open the target Saved Search straight
+        // away — the rest of the run drives itself from there (see
+        // `Message::PerfTick` and the `PageLoaded` hook).
+        let perf_open = if app.perf.is_some() {
+            match perf_open_search(&app.config) {
+                Some(msg) => Task::done(msg),
+                None => {
+                    eprintln!(
+                        "LOGLENS_PERF_SCROLL: no Saved Search to open — configure one, \
+                         or point LOGLENS_PERF_SEARCH at an existing id/name"
+                    );
+                    Task::none()
+                }
+            }
+        } else {
+            Task::none()
+        };
+
+        (
+            app,
+            Task::batch([open_main.discard(), startup_check, perf_open]),
+        )
     }
 
     fn theme(&self, _window: window::Id) -> Theme {
@@ -818,6 +876,18 @@ impl LogLens {
             Subscription::none()
         };
 
+        // Drive the scripted scroll while a perf run is underway.
+        // `window::frames()` yields once per frame the app actually renders —
+        // and subscribing to it keeps those redraws coming — so one
+        // `PerfTick` maps to one real frame, and the interval between them is
+        // the realized frame time under scroll load.
+        let perf_tick = match &self.perf {
+            Some(p) if p.run.as_ref().is_some_and(|r| !r.done) => {
+                iced::window::frames().map(|_| Message::PerfTick)
+            }
+            _ => Subscription::none(),
+        };
+
         if self.detail_drag.is_some() {
             let drag = iced::event::listen_with(|event, _status, _id| match event {
                 Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
@@ -828,7 +898,7 @@ impl LogLens {
                 }
                 _ => None,
             });
-            return Subscription::batch([escape, closes, spinner, drag]);
+            return Subscription::batch([escape, closes, spinner, perf_tick, drag]);
         }
 
         if self.column_drag.is_some() {
@@ -841,10 +911,10 @@ impl LogLens {
                 }
                 _ => None,
             });
-            return Subscription::batch([escape, closes, spinner, drag]);
+            return Subscription::batch([escape, closes, spinner, perf_tick, drag]);
         }
 
-        Subscription::batch([escape, closes, spinner])
+        Subscription::batch([escape, closes, spinner, perf_tick])
     }
 
     fn next_id(&mut self) -> u64 {
@@ -914,6 +984,7 @@ impl LogLens {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let _span = perf::span("update");
         match message {
             Message::SelectTab(tab) => {
                 if tab < self.open_tabs.len() {
@@ -1470,6 +1541,30 @@ impl LogLens {
                 if let Some(rt) = self.result_mut(run_id) {
                     apply_page(rt, result, append);
                 }
+
+                // Scroll-perf harness: the target tab's first Page is in, so
+                // arm the scripted scroll. In fixture mode there is no async
+                // `_count`, so settle the total here or the Hit-count spinner
+                // subscription would tick through the whole measured run.
+                if !append && ok && self.perf.as_ref().is_some_and(|p| p.run.is_none()) {
+                    if let Some(rt) = self.result_mut(run_id) {
+                        if perf::fixture_path().is_some() {
+                            rt.total_hits = TotalHits::Known(rt.hits.len() as u64);
+                        }
+                        if let Some(mode) = perf::force_mode() {
+                            rt.mode = mode;
+                            rt.resolve_template();
+                        }
+                    }
+                    if let Some(perf) = self.perf.as_mut() {
+                        perf.run = Some(PerfRun {
+                            run_id,
+                            start: std::time::Instant::now(),
+                            done: false,
+                        });
+                        perf.last_tick = None;
+                    }
+                }
                 // A completed first Page (initial run or refresh) starts at the
                 // top: the table `scrollable` stays mounted across a refresh, so
                 // snap it back explicitly rather than relying on a remount.
@@ -1498,6 +1593,55 @@ impl LogLens {
                 if wants_more {
                     return self.load_more(run_id);
                 }
+            }
+            Message::PerfTick => {
+                let now = std::time::Instant::now();
+                let (run_id, progress, finished) = {
+                    let Some(perf) = self.perf.as_mut() else {
+                        return Task::none();
+                    };
+                    if let Some(prev) = perf.last_tick.replace(now) {
+                        perf::record("perf.frame_interval", (now - prev).as_secs_f32() * 1_000.0);
+                    }
+                    let secs = perf.secs;
+                    let Some(run) = perf.run.as_mut() else {
+                        return Task::none();
+                    };
+                    if run.done {
+                        return Task::none();
+                    }
+                    let progress = run.start.elapsed().as_secs_f32() / secs;
+                    if progress >= 1.0 {
+                        run.done = true;
+                    }
+                    (run.run_id, progress.min(1.0), progress >= 1.0)
+                };
+                if finished {
+                    perf::dump();
+                    return iced::exit();
+                }
+                let Some(rt) = self.result_mut(run_id) else {
+                    perf::dump();
+                    return iced::exit();
+                };
+                let content_h = rt.hits.len() as f32 * results::ROW_H;
+                let target_y = progress * (content_h - rt.viewport_h).max(0.0);
+                // Set `scroll_y` directly — it is what `row_window()` reads, so
+                // this is what actually shifts the rendered slice — then move
+                // the real scrollable to match for a faithful draw. Done in one
+                // `update` so there is exactly one `view` per frame, not the
+                // two a follow-up `ResultScrolled` message would cause. (The
+                // harness deliberately does not page: it measures a fixed
+                // loaded set.)
+                rt.scroll_y = target_y;
+                let scroll_id = rt.scroll_id.clone();
+                return operation::scroll_to(
+                    scroll_id,
+                    AbsoluteOffset {
+                        x: 0.0,
+                        y: target_y,
+                    },
+                );
             }
             Message::RetryPage(run_id) => return self.load_more(run_id),
             Message::RefreshResult(run_id) => return self.start_run(run_id),
@@ -1759,6 +1903,10 @@ impl LogLens {
 
             Message::WindowClosed(id) => {
                 if id == self.main_window {
+                    // Flush whatever the perf instrumentation collected this
+                    // session (a plain `LOGLENS_PERF=1` run with no scripted
+                    // scroll reaches its dump only here).
+                    perf::dump();
                     return iced::exit();
                 }
                 if Some(id) == self.settings_window {
@@ -2505,6 +2653,32 @@ impl LogLens {
 
     /// Freshens the range, then fetches the first Page (and the `_count`).
     fn start_run(&mut self, run_id: u64) -> Task<Message> {
+        // Scroll-perf harness: load Hits from a saved `_search` response on
+        // disk instead of hitting a cluster, so a run is byte-identical every
+        // time and needs no Elasticsearch. See `src/perf.rs`.
+        if let Some(path) = perf::fixture_path() {
+            if let Some(rt) = self.result_mut(run_id) {
+                rt.refreshing = false;
+                rt.state = RunState::Loading;
+                rt.hits.clear();
+                rt.paging = Paging::Idle;
+                rt.scroll_y = 0.0;
+                rt.total_hits = TotalHits::Loading;
+            }
+            return Task::perform(
+                async move {
+                    std::fs::read_to_string(&path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|body| es::parse_page(&body))
+                },
+                move |result| Message::PageLoaded {
+                    run_id,
+                    result,
+                    append: false,
+                },
+            );
+        }
+
         let Some((conn_id, target, generation, count_params, search_params)) =
             self.result_mut(run_id).map(|rt| {
                 // If this tab already had a table up, keep the strips pinned and
@@ -2633,6 +2807,7 @@ impl LogLens {
     // --- View --------------------------------------------------------------
 
     fn view(&self, window: window::Id) -> Element<'_, Message> {
+        let _span = perf::span("view");
         if Some(window) == self.settings_window {
             return self.settings_view();
         }
@@ -4343,6 +4518,28 @@ fn apply_page(rt: &mut ResultTab, result: Result<es::Page, String>, append: bool
 
 fn meta<'a>(value: &str) -> Element<'a, Message> {
     text(value.to_string()).size(12.0).color(TEXT_DIM).into()
+}
+
+/// The `OpenSavedSearch` message the scroll-perf harness opens on boot: the
+/// Saved Search whose id or name matches `LOGLENS_PERF_SEARCH`, or the first
+/// one configured when that is unset. `None` if the config has no searches.
+fn perf_open_search(config: &Config) -> Option<Message> {
+    let want = perf::target_search();
+    for conn in &config.connections {
+        for search in &conn.searches {
+            let matched = match &want {
+                Some(w) => &search.id == w || &search.name == w,
+                None => true,
+            };
+            if matched {
+                return Some(Message::OpenSavedSearch {
+                    connection: conn.id.clone(),
+                    search: search.id.clone(),
+                });
+            }
+        }
+    }
+    None
 }
 
 /// A solid-red alert pill for the info bar: a warning triangle, `msg`, and a

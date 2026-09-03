@@ -360,6 +360,13 @@ pub async fn search(
         return Err(extract_error(&text, status.as_u16()));
     }
 
+    parse_page(&text)
+}
+
+/// Turns a raw `_search` response body into a [`Page`], reading `_source` and
+/// `sort` off each `hits.hits[]` entry. Shared by [`search`] and the
+/// scroll-performance harness's fixture loader (see `crate::perf`).
+pub fn parse_page(body: &str) -> Result<Page, String> {
     #[derive(Deserialize)]
     struct Response {
         hits: HitsEnvelope,
@@ -377,7 +384,7 @@ pub async fn search(
     }
 
     let parsed: Response =
-        serde_json::from_str(&text).map_err(|e| format!("unexpected search response: {e}"))?;
+        serde_json::from_str(body).map_err(|e| format!("unexpected search response: {e}"))?;
     Ok(Page {
         hits: parsed
             .hits
