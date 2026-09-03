@@ -2499,6 +2499,7 @@ impl LogLens {
             template: saved.template.clone(),
             template_draft: saved.template.clone(),
             format_open: false,
+            line_cache: Default::default(),
         };
         // Resolve the raw text template up front if the field list is already
         // known; otherwise it is resolved lazily when `ResultFieldsLoaded`
@@ -2555,6 +2556,7 @@ impl LogLens {
                 rt.refreshing = false;
                 rt.state = RunState::Loading;
                 rt.hits.clear();
+                rt.reset_line_cache();
                 rt.paging = Paging::Idle;
                 rt.scroll_y = 0.0;
                 rt.total_hits = TotalHits::Loading;
@@ -2598,6 +2600,7 @@ impl LogLens {
                 rt.selected_hit = None;
                 if !rt.refreshing {
                     rt.hits.clear();
+                    rt.reset_line_cache();
                     rt.paging = Paging::Idle;
                     rt.scroll_y = 0.0;
                 }
@@ -4179,9 +4182,12 @@ fn apply_page(rt: &mut ResultTab, result: Result<es::Page, String>, append: bool
         Ok(page) => {
             let got = page.hits.len();
             if append {
+                // Existing positions keep their Hit; new ones are absent from
+                // the cache until first rendered — no reset needed.
                 rt.hits.extend(page.hits);
             } else {
                 rt.hits = page.hits;
+                rt.reset_line_cache();
             }
 
             if !append {

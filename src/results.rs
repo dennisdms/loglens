@@ -1,12 +1,13 @@
 //! A Result Tab: the Hits from one run of a Saved Search, rendered as a table.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use iced::widget::{Id, text_editor};
 
 use crate::config::{SortKey, TimeUnit, Timeframe, TimeframeMode};
 use crate::es::Hit;
-use crate::line::{Layout, LayoutMode};
+use crate::line::{Layout, LayoutMode, LineCache};
 
 /// Draft state for the Search bar's "Custom\u{2026}" timeframe popover: an
 /// editable relative (amount + unit) or absolute (from / to) window, applied
@@ -248,6 +249,12 @@ pub struct ResultTab {
     /// Whether the raw-text "Format" modal (template + field list + preview) is
     /// open for this tab.
     pub format_open: bool,
+    /// Rendered-`Line` cache for the windowed table / raw-text row loop, keyed
+    /// by Hit position. `RefCell` because `view` only has `&self`; the two
+    /// render loops that touch it are Layout-mode-exclusive, so the borrow is
+    /// never re-entrant. Reset via [`ResultTab::reset_line_cache`] whenever
+    /// `hits` is cleared or replaced.
+    pub line_cache: RefCell<LineCache>,
 }
 
 impl ResultTab {
@@ -449,6 +456,14 @@ impl ResultTab {
         } else {
             false
         }
+    }
+
+    /// Drops every cached rendered `Line`. Call after clearing or replacing
+    /// `hits` wholesale — a positional cache key then points at a different
+    /// Hit. (Appending more Hits needs no reset: existing positions are
+    /// unchanged and new ones are simply absent until first rendered.)
+    pub fn reset_line_cache(&mut self) {
+        self.line_cache.get_mut().clear();
     }
 
     pub fn layout(&self) -> Layout {

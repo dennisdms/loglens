@@ -1,6 +1,9 @@
 //! A Hit rendered for display: the one seam the table, raw text mode, and
 //! GREP all read through. See CONTEXT.md: Layout, Line, Part.
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -9,7 +12,7 @@ use crate::es::Hit;
 /// How a Result Tab draws its Hits. Both `columns` and `template` are always
 /// present regardless of `mode`, so switching modes never discards the
 /// other's settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, Serialize, Deserialize)]
 pub struct Layout {
     pub mode: LayoutMode,
     pub columns: Vec<String>,
@@ -24,7 +27,7 @@ pub struct Layout {
     pub utc: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LayoutMode {
     #[default]
@@ -56,6 +59,75 @@ impl Layout {
         } else {
             "%{_source}".to_string()
         }
+    }
+
+    /// A hash of every input [`render`] reads — `mode`, `columns`, `template`,
+    /// `timestamp_field`, `utc`. [`LineCache`] keys its entries on this so any
+    /// change that would produce a different `Line` invalidates the cache.
+    /// Deliberately *not* affected by column pixel widths (`col_widths` on
+    /// `ResultTab`): those never reach `render`, so a drag-resize must not bust
+    /// the cache.
+    pub fn fingerprint(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// Per-Result-Tab cache of rendered [`Line`]s, keyed by a Hit's position in
+/// `tab.hits`. Every scroll frame re-renders the whole windowed row slice
+/// otherwise (JSON resolution, multi-KB string cloning, timestamp formatting)
+/// even though the window barely moves frame to frame — see
+/// `docs/plans/wide-line-perf-followups.md` item 3.
+///
+/// Positional, not content-keyed: `tab.hits` positions are stable within a
+/// loaded result set (paging appends; sort / refresh replace wholesale and
+/// call [`LineCache::clear`]). A content hash would cost hashing multi-KB JSON
+/// per row per frame and would over-report its hit rate against the
+/// scroll-harness's identical-copy fixtures (see `docs/testing.md`).
+#[derive(Default)]
+pub struct LineCache {
+    lines: HashMap<usize, Line>,
+    /// [`Layout::fingerprint`] the current entries were rendered under.
+    key: u64,
+}
+
+/// Rows kept cached on each side of the live window. Comfortably more than a
+/// single frame's scroll delta (even a fast fling), so rows staying on screen
+/// across frames stay warm, while a long scroll can't grow the map without
+/// bound.
+const RETAIN: usize = 64;
+
+impl LineCache {
+    /// Call once per frame before [`get`](Self::get), with the row range about
+    /// to be requested. Drops every entry on a [`Layout`] change; otherwise
+    /// evicts entries far outside `window` so the map stays bounded.
+    pub fn prepare(&mut self, layout: &Layout, window: (usize, usize)) {
+        let key = layout.fingerprint();
+        if key != self.key {
+            self.lines.clear();
+            self.key = key;
+            return;
+        }
+        let (start, end) = window;
+        let lo = start.saturating_sub(RETAIN);
+        let hi = end.saturating_add(RETAIN);
+        self.lines.retain(|&index, _| (lo..hi).contains(&index));
+    }
+
+    /// The rendered `Line` for `hit` at `index`, rendering and caching it on a
+    /// miss. Assumes [`prepare`](Self::prepare) ran this frame with a matching
+    /// `layout`.
+    pub fn get(&mut self, index: usize, hit: &Hit, layout: &Layout) -> &Line {
+        self.lines
+            .entry(index)
+            .or_insert_with(|| render(hit, layout))
+    }
+
+    /// Drops every entry. For the callers that replace or clear `tab.hits`
+    /// wholesale, after which a positional key means something different.
+    pub fn clear(&mut self) {
+        self.lines.clear();
     }
 }
 
@@ -432,5 +504,111 @@ mod tests {
         );
         assert_eq!(Layout::default_template(&["a".to_string()]), "%{_source}");
         assert_eq!(Layout::default_template(&[]), "%{_source}");
+    }
+
+    // --- LineCache ---
+
+    #[test]
+    fn line_cache_serves_a_hit_without_re_rendering() {
+        let layout = table_layout(&["message"], "@timestamp", false);
+        let mut cache = LineCache::default();
+        cache.prepare(&layout, (0, 1));
+
+        let first = hit(json!({ "message": "original" }));
+        assert_eq!(cache.get(0, &first, &layout).parts[0].text, "original");
+
+        // A different Hit at the same position must not be re-rendered — the
+        // cached Line stands until an explicit invalidation.
+        let changed = hit(json!({ "message": "changed" }));
+        assert_eq!(cache.get(0, &changed, &layout).parts[0].text, "original");
+    }
+
+    #[test]
+    fn line_cache_prepare_drops_everything_on_layout_change() {
+        let a = table_layout(&["message"], "@timestamp", false);
+        let b = table_layout(&["level"], "@timestamp", false);
+        let mut cache = LineCache::default();
+
+        cache.prepare(&a, (0, 1));
+        cache.get(0, &hit(json!({ "message": "m", "level": "INFO" })), &a);
+        assert_eq!(cache.lines.len(), 1);
+
+        cache.prepare(&b, (0, 1));
+        assert!(cache.lines.is_empty());
+        let line = cache.get(0, &hit(json!({ "message": "m", "level": "INFO" })), &b);
+        assert_eq!(line.parts[0].text, "INFO");
+    }
+
+    #[test]
+    fn line_cache_prepare_evicts_rows_far_from_the_window() {
+        let layout = raw_layout("%{message}");
+        let mut cache = LineCache::default();
+
+        cache.prepare(&layout, (0, 200));
+        for i in 0..200 {
+            cache.get(i, &hit(json!({ "message": format!("row {i}") })), &layout);
+        }
+        assert_eq!(cache.lines.len(), 200);
+
+        // Window has scrolled well past the early rows.
+        cache.prepare(&layout, (500, 540));
+        assert!(cache.lines.is_empty());
+
+        cache.prepare(&layout, (100, 300));
+        for i in 100..300 {
+            cache.get(i, &hit(json!({ "message": format!("row {i}") })), &layout);
+        }
+        // Rows within RETAIN (64) of the window [130, 170) survive — i.e.
+        // [66, 234) — the rest are evicted.
+        cache.prepare(&layout, (130, 170));
+        assert!(cache.lines.keys().all(|&i| (66..234).contains(&i)));
+        assert!(cache.lines.contains_key(&120));
+        assert!(cache.lines.contains_key(&233));
+        assert!(!cache.lines.contains_key(&234));
+        assert!(!cache.lines.contains_key(&280));
+    }
+
+    #[test]
+    fn line_cache_clear_drops_everything() {
+        let layout = raw_layout("%{message}");
+        let mut cache = LineCache::default();
+        cache.prepare(&layout, (0, 2));
+        cache.get(0, &hit(json!({ "message": "a" })), &layout);
+        cache.get(1, &hit(json!({ "message": "b" })), &layout);
+        cache.clear();
+        assert!(cache.lines.is_empty());
+    }
+
+    #[test]
+    fn layout_fingerprint_tracks_every_render_input() {
+        let base = Layout {
+            mode: LayoutMode::Table,
+            columns: vec!["message".to_string()],
+            template: "%{message}".to_string(),
+            timestamp_field: "@timestamp".to_string(),
+            utc: false,
+        };
+        let fp = base.fingerprint();
+        assert_eq!(base.clone().fingerprint(), fp);
+
+        let mut m = base.clone();
+        m.mode = LayoutMode::RawText;
+        assert_ne!(m.fingerprint(), fp);
+
+        let mut m = base.clone();
+        m.columns.push("level".to_string());
+        assert_ne!(m.fingerprint(), fp);
+
+        let mut m = base.clone();
+        m.template = "%{level}".to_string();
+        assert_ne!(m.fingerprint(), fp);
+
+        let mut m = base.clone();
+        m.timestamp_field = "ts".to_string();
+        assert_ne!(m.fingerprint(), fp);
+
+        let mut m = base.clone();
+        m.utc = true;
+        assert_ne!(m.fingerprint(), fp);
     }
 }

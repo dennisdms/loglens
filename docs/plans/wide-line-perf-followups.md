@@ -31,6 +31,12 @@ cited there.
   lives in `src/results_view.rs` now, as free functions — not
   `impl LogLens` methods in `main.rs`. Extend it there, not back on
   `LogLens`.
+- **`line::render` is cached per Hit** (item 3). `hit_table`/`raw_text_view`
+  read through `tab.line_cache` (`line::LineCache`), keyed by Hit position,
+  invalidated by `Layout::fingerprint()` and `ResultTab::reset_line_cache`.
+  Don't add a call to `line::render` in the windowed row loop — go through
+  the cache. `format_modal`'s preview is the one deliberate direct caller
+  (different draft Layout, off the hot path).
 - `AdvanceCache` shapes through iced's *own* global font system
   (`iced::advanced::graphics::text::font_system()`) — don't open a second
   `cosmic_text::FontSystem`; it'd double font-loading cost and risk
@@ -127,29 +133,51 @@ If highlighting comes back, re-derive the fix direction from git history
 (the `matching::apply` / `match_ranges` lowercasing) rather than this
 paragraph.
 
-## 3. `line::render` itself reruns on every scroll frame, not just shaping
+## 3. `line::render` reran on every scroll frame — DONE (per-Hit `Line` cache)
 
-Independent of widget shaping (which item 1's fix already addresses): every
-frame, `hit_table`/`raw_text_view` call `line::render` fresh for the whole
-windowed slice — JSON field lookup (`resolve`), timestamp formatting
-(`format_dt`/`format_timestamp_*`), string building — even for rows that
-were *also* visible last frame and haven't changed at all. This is strictly
-upstream of the shaping-cache fix, so it survives untouched.
+Was: every frame, `hit_table`/`raw_text_view` called `line::render` fresh for
+the whole windowed slice — JSON field lookup (`resolve`), timestamp
+formatting, string building (a several-KB query-string column `.clone()`d per
+row, or the whole multi-KB concatenated template line in raw text) — even for
+rows also on screen last frame. Strictly upstream of the shaping-cache fix, so
+item 1 left it untouched.
 
-Potential fix: a per-Hit rendered-`Line` cache, keyed by Hit identity plus
-something that changes when the *inputs* to `render` change (the active
-`Layout` — mode/columns/template/timestamp_field/utc). Complications worth
-thinking through before starting:
+Now cached. `line::LineCache` (`src/line.rs`) holds a `HashMap<usize, Line>`
+per `ResultTab` (`tab.line_cache`, a `RefCell` — `view` has `&self`), keyed by
+Hit position:
 
-- `Hit` (`src/es/mod.rs`) has no stable id today beyond its position in
-  `tab.hits`, which is stable *within* a loaded page but needs a cache-key
-  story once paging appends more Hits or a refresh replaces them.
-- Cache invalidation on `Layout` change needs to be correct, not just
-  "usually fires" — a stale cached `Line` after a column add/remove would be
-  a visible bug, not just a missed optimization.
-- Worth measuring (per item 0) whether this is actually worth the
-  complexity before building it — it may turn out item 1 alone, or item 1 +
-  4, gets scrolling smooth enough that this isn't needed.
+- **Positional, not content-keyed.** `tab.hits` positions are stable within a
+  loaded result set — paging only `extend`s; sort / refresh replace wholesale
+  and call `ResultTab::reset_line_cache` (three sites in `main.rs`:
+  `start_run`'s two `hits.clear()` paths and `apply_page`'s non-append
+  branch). A content hash would cost hashing multi-KB JSON per row per frame
+  and would over-report its hit rate against the harness's identical-copy
+  fixtures.
+- **Layout invalidation via `Layout::fingerprint()`** — a hash of every input
+  `render` reads (`mode`, `columns`, `template`, `timestamp_field`, `utc`;
+  `LineCache::prepare` clears the whole map when it changes). Column pixel
+  widths are deliberately *not* in it — they never reach `render`, so a
+  drag-resize must not bust the cache.
+- **Bounded.** `prepare` evicts entries more than `RETAIN` (64) rows outside
+  the live window each frame, so a long scroll can't grow the map without
+  bound (~window + 128 `Line`s max).
+
+Measured with the item-0 harness, release build, this dev machine, default
+12s scroll × 10 repeat:
+
+| metric (p50)                            | before  | after   |          |
+| --------------------------------------- | ------- | ------- | -------- |
+| `view.hit_table_rows`, `nginx-800`      | 0.690ms | 0.624ms | **−10%** |
+| `view` p99, `nginx-800` table           | ~0.93ms | ~0.90ms | −4%      |
+| `view.raw_text_rows`, `payloads-150`    | 0.182ms | 0.079ms | **−57%** |
+| `view` p50, `payloads-150` raw text     | 0.210ms | 0.108ms | **−49%** |
+| `frame_interval` p99, raw text          | ~36ms   | ~34ms   | still drops |
+
+Table's win is modest — post-item-1 the row loop is dominated by per-cell
+truncation + widget building, not `render`. Raw text's is large: one Part, no
+truncation, and `render` there rebuilds the full multi-KB line. `frame_interval`
+in raw text still blows past 16.7ms — that stutter is iced shaping the
+untruncated lines *below* `view()` (item 5), which this doesn't touch.
 
 ## 4. iced's built-in paragraph cache can't help during a scroll
 

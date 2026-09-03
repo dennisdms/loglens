@@ -302,18 +302,21 @@ fn hit_table<'a>(
     // with spacers so the scrollbar still spans every loaded Hit.
     let (start, end) = tab.row_window();
     let layout = tab.layout();
+    let mut lines = tab.line_cache.borrow_mut();
+    lines.prepare(&layout, (start, end));
     let mut body: Vec<Element<'_, Message>> = Vec::with_capacity(end - start + 2);
     if start > 0 {
         body.push(space().height(start as f32 * ROW_H).into());
     }
     // Timed as a unit: this loop is the windowed-render cost the wide-line
-    // work is chasing — `line::render` per Hit plus the per-cell truncation
-    // and widget building. See `docs/plans/wide-line-perf-followups.md`.
+    // work is chasing — `line::render` (cached per Hit, see `LineCache`) plus
+    // the per-cell truncation and widget building. See
+    // `docs/plans/wide-line-perf-followups.md`.
     let rows_span = crate::perf::span("view.hit_table_rows");
     for (offset, hit) in tab.hits[start..end].iter().enumerate() {
         let index = start + offset;
         let selected = tab.selected_hit == Some(index);
-        let rendered = line::render(hit, &layout);
+        let rendered = lines.get(index, hit, &layout);
         let cells = container(
             row(tab
                 .columns
@@ -352,6 +355,7 @@ fn hit_table<'a>(
         );
     }
     drop(rows_span);
+    drop(lines);
     let trailing = tab.hits.len().saturating_sub(end);
     if trailing > 0 {
         body.push(space().height(trailing as f32 * ROW_H).into());
@@ -408,17 +412,21 @@ fn raw_text_view<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     let layout = tab.layout();
 
     let (start, end) = tab.row_window();
+    let mut lines = tab.line_cache.borrow_mut();
+    lines.prepare(&layout, (start, end));
     let mut body: Vec<Element<'_, Message>> = Vec::with_capacity(end - start + 2);
     if start > 0 {
         body.push(space().height(start as f32 * ROW_H).into());
     }
     // Timed as a unit, mirroring `hit_table` — raw text mode renders each
     // Hit's whole (untruncated) line, so this is where item 5's cost lives.
+    // `line::render` is cached per Hit (see `LineCache`); the shaping cost
+    // item 5 chases is below `view()`, untouched by that.
     let rows_span = crate::perf::span("view.raw_text_rows");
     for (offset, hit) in tab.hits[start..end].iter().enumerate() {
         let index = start + offset;
         let selected = tab.selected_hit == Some(index);
-        let rendered = line::render(hit, &layout);
+        let rendered = lines.get(index, hit, &layout);
         let content: Element<'_, Message> = match rendered.parts.first() {
             Some(part) => part_widget(part, None),
             None => text("").size(12.0).font(Font::MONOSPACE).into(),
@@ -442,6 +450,7 @@ fn raw_text_view<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         );
     }
     drop(rows_span);
+    drop(lines);
     let trailing = tab.hits.len().saturating_sub(end);
     if trailing > 0 {
         body.push(space().height(trailing as f32 * ROW_H).into());
