@@ -655,6 +655,8 @@ enum Message {
         offset_y: f32,
         viewport_h: f32,
         content_h: f32,
+        offset_x: f32,
+        viewport_w: f32,
     },
     RetryPage(u64),
     /// Re-run the active Result Tab from the Search bar.
@@ -1475,12 +1477,16 @@ impl LogLens {
                 offset_y,
                 viewport_h,
                 content_h,
+                offset_x,
+                viewport_w,
             } => {
                 let wants_more = self
                     .result_mut(run_id)
                     .map(|rt| {
                         rt.scroll_y = offset_y;
                         rt.viewport_h = viewport_h;
+                        rt.scroll_x = offset_x;
+                        rt.viewport_w = viewport_w;
                         rt.wants_more(offset_y, viewport_h, content_h)
                     })
                     .unwrap_or(false);
@@ -2489,6 +2495,8 @@ impl LogLens {
             total_generation: 0,
             scroll_y: 0.0,
             viewport_h: 600.0,
+            scroll_x: 0.0,
+            viewport_w: 1200.0,
             selected_hit: None,
             detail_content: text_editor::Content::new(),
             detail_height: results::DETAIL_DEFAULT_H,

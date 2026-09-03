@@ -85,7 +85,9 @@ fixture from the dev cluster if that ever matters.
 - `nginx-800.json` — 800 `logs-loglens-nginx` Hits; ~15% carry a several-KB
   query string, ~8% a huge user agent. The Table-mode case item 0 is about.
 - `payloads-150.json` — 150 `logs-loglens-payloads` Hits; the 3–30 KB
-  base64 / JSON / SQL monsters. The raw-text-mode (item 5) worst case.
+  base64 / JSON / SQL monsters. The raw-text-mode worst case — the fixture
+  that showed item 5's dropped frames, and now that it stays 60Hz, its
+  regression guard.
 
 Regenerate (dev cluster from `dev/` must be up):
 
@@ -108,8 +110,9 @@ view.hit_table_rows        1444    0.753ms    0.882ms    1.091ms    2.095ms    0
 ```
 
 (`nginx-800.json` × 10, Table mode, default 12s scroll, this dev machine —
-Table mode stays 60Hz here even at ~8k rows; the reproducible stutter is
-raw-text mode, item 5.)
+Table mode stays 60Hz here even at ~8k rows. Raw-text mode was the
+reproducible stutter until item 5 (horizontal virtualization) landed; run
+`LOGLENS_PERF_MODE=text` over `payloads-150.json` to check it stays fixed.)
 
 - **`perf.frame_interval`** — wall time between rendered frames. Near 16.7ms
   with a tight p99 means 60Hz with no missed frames. p99 / max well above the
@@ -126,7 +129,7 @@ The decision this drives:
 - `view` small but `frame_interval` blowing past 16.7ms → the cost is
   **below** `view()` — iced layout / draw / present of what `view()` handed
   down. Item 1 (smaller window = fewer primitives) is the lever, or it needs
-  the item-4 custom widget or raw-text clamping (item 5).
+  the item-4 custom widget (raw-text clamping, item 5, is done).
 
 `view` / `update` run roughly twice per `frame_interval`: the frame tick
 drives one, and the scrollable's own `on_scroll` settle drives another — the
@@ -144,8 +147,8 @@ LOGLENS_PERF_SCROLL=1 LOGLENS_HITS=benches/fixtures/nginx-800.json LOGLENS_PERF_
 
 Opens the Firefox profiler UI — the only tool that sees inside iced's layout /
 draw and wgpu, e.g. to go from "`frame_interval` p99 is 40ms but `view` is
-0.3ms" to "38ms of it is glyph shaping in cosmic-text on the untruncated
-raw-text lines".
+0.3ms" to "38ms of it is glyph shaping in cosmic-text" (which is exactly how
+item 5's untruncated-raw-text stutter was pinned down before the fix).
 
 ## Related
 

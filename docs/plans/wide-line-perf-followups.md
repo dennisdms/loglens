@@ -24,9 +24,15 @@ cited there.
 - **Highlight rules were removed** (item 2). A `Part` is plain text;
   everything renders through a `text` widget — no `rich_text`, no
   `Segment`/`Style`, no `matching` pass.
-- **Raw text mode is deliberately still untruncated.** It has real
-  horizontal scrolling with no tracked offset; truncating blind would hide
-  content a user could otherwise reach. This is item 6 below, not a bug.
+- **Raw text mode is horizontally virtualized** (item 5). `raw_text_view`
+  slices each row to `[scroll_x, scroll_x + viewport_w]` (plus
+  `RAW_SLICE_SLACK`) before shaping — the horizontal analogue of the
+  vertical `row_window`. A leading spacer of the scrolled-off prefix's exact
+  width keeps every glyph at its true position (no visible shift); the
+  `scrollable`'s content width is set to `LineCache::max_line_bytes` × one
+  monospace advance so the horizontal scrollbar still reaches the end of
+  every line. `ResultTab` carries `scroll_x` / `viewport_w` alongside
+  `scroll_y` / `viewport_h`, fed by `Message::ResultScrolled`.
 - The view layer for a Result Tab (table, raw text, popovers, Format modal)
   lives in `src/results_view.rs` now, as free functions — not
   `impl LogLens` methods in `main.rs`. Extend it there, not back on
@@ -179,7 +185,7 @@ truncation, and `render` there rebuilds the full multi-KB line. `frame_interval`
 in raw text still blows past 16.7ms — that stutter is iced shaping the
 untruncated lines *below* `view()` (item 5), which this doesn't touch.
 
-## 4. iced's built-in paragraph cache can't help during a scroll
+## 4. iced's built-in paragraph cache can't help during a scroll — SKIPPED
 
 Documented in the earlier design discussion (see conversation / git log)
 but never built: iced's `Paragraph::compare` (`iced_core`) skips reshaping
@@ -201,24 +207,99 @@ what `mouse_area` + `container` currently give for free — hit-testing,
 click-to-select — around a custom widget). Don't start here; start at
 item 0/1.
 
-## 5. Raw text mode ("Text" layout mode) is still fully unclamped
+**Skipped 2026-09-03 after a design/feasibility pass.** The approach is
+sound and iced 0.14 supports it fully — the concrete
+`iced::advanced::graphics::text::Paragraph` type is nameable (so the shape
+cache can be a `RefCell` sibling of `LineCache`, or live in `tree::State`),
+`renderer.fill_paragraph` is on the public `advanced::text::Renderer`
+trait, and because `view()` is rebuilt every scroll frame here, `layout()`
+can shape the window slice with no `draw()`-time interior mutability. But:
 
-Deliberately deferred when the Table-mode fix shipped (see the doc comment
-on `raw_text_view` in `src/results_view.rs`). Its `scrollable` handles
-horizontal scrolling internally and the app tracks no `scroll_x` /
-viewport-width state, so `AdvanceCache::take_width` can't be applied there
-without hiding content a user could reach by scrolling right.
+- **No measured problem to fix.** The item-0 harness on this dev machine
+  shows Table mode already at a tight 60Hz, `view.hit_table_rows` p50
+  ~0.62ms. Item 4 would attack widget-build churn + per-frame reshaping —
+  exactly what item 3's numbers said dominates that sub-ms loop — but as
+  speculative headroom, not a fixed dropped-frame stutter. The doc's own
+  rule (item 0) is "confirm on the machine that actually stutters first",
+  and that hasn't been done for Table mode.
+- **First custom `Widget` in the codebase**, ~200–300 lines, re-implementing
+  what `mouse_area` + `container` + `row` give for free: click→`HitClicked`
+  (cursor-y math), the selection-row background (`fill_quad`), per-cell
+  clipping (`fill_paragraph` clip bounds), and column x-offset arithmetic
+  that has to line up pixel-for-pixel with the still-widget header row.
+  Medium risk on visual parity for a benefit that doesn't show on available
+  hardware.
 
-To fix properly: add a tracked horizontal offset (extend
-`Message::ResultScrolled` with `offset_x`, add a field to `ResultTab`
-alongside `scroll_y`/`viewport_h`), then slice each row to
-`[offset_x, offset_x + viewport_w)` the same way Table mode slices to
-`[0, col_width)`. This is a real feature-sized piece of work, not a
-one-liner — it changes what state a scroll event carries.
+**When to revisit:** either (a) a Table-mode frame drop reproduces in the
+harness (heavier / genuinely-larger fixture, or the machine that stutters),
+or (b) item 6 (wrapping + variable row heights) gets picked up — that needs
+a custom body widget regardless, and item 4's Hit-keyed shape cache is a
+subset of it. Design them together then; give the state struct a per-Hit
+`height` slot from the start so item 6 extends it rather than adding a
+third cache.
 
-Relevant today only for a raw-text-mode Saved Search on a stream with long
-lines (e.g. the config's `test123` search, or any future one) — not the
-`logs-loglens-nginx` Table-mode search this conversation started from.
+## 5. Raw text mode ("Text" layout mode) — DONE (horizontal virtualization)
+
+Was: `raw_text_view` handed each windowed row's whole (multi-KB) line to a
+`text` widget with no truncation — `part_widget(part, None)` — because its
+`scrollable` handles horizontal scrolling internally and the app tracked no
+`scroll_x` / viewport-width state, so clamping blind would have hidden
+content a user could scroll right to reach.
+
+Now virtualized horizontally, mirroring the vertical `row_window`:
+
+- **Tracked offset.** `Message::ResultScrolled` carries `offset_x` /
+  `viewport_w`; `ResultTab` stores `scroll_x` / `viewport_w` next to
+  `scroll_y` / `viewport_h`. Table mode is vertical-only, so its `scroll_x`
+  stays 0 (harmless).
+- **Per-row slice.** Each row shapes only
+  `[scroll_x, scroll_x + viewport_w + RAW_SLICE_SLACK]` of its line
+  (`AdvanceCache::take_width` twice — drop the scrolled-off prefix on a
+  grapheme boundary, keep a viewport-plus-slack slice). A leading
+  `space` of the prefix's exact shaped width holds every glyph at its true
+  position, so the slice never moves a visible pixel as `scroll_x` changes.
+- **Scrollbar extent.** Each row is a `container` of fixed width
+  `LineCache::max_line_bytes()` × `AdvanceCache::mono_advance()` — the widest
+  line seen so far, estimated from byte length (which over-approximates
+  monospace column width for any non-ASCII run, so nothing scrollable-to is
+  ever clipped). Monotonic within a result set; grows as longer lines scroll
+  in, the way the vertical extent grows with paging.
+- **`take_width` now locks once per call** instead of per grapheme — the raw
+  slice is hundreds of graphemes, and the lock is never contended.
+
+Measured with the item-0 harness, release build, this dev machine, default
+12s × 10 repeat, `LOGLENS_PERF_MODE=text`:
+
+| metric                              | before  | after    |             |
+| ----------------------------------- | ------- | -------- | ----------- |
+| `frame_interval` p50, `payloads-150`| 21.3ms  | 16.68ms  | **60Hz**    |
+| `frame_interval` p90, `payloads-150`| 31.5ms  | 16.85ms  | **60Hz**    |
+| `frame_interval` p99, `payloads-150`| 34.2ms  | ~18.4ms  | **−46%**    |
+| `view` p50, `payloads-150`          | 0.108ms | ~0.52ms  | see below   |
+| `frame_interval` p99, `nginx-800`¹  | ~18ms   | ~17.5ms  | already 60Hz|
+
+`view` / `view.raw_text_rows` go *up* (~0.03–0.08ms → ~0.5ms): the
+per-row grapheme walk is now in `view()` where the harness sees it, while
+the ~15ms it removed — iced shaping the full multi-KB line in
+layout/draw *below* `view()` — never showed in the instrumentation, only in
+the dropped frames. Net: `payloads-150` raw text goes from a constant
+~48Hz stutter to a solid 60Hz. `view()` at ~0.5ms is 3% of the frame
+budget.
+
+¹ `nginx-800` forced to text mode was already 60Hz on this hardware before
+the change (its lines are wide but the machine kept up); the value is that
+it no longer *depends* on the machine keeping up with full-line shaping.
+
+Known minor artifacts (both mirror existing vertical behaviour, neither a
+stutter): the horizontal scrollbar thumb recalibrates downward as longer
+lines are discovered on the first scroll-through (monotonic, stabilises
+after one pass); `viewport_w` defaults to 1200 until the first scroll event
+(like `viewport_h`'s 600).
+
+Still not done under item 5: the scripted-scroll harness only drives
+vertical motion, so a horizontal sweep is a manual check
+(`LOGLENS_PERF_MODE=text`, scroll right, confirm the full line is reachable
+and nothing clips early).
 
 ## 6. Wrapping + variable row heights — the original "eventually" ask
 

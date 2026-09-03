@@ -225,6 +225,12 @@ pub struct ResultTab {
     /// Latest scroll offset / viewport height, for windowed rendering.
     pub scroll_y: f32,
     pub viewport_h: f32,
+    /// Latest horizontal scroll offset / viewport width. Table mode is
+    /// vertical-only so `scroll_x` stays 0 there; raw text mode slices each
+    /// row to `[scroll_x, scroll_x + viewport_w]` before shaping (see
+    /// `raw_text_view`), the horizontal analogue of `row_window`.
+    pub scroll_x: f32,
+    pub viewport_w: f32,
     /// The Hit whose `_source` the bottom detail panel is showing.
     pub selected_hit: Option<usize>,
     /// Pretty-printed `_source` of `selected_hit`, kept selectable.

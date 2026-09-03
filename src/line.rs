@@ -90,6 +90,14 @@ pub struct LineCache {
     lines: HashMap<usize, Line>,
     /// [`Layout::fingerprint`] the current entries were rendered under.
     key: u64,
+    /// The longest raw-text [`Line`] (in bytes) rendered since the last
+    /// [`Layout`] change — a monotonic, O(1)-per-miss estimate of the widest
+    /// line, used to size raw text mode's horizontal scrollbar without shaping
+    /// every full line. Byte length over-approximates monospace column width
+    /// for any non-ASCII content, so it never hides reachable text; it only
+    /// grows as longer lines scroll into view, the same way the vertical
+    /// extent grows with paging. Zero in Table mode (never updated there).
+    max_line_bytes: usize,
 }
 
 /// Rows kept cached on each side of the live window. Comfortably more than a
@@ -106,6 +114,7 @@ impl LineCache {
         let key = layout.fingerprint();
         if key != self.key {
             self.lines.clear();
+            self.max_line_bytes = 0;
             self.key = key;
             return;
         }
@@ -119,15 +128,28 @@ impl LineCache {
     /// miss. Assumes [`prepare`](Self::prepare) ran this frame with a matching
     /// `layout`.
     pub fn get(&mut self, index: usize, hit: &Hit, layout: &Layout) -> &Line {
-        self.lines
-            .entry(index)
-            .or_insert_with(|| render(hit, layout))
+        if !self.lines.contains_key(&index) {
+            let line = render(hit, layout);
+            if layout.mode == LayoutMode::RawText {
+                let bytes = line.parts.first().map_or(0, |p| p.text.len());
+                self.max_line_bytes = self.max_line_bytes.max(bytes);
+            }
+            self.lines.insert(index, line);
+        }
+        &self.lines[&index]
+    }
+
+    /// The longest raw-text line, in bytes, rendered since the last [`Layout`]
+    /// change. See [`max_line_bytes`](Self::max_line_bytes).
+    pub fn max_line_bytes(&self) -> usize {
+        self.max_line_bytes
     }
 
     /// Drops every entry. For the callers that replace or clear `tab.hits`
     /// wholesale, after which a positional key means something different.
     pub fn clear(&mut self) {
         self.lines.clear();
+        self.max_line_bytes = 0;
     }
 }
 
@@ -566,6 +588,32 @@ mod tests {
         assert!(cache.lines.contains_key(&233));
         assert!(!cache.lines.contains_key(&234));
         assert!(!cache.lines.contains_key(&280));
+    }
+
+    #[test]
+    fn line_cache_tracks_widest_raw_line_and_resets_it() {
+        let layout = raw_layout("%{message}");
+        let mut cache = LineCache::default();
+        cache.prepare(&layout, (0, 3));
+        cache.get(0, &hit(json!({ "message": "short" })), &layout);
+        cache.get(
+            1,
+            &hit(json!({ "message": "a much longer line here" })),
+            &layout,
+        );
+        cache.get(2, &hit(json!({ "message": "mid" })), &layout);
+        assert_eq!(cache.max_line_bytes(), "a much longer line here".len());
+
+        // A Layout change clears the estimate along with the entries.
+        let other = raw_layout("%{level}");
+        cache.prepare(&other, (0, 1));
+        assert_eq!(cache.max_line_bytes(), 0);
+
+        // Table mode never touches it.
+        let table = table_layout(&["message"], "@timestamp", false);
+        cache.prepare(&table, (0, 1));
+        cache.get(0, &hit(json!({ "message": "anything at all" })), &table);
+        assert_eq!(cache.max_line_bytes(), 0);
     }
 
     #[test]

@@ -22,6 +22,11 @@ use crate::line;
 use crate::results::{self, FILL_COLUMN_MAX_W, Paging, ROW_H, ResultTab, RunState, TotalHits};
 use crate::{ColumnDrag, ERR_RED, Message, WARN_AMBER, centered, field_label, icons, style};
 
+/// Extra pixels of line shaped past the viewport on each side in raw text
+/// mode, so a horizontal fling doesn't outrun the sliced text before the next
+/// frame catches up. The horizontal analogue of `results::WINDOW_BUFFER`.
+const RAW_SLICE_SLACK: f32 = 400.0;
+
 // --- Result tab view ---------------------------------------------
 
 pub(crate) fn result_view<'a>(
@@ -372,6 +377,8 @@ fn hit_table<'a>(
                 offset_y: offset.y,
                 viewport_h: viewport.bounds().height,
                 content_h: viewport.content_bounds().height,
+                offset_x: offset.x,
+                viewport_w: viewport.bounds().width,
             }
         });
 
@@ -402,11 +409,13 @@ fn hit_table<'a>(
 /// horizontal overflow reachable by scrolling. Row clicks open the same
 /// Hit-detail panel as Table mode.
 ///
-/// Unlike `hit_table`, cell text here is *not* truncated: this mode's
-/// `scrollable` handles real horizontal scrolling internally, and the app
-/// doesn't track its scroll offset — truncating without knowing what's
-/// currently scrolled into view would hide content a user could otherwise
-/// reach. Left as a known follow-up (see `docs/wide-line-rendering-resources.md`).
+/// Like `hit_table`'s per-cell truncation, each row is shaped only over the
+/// slice within `[scroll_x, scroll_x + viewport_w]` (plus [`RAW_SLICE_SLACK`])
+/// — the horizontal analogue of the vertical `row_window`. A leading spacer of
+/// the scrolled-off prefix's exact width keeps every character at its true
+/// position, so the slice never moves a visible pixel; the `scrollable`'s
+/// horizontal extent is set to `content_w` (the widest line, estimated from
+/// its byte length) so the scrollbar still reaches the end of every line.
 fn raw_text_view<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     let run_id = tab.run_id;
     let layout = tab.layout();
@@ -414,27 +423,48 @@ fn raw_text_view<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     let (start, end) = tab.row_window();
     let mut lines = tab.line_cache.borrow_mut();
     lines.prepare(&layout, (start, end));
+
+    let cache = AdvanceCache::shared();
+    let offset_x = tab.scroll_x.max(0.0);
+    let slice_w = tab.viewport_w.max(1.0) + RAW_SLICE_SLACK;
+    // The horizontal scrollbar must still span the widest line. Estimated as
+    // its byte length \u{d7} one monospace advance rather than shaped — bytes
+    // over-approximate column width for any non-ASCII run, so nothing
+    // scrollable-to is ever clipped; it only grows as longer lines scroll in,
+    // the way the vertical extent grows with paging.
+    let content_w = (lines.max_line_bytes() as f32 * cache.mono_advance()).max(tab.viewport_w);
+
     let mut body: Vec<Element<'_, Message>> = Vec::with_capacity(end - start + 2);
     if start > 0 {
         body.push(space().height(start as f32 * ROW_H).into());
     }
-    // Timed as a unit, mirroring `hit_table` — raw text mode renders each
-    // Hit's whole (untruncated) line, so this is where item 5's cost lives.
-    // `line::render` is cached per Hit (see `LineCache`); the shaping cost
-    // item 5 chases is below `view()`, untouched by that.
+    // Timed as a unit, mirroring `hit_table`. `line::render` is cached per Hit
+    // (see `LineCache`); the shaping cost item 5 chases is the `text` widget
+    // below `view()`, and is now bounded to the visible slice, not the whole
+    // multi-KB line.
     let rows_span = crate::perf::span("view.raw_text_rows");
     for (offset, hit) in tab.hits[start..end].iter().enumerate() {
         let index = start + offset;
         let selected = tab.selected_hit == Some(index);
         let rendered = lines.get(index, hit, &layout);
-        let content: Element<'_, Message> = match rendered.parts.first() {
-            Some(part) => part_widget(part, None),
-            None => text("").size(12.0).font(Font::MONOSPACE).into(),
-        };
+        let full = rendered.parts.first().map_or("", |p| p.text.as_str());
 
-        let row_el = container(content)
+        let (skip_w, visible_range) = raw_row_slice(cache, full, offset_x, slice_w);
+        let visible = &full[visible_range];
+
+        let line_row = row![
+            space().width(Length::Fixed(skip_w)),
+            text(visible.to_string())
+                .size(results::CELL_TEXT_SIZE)
+                .font(Font::MONOSPACE)
+                .wrapping(text::Wrapping::None),
+        ];
+
+        let row_el = container(line_row)
+            .width(Length::Fixed(content_w))
             .height(Length::Fixed(ROW_H))
             .padding(Padding::new(3.0).left(6.0))
+            .clip(true)
             .style(move |_| {
                 if selected {
                     style::panel(style::ACCENT)
@@ -471,6 +501,8 @@ fn raw_text_view<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
                 offset_y: offset.y,
                 viewport_h: viewport.bounds().height,
                 content_h: viewport.content_bounds().height,
+                offset_x: offset.x,
+                viewport_w: viewport.bounds().width,
             }
         });
 
@@ -480,6 +512,27 @@ fn raw_text_view<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         stacked = stacked.push(footer);
     }
     stacked.into()
+}
+
+/// The horizontally-virtualized slice of one raw-text line: the shaped width
+/// of the prefix scrolled off the left — used as a leading spacer, taken on a
+/// grapheme boundary so it never exceeds `offset_x` (the sub-character
+/// remainder falls under the row's left pad) — and the byte range of the line
+/// to hand a `text` widget: `slice_w` pixels starting at that boundary.
+/// Everything outside is off-screen or covered by the fling slack in
+/// `slice_w`. Because the spacer is the *exact* width of the skipped prefix,
+/// every glyph in `visible` lands at its true position regardless of where the
+/// grapheme boundary fell — the slice never shifts on screen as `offset_x`
+/// moves.
+fn raw_row_slice(
+    cache: &AdvanceCache,
+    full: &str,
+    offset_x: f32,
+    slice_w: f32,
+) -> (f32, std::ops::Range<usize>) {
+    let (skip_len, skip_w) = cache.take_width(full, offset_x);
+    let (vis_len, _) = cache.take_width(&full[skip_len..], slice_w);
+    (skip_w, skip_len..skip_len + vis_len)
 }
 
 fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Message> {
@@ -695,10 +748,10 @@ fn paging_footer<'a>(tab: &'a ResultTab) -> Option<Element<'a, Message>> {
 
 /// Renders one Part, truncated to `max_width` pixels of shaped text before
 /// being handed to iced — see [`AdvanceCache::take_width`] — so a widget
-/// never shapes text no Column could ever show. `max_width: None` renders
-/// the Part exactly as-is (used by raw text mode's real horizontal scrolling
-/// and the Format modal's small fixed-size preview, neither of which is safe
-/// or worth truncating; see the doc comment on [`raw_text_view`]).
+/// never shapes text no Column could ever show. `max_width: None` renders the
+/// Part exactly as-is (used only by the Format modal's small fixed-size
+/// preview; raw text mode does its own horizontal slicing in
+/// [`raw_text_view`]).
 fn part_widget<'a>(part: &line::Part, max_width: Option<f32>) -> Element<'a, Message> {
     let visible = match max_width {
         None => part.text.as_str(),
@@ -1077,4 +1130,63 @@ pub(crate) fn timeframe_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message> 
         .width(Fill)
         .padding(Padding::new(10.0).left(12.0).right(12.0))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache() -> AdvanceCache {
+        AdvanceCache::new(Font::MONOSPACE, results::CELL_TEXT_SIZE)
+    }
+
+    #[test]
+    fn raw_slice_at_the_left_edge_starts_from_the_beginning() {
+        let cache = cache();
+        let line = "GET /api/v1/orders HTTP/1.1 200 1234";
+        let (skip_w, range) = raw_row_slice(&cache, line, 0.0, 10_000.0);
+        assert_eq!(skip_w, 0.0);
+        assert_eq!(range.start, 0);
+        // A generous slice budget keeps the whole line.
+        assert_eq!(range.end, line.len());
+    }
+
+    #[test]
+    fn raw_slice_drops_a_scrolled_off_prefix_without_overshooting_the_offset() {
+        let cache = cache();
+        let line = "x".repeat(2000);
+        let offset_x = 300.0;
+        let (skip_w, range) = raw_row_slice(&cache, &line, offset_x, 400.0);
+
+        // The spacer never pushes past the real scroll offset...
+        assert!(skip_w <= offset_x);
+        // ...but it is tight: one more character would have exceeded it.
+        let (_, one_more) = cache.take_width(&line[..range.start + 1], f32::INFINITY);
+        assert!(one_more > offset_x);
+        assert!(line.is_char_boundary(range.start));
+    }
+
+    #[test]
+    fn raw_slice_keeps_only_a_slice_width_worth_of_text() {
+        let cache = cache();
+        let line = "y".repeat(5000);
+        let slice_w = 250.0;
+        let (_, range) = raw_row_slice(&cache, &line, 600.0, slice_w);
+
+        assert!(range.start > 0 && range.end < line.len());
+        let (_, shown) = cache.take_width(&line[range.clone()], f32::INFINITY);
+        assert!(shown <= slice_w);
+        // Tight on the right edge too.
+        let (_, one_more) = cache.take_width(&line[range.start..range.end + 1], f32::INFINITY);
+        assert!(one_more > slice_w);
+    }
+
+    #[test]
+    fn raw_slice_of_a_short_line_is_the_whole_line() {
+        let cache = cache();
+        let line = "tiny";
+        let (skip_w, range) = raw_row_slice(&cache, line, 0.0, 800.0);
+        assert_eq!(skip_w, 0.0);
+        assert_eq!(&line[range], "tiny");
+    }
 }
