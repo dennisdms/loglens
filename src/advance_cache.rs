@@ -93,6 +93,55 @@ impl AdvanceCache {
         (text.len(), consumed)
     }
 
+    /// How many visual rows `text` wraps to at `width` pixels under glyph
+    /// wrapping — break anywhere a grapheme would overflow, the
+    /// [`cosmic_text::Wrap::Glyph`] model iced uses for
+    /// [`iced::widget::text::Wrapping::Glyph`] — plus whether the count was
+    /// clamped at `max_rows`. Empty text is one row; an embedded `\n` (or
+    /// `\r\n`) forces a break. `width <= 0` yields `(1, false)`.
+    ///
+    /// Same trade as [`take_width`](Self::take_width): summed grapheme
+    /// advances instead of shaping the whole line, one lock for the scan. The
+    /// row-height model calls this per visible Hit every frame the window
+    /// moves (see [`crate::line::LineCache`]); off-screen Hits use a cheaper
+    /// byte-length estimate.
+    pub fn wrap_rows(&self, text: &str, width: f32, max_rows: u32) -> (u32, bool) {
+        if width <= 0.0 {
+            return (1, false);
+        }
+        let mut widths = self.widths.lock().expect("lock advance cache");
+        let mut rows = 1u32;
+        let mut consumed = 0.0f32;
+        for grapheme in text.graphemes(true) {
+            if grapheme == "\n" || grapheme == "\r\n" {
+                rows += 1;
+                if rows > max_rows {
+                    return (max_rows, true);
+                }
+                consumed = 0.0;
+                continue;
+            }
+            let w = match widths.get(grapheme) {
+                Some(&w) => w,
+                None => {
+                    let w = self.shape_advance(grapheme);
+                    widths.insert(grapheme.into(), w);
+                    w
+                }
+            };
+            if consumed > 0.0 && consumed + w > width {
+                rows += 1;
+                if rows > max_rows {
+                    return (max_rows, true);
+                }
+                consumed = w;
+            } else {
+                consumed += w;
+            }
+        }
+        (rows, false)
+    }
+
     /// The advance width of a single plain monospace character, in pixels —
     /// the width every ASCII cell char takes in this font. Used as an O(1)
     /// per-line width estimate (byte length \u{d7} this) for raw text mode's
@@ -188,6 +237,96 @@ mod tests {
         let s = "e\u{0301}x";
         let (len, _) = cache().take_width(s, 0.1);
         assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn wrap_rows_short_line_is_one_row() {
+        let cache = cache();
+        assert_eq!(cache.wrap_rows("GET /orders 200", 1000.0, 400), (1, false));
+        assert_eq!(cache.wrap_rows("", 1000.0, 400), (1, false));
+    }
+
+    #[test]
+    fn wrap_rows_counts_a_long_line() {
+        let cache = cache();
+        let adv = cache.mono_advance();
+        let line = "x".repeat(500);
+        let (rows, clamped) = cache.wrap_rows(&line, 100.0, 400);
+        assert!(!clamped);
+        // Greedy glyph wrap: each row holds as many whole chars as fit under
+        // 100px, so the count is 500 / (chars per row), rounded up.
+        let per_row = (100.0 / adv).floor() as u32;
+        assert_eq!(rows, 500_u32.div_ceil(per_row));
+    }
+
+    #[test]
+    fn wrap_rows_breaks_on_newlines() {
+        let cache = cache();
+        assert_eq!(cache.wrap_rows("a\nb\nc\nd", 1000.0, 400), (4, false));
+        // `\r\n` is one grapheme cluster — still one break.
+        assert_eq!(cache.wrap_rows("a\r\nb", 1000.0, 400), (2, false));
+    }
+
+    #[test]
+    fn wrap_rows_clamps_at_max_rows() {
+        let cache = cache();
+        let line = "y".repeat(5000);
+        let (rows, clamped) = cache.wrap_rows(&line, 50.0, 8);
+        assert_eq!(rows, 8);
+        assert!(clamped);
+    }
+
+    #[test]
+    fn wrap_rows_never_splits_a_grapheme_cluster() {
+        let cache = cache();
+        // Each "e\u{0301}" is one cluster; a width fitting ~2 of them must
+        // still land every cluster whole (row count stays consistent with a
+        // plain 2-per-row split of 6 clusters).
+        let s = "e\u{0301}".repeat(6);
+        let two_wide = cache.mono_advance() * 2.5;
+        let (rows, _) = cache.wrap_rows(&s, two_wide, 400);
+        assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn wrap_rows_matches_cosmic_text_glyph_wrap() {
+        use cosmic_text::{Attrs, Buffer, Metrics, Shaping, Wrap};
+
+        let cache = cache();
+        let json_blob = format!("{{\"k\":\"{}\"}}", "v".repeat(900));
+        let samples = [
+            "short line",
+            &"abcdefghij ".repeat(40),
+            &"/api/v1/orders?id=1234&trace=abcdef0123456789 ".repeat(12),
+            &json_blob,
+        ];
+        for (i, text) in samples.iter().enumerate() {
+            for width in [180.0f32, 420.0, 900.0] {
+                let (ours, _) = cache.wrap_rows(text, width, 4000);
+
+                let font_system = iced::advanced::graphics::text::font_system();
+                let mut fs = font_system.write().unwrap();
+                let raw = fs.raw();
+                let metrics = Metrics::new(12.0, 12.0 * 1.3);
+                let mut buffer = Buffer::new(raw, metrics);
+                buffer.set_wrap(raw, Wrap::Glyph);
+                buffer.set_size(raw, Some(width), None);
+                buffer.set_text(
+                    raw,
+                    text,
+                    &Attrs::new().family(cosmic_text::Family::Monospace),
+                    Shaping::Advanced,
+                    None,
+                );
+                let theirs = buffer.layout_runs().count() as u32;
+                drop(fs);
+
+                assert_eq!(
+                    ours, theirs,
+                    "sample {i} at width {width}: ours={ours} cosmic={theirs}"
+                );
+            }
+        }
     }
 
     #[test]

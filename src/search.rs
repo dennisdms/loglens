@@ -124,6 +124,7 @@ impl SearchForm {
             columns: config::default_columns(),
             mode: crate::line::LayoutMode::default(),
             template: String::new(),
+            wrap: false,
         })
     }
 }

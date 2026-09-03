@@ -106,6 +106,12 @@ pub fn force_mode() -> Option<crate::line::LayoutMode> {
     }
 }
 
+/// Force line wrapping on in the opened tab, for measuring the item-6
+/// variable-row-height path. `LOGLENS_PERF_WRAP=1`. Off by default.
+pub fn force_wrap() -> bool {
+    std::env::var_os("LOGLENS_PERF_WRAP").is_some()
+}
+
 static SAMPLES: OnceLock<Mutex<BTreeMap<&'static str, Vec<f32>>>> = OnceLock::new();
 
 fn samples() -> &'static Mutex<BTreeMap<&'static str, Vec<f32>>> {

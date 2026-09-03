@@ -56,6 +56,7 @@ the file as-is.
 | `LOGLENS_HITS_REPEAT=N` | concatenate that fixture onto itself `N` times (default 10) — a small checked-in file standing in for an `N`× larger result set. `1` = the file as-is |
 | `LOGLENS_PERF_SEARCH=<id or name>` | which Saved Search to open (default: the first one configured) |
 | `LOGLENS_PERF_MODE=table\|text` | force the tab's Layout mode, overriding the Saved Search's |
+| `LOGLENS_PERF_WRAP=1` | force line wrapping on (item 6 — variable row heights) in the opened tab |
 
 Without `LOGLENS_HITS` it runs a real query, so a Saved Search must exist and
 the cluster must be reachable; use an **absolute** timeframe and stop the
@@ -124,7 +125,7 @@ reproducible stutter until item 5 (horizontal virtualization) landed; run
 
 The decision this drives:
 
-- `view` alone over budget → the cost is our code → plan items 1 / 3 / 7,
+- `view` alone over budget → the cost is our code → plan items 1 / 3 / 6,
   and a profiler run isolates which.
 - `view` small but `frame_interval` blowing past 16.7ms → the cost is
   **below** `view()` — iced layout / draw / present of what `view()` handed

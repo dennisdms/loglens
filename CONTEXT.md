@@ -130,6 +130,14 @@ plus the timestamp field and the UTC preference. The template is edited in the
 Format modal, opened from the options strip in Text mode.
 _Avoid_: format, view mode, display settings
 
+**Wrap**:
+A per-Result-Tab toggle (in the options strip, off by default, saved on the
+Saved Search) that lets a Hit's text spill onto multiple visual rows instead of
+being truncated (Table) or scrolled to horizontally (Text). Row heights then
+vary; a Hit that wraps past the **Wrap row cap** (Settings) shows a "… more
+lines" control that expands it.
+_Avoid_: word wrap, line break, multiline
+
 **Line**:
 One Hit rendered for display: an ordered list of Parts. A Columns Layout gives
 one Part per Column; a template Layout gives one. The table draws Part _i_ into

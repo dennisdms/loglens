@@ -8,13 +8,18 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// The whole persisted config document.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub connections: Vec<Connection>,
     /// Render Hit timestamps in UTC rather than local time.
     #[serde(default)]
     pub utc_timestamps: bool,
+    /// Max visual rows a single wrapped Hit shows before an inline
+    /// "… more lines" expand affordance. `None` = no cap (wrap to full
+    /// height). Applies across every Result Tab.
+    #[serde(default = "default_wrap_row_cap")]
+    pub wrap_row_cap: Option<usize>,
     /// Elasticsearch fetch limits, tuned from the Settings window.
     #[serde(default)]
     pub es: EsSettings,
@@ -27,8 +32,25 @@ pub struct Config {
     pub last_update_check: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            connections: Vec::new(),
+            utc_timestamps: false,
+            wrap_row_cap: default_wrap_row_cap(),
+            es: EsSettings::default(),
+            last_update_check: None,
+        }
+    }
+}
+
 /// Hard ceiling on the batch size Elasticsearch will return in one `_search`.
 pub const FETCH_SIZE_MAX: usize = 10_000;
+
+/// Default cap on a wrapped Hit's visual rows before the expand affordance.
+pub fn default_wrap_row_cap() -> Option<usize> {
+    Some(8)
+}
 
 pub fn default_max_results() -> usize {
     10_000
@@ -116,6 +138,11 @@ pub struct SavedSearch {
     /// `Layout::default_template`. An empty string is never rendered directly.
     #[serde(default)]
     pub template: String,
+    /// Wrap long Hit text onto multiple visual rows instead of truncating /
+    /// scrolling horizontally. Defaults to off so existing configs load
+    /// unchanged.
+    #[serde(default)]
+    pub wrap: bool,
 }
 
 /// One field in a Saved Search's sort order.

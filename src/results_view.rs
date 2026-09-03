@@ -10,16 +10,19 @@
 //! `results.rs` already uses.
 
 use iced::widget::svg::Handle;
+use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{
     button, column, container, mouse_area, pick_list, radio, row, rule, scrollable, space, svg,
     text, text_editor, text_input, tooltip,
 };
-use iced::{Border, Color, Element, Fill, Font, Length, Padding};
+use iced::{Border, Color, Element, Fill, Font, Length, Padding, Pixels};
 
 use crate::advance_cache::AdvanceCache;
 use crate::config::{TimeUnit, TimeframeMode};
-use crate::line;
-use crate::results::{self, FILL_COLUMN_MAX_W, Paging, ROW_H, ResultTab, RunState, TotalHits};
+use crate::line::{self, Affordance};
+use crate::results::{
+    self, FILL_COLUMN_MAX_W, Paging, ROW_H, ResultTab, RunState, TotalHits, WRAP_LINE_H,
+};
 use crate::{ColumnDrag, ERR_RED, Message, WARN_AMBER, centered, field_label, icons, style};
 
 /// Extra pixels of line shaped past the viewport on each side in raw text
@@ -34,11 +37,14 @@ pub(crate) fn result_view<'a>(
     header_hover: Option<usize>,
     grip_hover: Option<usize>,
     column_drag: Option<&ColumnDrag>,
+    wrap_row_cap: Option<usize>,
 ) -> Element<'a, Message> {
     let hits_view = || -> Element<'a, Message> {
         match tab.mode {
-            line::LayoutMode::Table => hit_table(tab, header_hover, grip_hover, column_drag),
-            line::LayoutMode::RawText => raw_text_view(tab),
+            line::LayoutMode::Table => {
+                hit_table(tab, header_hover, grip_hover, column_drag, wrap_row_cap)
+            }
+            line::LayoutMode::RawText => raw_text_view(tab, wrap_row_cap),
         }
     };
     let body: Element<'_, Message> = match &tab.state {
@@ -179,6 +185,25 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         .spacing(6.0)
         .align_y(iced::Alignment::Center);
 
+    // Wrap toggle: long Hit text onto multiple visual rows instead of
+    // truncating (Table) / scrolling sideways (Text).
+    let wrap_btn = button(text("Wrap").size(12.0).color(if tab.wrap {
+        style::TEXT
+    } else {
+        style::TEXT_DIM
+    }))
+    .on_press(Message::ResultWrap(run_id))
+    .padding(Padding::new(5.0).left(9.0).right(9.0))
+    .style(style::icon_button(tab.wrap));
+    group = group.push(
+        tooltip(
+            wrap_btn,
+            tip(if tab.wrap { "Wrap: on" } else { "Wrap: off" }),
+            tooltip::Position::Bottom,
+        )
+        .gap(4.0),
+    );
+
     if is_raw {
         let format_btn = button(icon_box(&icons::FORMAT, style::TEXT))
             .on_press(Message::OpenFormat(run_id))
@@ -215,6 +240,7 @@ fn hit_table<'a>(
     header_hover: Option<usize>,
     grip_hover: Option<usize>,
     column_drag: Option<&ColumnDrag>,
+    wrap_row_cap: Option<usize>,
 ) -> Element<'a, Message> {
     let run_id = tab.run_id;
     let last = tab.columns.len().saturating_sub(1);
@@ -305,13 +331,22 @@ fn hit_table<'a>(
 
     // Only build widgets for the slice around the viewport; pad the rest
     // with spacers so the scrollbar still spans every loaded Hit.
-    let (start, end) = tab.row_window();
     let layout = tab.layout();
+    let adv = AdvanceCache::shared();
+    let ctx = tab.wrap_ctx(wrap_row_cap);
+    let wrap_on = ctx.on;
+    // The bucketed width the flexible last column wraps at — matches the
+    // height model so its estimate and the drawn text agree.
+    let fill_w = ctx.width;
+
     let mut lines = tab.line_cache.borrow_mut();
-    lines.prepare(&layout, (start, end));
+    lines.prepare_heights(&tab.hits, &layout, ctx, adv);
+    let (start, end) = tab.row_window(&lines);
+    lines.prepare_lines((start, end));
+
     let mut body: Vec<Element<'_, Message>> = Vec::with_capacity(end - start + 2);
     if start > 0 {
-        body.push(space().height(start as f32 * ROW_H).into());
+        body.push(space().height(lines.offset(start)).into());
     }
     // Timed as a unit: this loop is the windowed-render cost the wide-line
     // work is chasing — `line::render` (cached per Hit, see `LineCache`) plus
@@ -321,37 +356,56 @@ fn hit_table<'a>(
     for (offset, hit) in tab.hits[start..end].iter().enumerate() {
         let index = start + offset;
         let selected = tab.selected_hit == Some(index);
-        let rendered = lines.get(index, hit, &layout);
-        let cells = container(
-            row(tab
-                .columns
-                .iter()
-                .enumerate()
-                .map(|(i, col)| -> Element<'_, Message> {
-                    let (width, max_text_w) = if i == last {
-                        (Length::Fill, FILL_COLUMN_MAX_W)
-                    } else {
-                        let w = tab.col_width(col);
-                        (Length::Fixed(w), w)
-                    };
-                    container(part_widget(&rendered.parts[i], Some(max_text_w)))
-                        .width(width)
-                        .padding(Padding::new(3.0).left(6.0))
-                        .clip(true)
-                        .into()
-                }))
-            .spacing(8.0),
-        )
-        .width(Fill)
-        .height(Length::Fixed(ROW_H))
-        .clip(true)
-        .style(move |_| {
-            if selected {
-                style::panel(style::ACCENT)
-            } else {
-                container::Style::default()
-            }
-        });
+        // Render + upgrade this Hit's exact wrapped-row count, then read the
+        // (now immutable) metrics for its row.
+        let _ = lines.get(index, hit, &layout, adv);
+        let disp = lines.disp_rows(index);
+        let affordance = lines.affordance(index);
+        let row_h = lines.row_height(index);
+        let rendered = lines.line(index);
+
+        let cells = row(tab
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, col)| -> Element<'_, Message> {
+                let wraps = wrap_on && i == last;
+                let (width, budget, wrapping) = if wraps {
+                    (
+                        Length::Fixed(fill_w),
+                        disp.max(1) as f32 * fill_w,
+                        Wrapping::Glyph,
+                    )
+                } else if i == last {
+                    (Length::Fill, FILL_COLUMN_MAX_W, Wrapping::None)
+                } else {
+                    let w = tab.col_width(col);
+                    (Length::Fixed(w), w, Wrapping::None)
+                };
+                container(part_widget(&rendered.parts[i], Some(budget), wrapping))
+                    .width(width)
+                    .padding(Padding::new(3.0).left(6.0))
+                    .clip(!wraps)
+                    .into()
+            }))
+        .spacing(8.0)
+        .align_y(iced::Alignment::Start);
+
+        let mut stack = column![cells];
+        if let Some(strip) = affordance_strip(run_id, index, affordance) {
+            stack = stack.push(strip);
+        }
+        let cells = container(stack)
+            .width(Fill)
+            .height(Length::Fixed(row_h))
+            .clip(true)
+            .style(move |_| {
+                if selected {
+                    style::panel(style::ACCENT)
+                } else {
+                    container::Style::default()
+                }
+            });
 
         body.push(
             mouse_area(cells)
@@ -360,10 +414,10 @@ fn hit_table<'a>(
         );
     }
     drop(rows_span);
+    let trailing_h = lines.content_height() - lines.offset(end);
     drop(lines);
-    let trailing = tab.hits.len().saturating_sub(end);
-    if trailing > 0 {
-        body.push(space().height(trailing as f32 * ROW_H).into());
+    if trailing_h > 0.5 {
+        body.push(space().height(trailing_h).into());
     }
 
     let table = scrollable(column(body).width(Fill))
@@ -416,53 +470,85 @@ fn hit_table<'a>(
 /// position, so the slice never moves a visible pixel; the `scrollable`'s
 /// horizontal extent is set to `content_w` (the widest line, estimated from
 /// its byte length) so the scrollbar still reaches the end of every line.
-fn raw_text_view<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
+fn raw_text_view<'a>(tab: &'a ResultTab, wrap_row_cap: Option<usize>) -> Element<'a, Message> {
     let run_id = tab.run_id;
     let layout = tab.layout();
 
-    let (start, end) = tab.row_window();
-    let mut lines = tab.line_cache.borrow_mut();
-    lines.prepare(&layout, (start, end));
-
     let cache = AdvanceCache::shared();
+    let ctx = tab.wrap_ctx(wrap_row_cap);
+    let wrap_on = ctx.on;
+    let wrap_w = ctx.width;
+
+    let mut lines = tab.line_cache.borrow_mut();
+    lines.prepare_heights(&tab.hits, &layout, ctx, cache);
+    let (start, end) = tab.row_window(&lines);
+    lines.prepare_lines((start, end));
+
     let offset_x = tab.scroll_x.max(0.0);
     let slice_w = tab.viewport_w.max(1.0) + RAW_SLICE_SLACK;
-    // The horizontal scrollbar must still span the widest line. Estimated as
-    // its byte length \u{d7} one monospace advance rather than shaped — bytes
-    // over-approximate column width for any non-ASCII run, so nothing
-    // scrollable-to is ever clipped; it only grows as longer lines scroll in,
-    // the way the vertical extent grows with paging.
-    let content_w = (lines.max_line_bytes() as f32 * cache.mono_advance()).max(tab.viewport_w);
+    // The horizontal scrollbar must still span the widest line while *not*
+    // wrapping. Estimated as its byte length \u{d7} one monospace advance rather
+    // than shaped — bytes over-approximate column width for any non-ASCII run,
+    // so nothing scrollable-to is ever clipped; it only grows as longer lines
+    // scroll in, the way the vertical extent grows with paging. While
+    // wrapping, rows are viewport-wide and there is nothing to scroll to.
+    let content_w = if wrap_on {
+        tab.viewport_w
+    } else {
+        (lines.max_line_bytes() as f32 * cache.mono_advance()).max(tab.viewport_w)
+    };
 
     let mut body: Vec<Element<'_, Message>> = Vec::with_capacity(end - start + 2);
     if start > 0 {
-        body.push(space().height(start as f32 * ROW_H).into());
+        body.push(space().height(lines.offset(start)).into());
     }
     // Timed as a unit, mirroring `hit_table`. `line::render` is cached per Hit
     // (see `LineCache`); the shaping cost item 5 chases is the `text` widget
-    // below `view()`, and is now bounded to the visible slice, not the whole
-    // multi-KB line.
+    // below `view()`, and is bounded either to the visible horizontal slice
+    // (not wrapping) or to `disp_rows` \u{d7} width (wrapping).
     let rows_span = crate::perf::span("view.raw_text_rows");
     for (offset, hit) in tab.hits[start..end].iter().enumerate() {
         let index = start + offset;
         let selected = tab.selected_hit == Some(index);
-        let rendered = lines.get(index, hit, &layout);
-        let full = rendered.parts.first().map_or("", |p| p.text.as_str());
+        let _ = lines.get(index, hit, &layout, cache);
+        let disp = lines.disp_rows(index);
+        let affordance = lines.affordance(index);
+        let row_h = lines.row_height(index);
+        let full = lines
+            .line(index)
+            .parts
+            .first()
+            .map_or("", |p| p.text.as_str());
 
-        let (skip_w, visible_range) = raw_row_slice(cache, full, offset_x, slice_w);
-        let visible = &full[visible_range];
+        let line_row: Element<'_, Message> = if wrap_on {
+            let (len, _) = cache.take_width(full, disp.max(1) as f32 * wrap_w);
+            row![
+                text(full[..len].to_string())
+                    .size(results::CELL_TEXT_SIZE)
+                    .font(Font::MONOSPACE)
+                    .wrapping(Wrapping::Glyph)
+                    .line_height(LineHeight::Absolute(Pixels(WRAP_LINE_H))),
+            ]
+            .into()
+        } else {
+            let (skip_w, visible_range) = raw_row_slice(cache, full, offset_x, slice_w);
+            row![
+                space().width(Length::Fixed(skip_w)),
+                text(full[visible_range].to_string())
+                    .size(results::CELL_TEXT_SIZE)
+                    .font(Font::MONOSPACE)
+                    .wrapping(Wrapping::None),
+            ]
+            .into()
+        };
 
-        let line_row = row![
-            space().width(Length::Fixed(skip_w)),
-            text(visible.to_string())
-                .size(results::CELL_TEXT_SIZE)
-                .font(Font::MONOSPACE)
-                .wrapping(text::Wrapping::None),
-        ];
-
-        let row_el = container(line_row)
+        let mut stack = column![line_row];
+        if let Some(strip) = affordance_strip(run_id, index, affordance) {
+            stack = stack.push(strip);
+        }
+        let row_el = container(stack)
             .width(Length::Fixed(content_w))
-            .height(Length::Fixed(ROW_H))
+            .height(Length::Fixed(row_h))
             .padding(Padding::new(3.0).left(6.0))
             .clip(true)
             .style(move |_| {
@@ -480,10 +566,10 @@ fn raw_text_view<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         );
     }
     drop(rows_span);
+    let trailing_h = lines.content_height() - lines.offset(end);
     drop(lines);
-    let trailing = tab.hits.len().saturating_sub(end);
-    if trailing > 0 {
-        body.push(space().height(trailing as f32 * ROW_H).into());
+    if trailing_h > 0.5 {
+        body.push(space().height(trailing_h).into());
     }
 
     let view = scrollable(column(body))
@@ -748,11 +834,16 @@ fn paging_footer<'a>(tab: &'a ResultTab) -> Option<Element<'a, Message>> {
 
 /// Renders one Part, truncated to `max_width` pixels of shaped text before
 /// being handed to iced — see [`AdvanceCache::take_width`] — so a widget
-/// never shapes text no Column could ever show. `max_width: None` renders the
+/// never shapes text no Column could ever show. With `wrapping` set to
+/// [`Wrapping::Glyph`] the `max_width` budget bounds how much text a wrapped
+/// cell shapes (`disp_rows` \u{d7} column width). `max_width: None` renders the
 /// Part exactly as-is (used only by the Format modal's small fixed-size
-/// preview; raw text mode does its own horizontal slicing in
-/// [`raw_text_view`]).
-fn part_widget<'a>(part: &line::Part, max_width: Option<f32>) -> Element<'a, Message> {
+/// preview).
+fn part_widget<'a>(
+    part: &line::Part,
+    max_width: Option<f32>,
+    wrapping: Wrapping,
+) -> Element<'a, Message> {
     let visible = match max_width {
         None => part.text.as_str(),
         Some(max_width) => {
@@ -760,11 +851,46 @@ fn part_widget<'a>(part: &line::Part, max_width: Option<f32>) -> Element<'a, Mes
             &part.text[..len]
         }
     };
-    text(visible.to_string())
+    let widget = text(visible.to_string())
         .size(results::CELL_TEXT_SIZE)
         .font(Font::MONOSPACE)
-        .wrapping(text::Wrapping::None)
-        .into()
+        .wrapping(wrapping);
+    match wrapping {
+        Wrapping::None => widget.into(),
+        _ => widget
+            .line_height(LineHeight::Absolute(Pixels(WRAP_LINE_H)))
+            .into(),
+    }
+}
+
+/// The expand / collapse / truncation affordance strip at the bottom of a
+/// wrapped row, or `None` when the row shows in full. Its height is already
+/// folded into the row-height model ([`results::WRAP_AFFORDANCE_H`]).
+fn affordance_strip<'a>(
+    run_id: u64,
+    index: usize,
+    affordance: Affordance,
+) -> Option<Element<'a, Message>> {
+    let label = match affordance {
+        Affordance::None => return None,
+        Affordance::Expand(n) => format!("\u{ff0b} {n} more line{}", if n == 1 { "" } else { "s" }),
+        Affordance::Collapse => "\u{ff0d} collapse".to_string(),
+        Affordance::Truncated => {
+            return Some(
+                text("line truncated \u{2014} open Hit detail for the rest")
+                    .size(10.0)
+                    .color(style::TEXT_DIM)
+                    .into(),
+            );
+        }
+    };
+    Some(
+        button(text(label).size(10.0).color(style::ACCENT))
+            .on_press(Message::ResultHitExpand(run_id, index))
+            .padding(Padding::new(1.0).left(4.0).right(4.0))
+            .style(style::bare_button())
+            .into(),
+    )
 }
 
 // --- Format modal --------------------------------------------------------
@@ -869,7 +995,7 @@ pub(crate) fn format_modal<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         for hit in tab.hits.iter().take(10) {
             let rendered = line::render(hit, &preview_layout);
             let content: Element<'_, Message> = match rendered.parts.first() {
-                Some(part) => part_widget(part, None),
+                Some(part) => part_widget(part, None, Wrapping::None),
                 None => text("").size(12.0).font(Font::MONOSPACE).into(),
             };
             lines = lines.push(container(content).height(Length::Fixed(ROW_H)));

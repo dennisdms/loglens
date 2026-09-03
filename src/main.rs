@@ -438,14 +438,20 @@ enum Updating {
 struct SettingsDraft {
     max_results: String,
     fetch_size: String,
+    /// Empty string = no cap; otherwise the parsed row cap.
+    wrap_row_cap: String,
     error: Option<String>,
 }
 
 impl SettingsDraft {
-    fn from_settings(es: config::EsSettings) -> Self {
+    fn from_config(config: &config::Config) -> Self {
         Self {
-            max_results: es.max_results.to_string(),
-            fetch_size: es.fetch_size.to_string(),
+            max_results: config.es.max_results.to_string(),
+            fetch_size: config.es.fetch_size.to_string(),
+            wrap_row_cap: config
+                .wrap_row_cap
+                .map(|n| n.to_string())
+                .unwrap_or_default(),
             error: None,
         }
     }
@@ -617,6 +623,10 @@ enum Message {
     // Result tab: Layout mode + raw text template
     /// Switch a Result Tab between Table and raw text mode.
     ResultLayoutMode(u64, line::LayoutMode),
+    /// Toggle line wrapping (variable row heights) for a Result Tab.
+    ResultWrap(u64),
+    /// Expand / collapse one wrapped Hit past the global row cap.
+    ResultHitExpand(u64, usize),
     /// A keystroke in the raw text template input.
     ResultTemplateDraft(u64, String),
     /// Commit the raw text template draft (Enter).
@@ -689,6 +699,7 @@ enum Message {
     OpenSettings,
     SettingsMaxResults(String),
     SettingsFetchSize(String),
+    SettingsWrapCap(String),
     /// Validate + persist the Settings draft, then close the window.
     SettingsSave,
     /// Close the Settings window without saving.
@@ -755,7 +766,7 @@ impl LogLens {
         });
 
         let app = Self {
-            settings_draft: SettingsDraft::from_settings(config.es),
+            settings_draft: SettingsDraft::from_config(&config),
             config,
             open_tabs: Vec::new(),
             active_tab: None,
@@ -1378,6 +1389,20 @@ impl LogLens {
                     self.sync_saved_from_result(run_id);
                 }
             }
+            Message::ResultWrap(run_id) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.wrap = !rt.wrap;
+                    // The next `prepare_heights` sees the `WrapCtx` change and
+                    // rebuilds the row-height model; a one-off render pass
+                    // measures every line the first time wrap turns on.
+                }
+                self.sync_saved_from_result(run_id);
+            }
+            Message::ResultHitExpand(run_id, index) => {
+                if let Some(rt) = self.result_mut(run_id) {
+                    rt.line_cache.get_mut().toggle_expand(index);
+                }
+            }
             Message::ResultTemplateDraft(run_id, v) => {
                 if let Some(rt) = self.result_mut(run_id) {
                     rt.template_draft = v;
@@ -1450,6 +1475,9 @@ impl LogLens {
                         if let Some(mode) = perf::force_mode() {
                             rt.mode = mode;
                             rt.resolve_template();
+                        }
+                        if perf::force_wrap() {
+                            rt.wrap = true;
                         }
                     }
                     if let Some(perf) = self.perf.as_mut() {
@@ -1524,7 +1552,17 @@ impl LogLens {
                     perf::dump();
                     return iced::exit();
                 };
-                let content_h = rt.hits.len() as f32 * results::ROW_H;
+                // The row-height model knows the real content height (it may
+                // be variable-height wrapped rows); fall back to a flat grid
+                // only before the first `view` has primed it.
+                let content_h = {
+                    let h = rt.line_cache.borrow().content_height();
+                    if h > 0.0 {
+                        h
+                    } else {
+                        rt.hits.len() as f32 * results::ROW_H
+                    }
+                };
                 let target_y = progress * (content_h - rt.viewport_h).max(0.0);
                 // Set `scroll_y` directly — it is what `row_window()` reads, so
                 // this is what actually shifts the rendered slice — then move
@@ -1669,7 +1707,7 @@ impl LogLens {
                 if let Some(id) = self.settings_window {
                     return window::gain_focus(id);
                 }
-                self.settings_draft = SettingsDraft::from_settings(self.config.es);
+                self.settings_draft = SettingsDraft::from_config(&self.config);
                 let (id, open) = window::open(settings_window_settings());
                 self.settings_window = Some(id);
                 return open.discard();
@@ -1680,6 +1718,10 @@ impl LogLens {
             }
             Message::SettingsFetchSize(v) => {
                 self.settings_draft.fetch_size = v;
+                self.settings_draft.error = None;
+            }
+            Message::SettingsWrapCap(v) => {
+                self.settings_draft.wrap_row_cap = v;
                 self.settings_draft.error = None;
             }
             Message::SettingsSave => return self.save_settings(),
@@ -1887,18 +1929,39 @@ impl LogLens {
             }
         };
 
+        // Wrap row cap: blank / "none" / "0" means no cap.
+        let wrap_cap_raw = self.settings_draft.wrap_row_cap.trim().to_ascii_lowercase();
+        let wrap_row_cap =
+            if wrap_cap_raw.is_empty() || wrap_cap_raw == "none" || wrap_cap_raw == "0" {
+                None
+            } else {
+                match wrap_cap_raw.replace([',', '_'], "").parse::<usize>() {
+                    Ok(n) => Some(n.max(1)),
+                    Err(_) => {
+                        self.settings_draft.error = Some(
+                            "Wrap row cap must be a whole number (or blank for none)".to_string(),
+                        );
+                        return Task::none();
+                    }
+                }
+            };
+
         let es = config::EsSettings {
             max_results,
             fetch_size,
         }
         .normalized();
         self.config.es = es;
-        self.settings_draft = SettingsDraft::from_settings(es);
+        self.config.wrap_row_cap = wrap_row_cap;
+        self.settings_draft = SettingsDraft::from_config(&self.config);
 
         for tab in &mut self.open_tabs {
             if let Tab::Result(rt) = tab {
                 rt.max_results = es.max_results;
                 rt.fetch_size = es.fetch_size;
+                // A changed `wrap_row_cap` reaches the row-height model
+                // through `WrapCtx` — the next `prepare_heights` re-keys and
+                // rebuilds it, no explicit reset needed.
             }
         }
 
@@ -2151,6 +2214,7 @@ impl LogLens {
             columns,
             sort,
             mode,
+            wrap,
             template,
         )) = self.result_mut(run_id).map(|rt| {
             (
@@ -2162,6 +2226,7 @@ impl LogLens {
                 rt.columns.clone(),
                 rt.sort.clone(),
                 rt.mode,
+                rt.wrap,
                 rt.template.clone(),
             )
         })
@@ -2177,6 +2242,7 @@ impl LogLens {
             saved.columns = columns;
             saved.sort = sort;
             saved.mode = mode;
+            saved.wrap = wrap;
             saved.template = template;
         }
         if let Err(err) = config::save(&self.config) {
@@ -2504,6 +2570,7 @@ impl LogLens {
             max_results: self.config.es.max_results,
             fetch_size: self.config.es.fetch_size,
             mode: saved.mode,
+            wrap: saved.wrap,
             template: saved.template.clone(),
             template_draft: saved.template.clone(),
             format_open: false,
@@ -2835,6 +2902,7 @@ impl LogLens {
                 self.header_hover,
                 self.grip_hover,
                 self.column_drag.as_ref(),
+                self.config.wrap_row_cap,
             ),
             None => centered("Open a Saved Search from the sidebar", TEXT_DIM),
         }
@@ -3443,6 +3511,22 @@ impl LogLens {
         ]
         .spacing(4.0);
 
+        let wrap_cap = column![
+            field_label("Wrap row cap"),
+            text(
+                "With Wrap on, the most visual rows one Hit shows before a \
+                 \u{201c}\u{2026} more lines\u{201d} toggle. Blank = no cap."
+            )
+            .size(11.0)
+            .color(TEXT_DIM),
+            text_input("none", &draft.wrap_row_cap)
+                .on_input(Message::SettingsWrapCap)
+                .on_submit(Message::SettingsSave)
+                .padding(6.0)
+                .width(Length::Fixed(140.0)),
+        ]
+        .spacing(4.0);
+
         let mut col = column![
             text("Elasticsearch").size(16.0).color(TEXT),
             text(
@@ -3454,6 +3538,10 @@ impl LogLens {
             space().height(4.0),
             max_results,
             fetch_size,
+            rule::horizontal(1.0),
+            text("Display").size(16.0).color(TEXT),
+            space().height(4.0),
+            wrap_cap,
         ]
         .spacing(10.0);
 

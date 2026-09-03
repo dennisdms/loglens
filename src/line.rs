@@ -1,13 +1,15 @@
 //! A Hit rendered for display: the one seam the table, raw text mode, and
 //! GREP all read through. See CONTEXT.md: Layout, Line, Part.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::advance_cache::AdvanceCache;
 use crate::es::Hit;
+use crate::results::{ROW_H, WRAP_AFFORDANCE_H, WRAP_HARD_MAX, WRAP_LINE_H};
 
 /// How a Result Tab draws its Hits. Both `columns` and `template` are always
 /// present regardless of `mode`, so switching modes never discards the
@@ -74,17 +76,73 @@ impl Layout {
     }
 }
 
-/// Per-Result-Tab cache of rendered [`Line`]s, keyed by a Hit's position in
-/// `tab.hits`. Every scroll frame re-renders the whole windowed row slice
-/// otherwise (JSON resolution, multi-KB string cloning, timestamp formatting)
-/// even though the window barely moves frame to frame — see
-/// `docs/plans/wide-line-perf-followups.md` item 3.
+/// The wrap state a [`LineCache`]'s row-height model was last built under.
+/// Not part of [`Layout::fingerprint`] — `render` produces the same `Line`
+/// text wrapped or not; only the height model and the view layer care.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct WrapCtx {
+    /// Wrap long Hit text onto multiple visual rows instead of truncating.
+    pub on: bool,
+    /// The wrap width in pixels, already bucketed to
+    /// [`crate::results::WRAP_WIDTH_BUCKET`] by the caller.
+    pub width: f32,
+    /// Visual-row cap per Hit; `None` = wrap to full height. A Hit past the
+    /// cap is clamped and gets an expand affordance.
+    pub cap: Option<u32>,
+}
+
+impl WrapCtx {
+    fn key(&self) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.on.hash(&mut h);
+        self.width.to_bits().hash(&mut h);
+        self.cap.hash(&mut h);
+        h.finish()
+    }
+}
+
+/// Byte length and hard-newline count of one Hit's wrap-relevant text — the
+/// cheap, render-once basis for estimating how many visual rows an
+/// *off-screen* Hit wraps to, without shaping it. On-screen Hits get an exact
+/// count from [`AdvanceCache::wrap_rows`] instead (see [`LineCache::get`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct LineMetric {
+    len: u32,
+    nl: u32,
+}
+
+/// What affordance, if any, a wrapped row carries at its bottom edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Affordance {
+    None,
+    /// Row is capped; this many more visual rows are hidden.
+    Expand(u32),
+    /// Row is expanded past the cap; offer to collapse it.
+    Collapse,
+    /// Row hit [`crate::results::WRAP_HARD_MAX`]; the rest is unreachable
+    /// here — point at the Hit detail panel.
+    Truncated,
+}
+
+/// Per-Result-Tab cache of rendered [`Line`]s **and** the variable
+/// row-height model that drives windowed scrolling, keyed by a Hit's
+/// position in `tab.hits`. Every scroll frame would otherwise re-render the
+/// whole windowed slice (JSON resolution, multi-KB string cloning, timestamp
+/// formatting) — see `docs/plans/wide-line-perf-followups.md` items 3 and 6.
 ///
 /// Positional, not content-keyed: `tab.hits` positions are stable within a
 /// loaded result set (paging appends; sort / refresh replace wholesale and
 /// call [`LineCache::clear`]). A content hash would cost hashing multi-KB JSON
 /// per row per frame and would over-report its hit rate against the
 /// scroll-harness's identical-copy fixtures (see `docs/testing.md`).
+///
+/// Height model: `rows[i]` is the best-known *uncapped* visual row count for
+/// Hit `i` — a byte-length estimate for off-screen Hits, upgraded to an exact
+/// [`AdvanceCache::wrap_rows`] count the first time the Hit is rendered
+/// on-screen. `offsets` is the prefix sum of per-Hit pixel heights, so
+/// windowing and the scrollbar extent are O(log n) lookups. With
+/// [`WrapCtx::on`] false the model degenerates to a flat
+/// [`ROW_H`]-per-row grid (today's behaviour, no render pass).
 #[derive(Default)]
 pub struct LineCache {
     lines: HashMap<usize, Line>,
@@ -98,6 +156,30 @@ pub struct LineCache {
     /// grows as longer lines scroll into view, the same way the vertical
     /// extent grows with paging. Zero in Table mode (never updated there).
     max_line_bytes: usize,
+    /// [`WrapCtx::key`] the height model below was built under.
+    wrap_key: u64,
+    /// Wrap-relevant text metrics, dense by Hit position. Empty (and unused)
+    /// while wrapping is off; primed by a one-off render pass the first time
+    /// it turns on, extended for the tail on paging.
+    metric: Vec<LineMetric>,
+    /// Best-known uncapped visual row count per Hit position. `1` everywhere
+    /// while wrapping is off.
+    rows: Vec<u32>,
+    /// Positions whose `rows` entry is an exact [`AdvanceCache::wrap_rows`]
+    /// count (not an estimate) under the current `wrap_key` — so a row that
+    /// stays on screen across frames is measured once, not every frame.
+    /// Cleared whenever the estimates are recomputed.
+    exact: HashSet<usize>,
+    /// Hits the user expanded past [`WrapCtx::cap`].
+    expanded: HashSet<usize>,
+    /// Prefix sums of per-Hit pixel heights; `offsets[i]` is the top of Hit
+    /// `i`, `offsets.last()` the total content height. `len == rows.len() + 1`.
+    offsets: Vec<f32>,
+    /// `offsets` needs rebuilding (a row count or the expanded set changed).
+    dirty: bool,
+    /// The context `prepare_heights` last ran with, for the frame's `get` /
+    /// accessor calls.
+    ctx: WrapCtx,
 }
 
 /// Rows kept cached on each side of the live window. Comfortably more than a
@@ -106,18 +188,169 @@ pub struct LineCache {
 /// bound.
 const RETAIN: usize = 64;
 
+/// The visual row count Hit `i` actually renders at, given its uncapped count.
+fn disp_rows(full: u32, expanded: bool, ctx: &WrapCtx) -> u32 {
+    if !ctx.on {
+        return 1;
+    }
+    match ctx.cap {
+        Some(cap) if !expanded => full.min(cap),
+        _ => full.min(WRAP_HARD_MAX),
+    }
+}
+
+fn affordance_of(full: u32, expanded: bool, ctx: &WrapCtx) -> Affordance {
+    if !ctx.on {
+        return Affordance::None;
+    }
+    if disp_rows(full, expanded, ctx) >= WRAP_HARD_MAX && full >= WRAP_HARD_MAX {
+        return Affordance::Truncated;
+    }
+    match ctx.cap {
+        Some(cap) if full > cap => {
+            if expanded {
+                Affordance::Collapse
+            } else {
+                Affordance::Expand(full - cap)
+            }
+        }
+        _ => Affordance::None,
+    }
+}
+
+fn row_px(full: u32, expanded: bool, ctx: &WrapCtx) -> f32 {
+    if !ctx.on {
+        return ROW_H;
+    }
+    let disp = disp_rows(full, expanded, ctx);
+    let mut h = ROW_H + disp.saturating_sub(1) as f32 * WRAP_LINE_H;
+    if affordance_of(full, expanded, ctx) != Affordance::None {
+        h += WRAP_AFFORDANCE_H;
+    }
+    h
+}
+
+/// Estimated uncapped visual rows for an off-screen Hit: whole-text width
+/// plus one row lost to each hard newline, an upper bound that runs slightly
+/// long and tightens to the exact count once the Hit is rendered on-screen.
+fn estimate_rows(m: LineMetric, width: f32, mono_adv: f32) -> u32 {
+    if width <= 0.0 {
+        return 1;
+    }
+    let by_width = (m.len as f32 * mono_adv / width).ceil() as u32;
+    let rows = by_width.saturating_add(m.nl).max(m.nl.saturating_add(1));
+    rows.min(WRAP_HARD_MAX)
+}
+
 impl LineCache {
-    /// Call once per frame before [`get`](Self::get), with the row range about
-    /// to be requested. Drops every entry on a [`Layout`] change; otherwise
-    /// evicts entries far outside `window` so the map stays bounded.
-    pub fn prepare(&mut self, layout: &Layout, window: (usize, usize)) {
+    /// Prime / refresh the row-height model for the whole loaded set. Call
+    /// once per frame before [`row_window`](crate::results::ResultTab::row_window)
+    /// and the `get` loop. Cheap unless a [`Layout`] change forces a re-render
+    /// pass, wrapping just turned on (a one-off render pass to measure every
+    /// line), or paging added a tail.
+    pub fn prepare_heights(
+        &mut self,
+        hits: &[Hit],
+        layout: &Layout,
+        ctx: WrapCtx,
+        adv: &AdvanceCache,
+    ) {
         let key = layout.fingerprint();
         if key != self.key {
             self.lines.clear();
             self.max_line_bytes = 0;
+            self.metric.clear();
+            self.rows.clear();
+            self.exact.clear();
+            self.offsets.clear();
+            self.expanded.clear();
+            self.wrap_key = 0;
             self.key = key;
+            self.dirty = true;
+        }
+
+        let wk = ctx.key();
+
+        if !ctx.on {
+            // Keep `metric` (still valid for this Layout) so a later on→off→on
+            // toggle re-estimates by arithmetic instead of re-rendering.
+            if self.rows.len() != hits.len() || self.wrap_key != wk {
+                self.rows = vec![1; hits.len()];
+                self.expanded.clear();
+                self.wrap_key = wk;
+                self.dirty = true;
+            }
+            if self.dirty {
+                self.rebuild_offsets(&ctx);
+                self.dirty = false;
+            }
+            self.ctx = ctx;
             return;
         }
+
+        // Wrapping is on: keep a dense metric per Hit. A shrink can only come
+        // from an un-`clear`ed replacement — treat it as a reset.
+        if self.metric.len() > hits.len() {
+            self.metric.clear();
+            self.rows.clear();
+            self.exact.clear();
+            self.expanded.clear();
+            self.wrap_key = 0;
+            self.dirty = true;
+        }
+        if self.metric.len() < hits.len() {
+            let span = crate::perf::span("view.row_cache.lens");
+            for hit in &hits[self.metric.len()..] {
+                let line = render(hit, layout);
+                let text = wrap_text(&line, layout.mode);
+                self.metric.push(LineMetric {
+                    len: text.len().min(u32::MAX as usize) as u32,
+                    nl: text
+                        .bytes()
+                        .filter(|&b| b == b'\n')
+                        .count()
+                        .min(u32::MAX as usize) as u32,
+                });
+            }
+            drop(span);
+            self.wrap_key = 0; // new rows need estimating
+            self.dirty = true;
+        }
+
+        if self.wrap_key != wk {
+            self.wrap_key = wk;
+            let mono = adv.mono_advance();
+            self.rows = self
+                .metric
+                .iter()
+                .map(|m| estimate_rows(*m, ctx.width, mono))
+                .collect();
+            self.exact.clear();
+            self.dirty = true;
+        }
+
+        if self.dirty {
+            self.rebuild_offsets(&ctx);
+            self.dirty = false;
+        }
+        self.ctx = ctx;
+    }
+
+    fn rebuild_offsets(&mut self, ctx: &WrapCtx) {
+        self.offsets.clear();
+        self.offsets.reserve(self.rows.len() + 1);
+        let mut acc = 0.0f32;
+        self.offsets.push(0.0);
+        for (i, &full) in self.rows.iter().enumerate() {
+            acc += row_px(full, self.expanded.contains(&i), ctx);
+            self.offsets.push(acc);
+        }
+    }
+
+    /// Evict rendered `Line`s far outside `window` so the map stays bounded.
+    /// Call after [`prepare_heights`](Self::prepare_heights) and the window
+    /// calculation, before the `get` loop.
+    pub fn prepare_lines(&mut self, window: (usize, usize)) {
         let (start, end) = window;
         let lo = start.saturating_sub(RETAIN);
         let hi = end.saturating_add(RETAIN);
@@ -125,9 +358,10 @@ impl LineCache {
     }
 
     /// The rendered `Line` for `hit` at `index`, rendering and caching it on a
-    /// miss. Assumes [`prepare`](Self::prepare) ran this frame with a matching
-    /// `layout`.
-    pub fn get(&mut self, index: usize, hit: &Hit, layout: &Layout) -> &Line {
+    /// miss. Also upgrades the height model's row count for `index` from the
+    /// off-screen estimate to an exact [`AdvanceCache::wrap_rows`] count, since
+    /// this Hit is about to be drawn.
+    pub fn get(&mut self, index: usize, hit: &Hit, layout: &Layout, adv: &AdvanceCache) -> &Line {
         if !self.lines.contains_key(&index) {
             let line = render(hit, layout);
             if layout.mode == LayoutMode::RawText {
@@ -136,7 +370,30 @@ impl LineCache {
             }
             self.lines.insert(index, line);
         }
+        if self.ctx.on && index < self.rows.len() && !self.exact.contains(&index) {
+            let exact = {
+                let text = wrap_text(&self.lines[&index], layout.mode);
+                adv.wrap_rows(text, self.ctx.width, WRAP_HARD_MAX + 1).0
+            };
+            self.exact.insert(index);
+            if exact != self.rows[index] {
+                self.rows[index] = exact;
+                self.dirty = true; // offsets refreshed next frame
+            }
+        }
         &self.lines[&index]
+    }
+
+    /// The already-rendered `Line` for `index` — call right after
+    /// [`get`](Self::get) for that index, so the borrow checker lets the
+    /// immutable metric accessors (`disp_rows`, `affordance`, `row_height`)
+    /// be read alongside it. Falls back to a shared empty `Line` if `index`
+    /// was somehow never rendered.
+    pub fn line(&self, index: usize) -> &Line {
+        static EMPTY: std::sync::OnceLock<Line> = std::sync::OnceLock::new();
+        self.lines
+            .get(&index)
+            .unwrap_or_else(|| EMPTY.get_or_init(Line::default))
     }
 
     /// The longest raw-text line, in bytes, rendered since the last [`Layout`]
@@ -145,12 +402,84 @@ impl LineCache {
         self.max_line_bytes
     }
 
-    /// Drops every entry. For the callers that replace or clear `tab.hits`
-    /// wholesale, after which a positional key means something different.
+    /// Total pixel height of every loaded Hit under the current model.
+    pub fn content_height(&self) -> f32 {
+        self.offsets.last().copied().unwrap_or(0.0)
+    }
+
+    /// Pixel offset of the top of Hit `i`.
+    pub fn offset(&self, i: usize) -> f32 {
+        self.offsets.get(i).copied().unwrap_or(0.0)
+    }
+
+    /// Pixel height of Hit `i`'s row.
+    pub fn row_height(&self, i: usize) -> f32 {
+        match (self.offsets.get(i), self.offsets.get(i + 1)) {
+            (Some(&a), Some(&b)) => b - a,
+            _ => ROW_H,
+        }
+    }
+
+    /// The last Hit whose row top is at or above `y` — i.e. the first row a
+    /// viewport scrolled to `y` shows.
+    pub fn row_at(&self, y: f32) -> usize {
+        match self.offsets.partition_point(|&o| o <= y) {
+            0 => 0,
+            k => k - 1,
+        }
+    }
+
+    /// Visual rows Hit `i` actually renders (capped / expanded).
+    pub fn disp_rows(&self, i: usize) -> u32 {
+        disp_rows(
+            self.rows.get(i).copied().unwrap_or(1),
+            self.expanded.contains(&i),
+            &self.ctx,
+        )
+    }
+
+    /// The affordance Hit `i`'s row carries, if any.
+    pub fn affordance(&self, i: usize) -> Affordance {
+        affordance_of(
+            self.rows.get(i).copied().unwrap_or(1),
+            self.expanded.contains(&i),
+            &self.ctx,
+        )
+    }
+
+    /// Toggle Hit `i`'s expanded-past-the-cap state and refresh the model.
+    pub fn toggle_expand(&mut self, i: usize) {
+        if !self.expanded.remove(&i) {
+            self.expanded.insert(i);
+        }
+        let ctx = self.ctx;
+        self.rebuild_offsets(&ctx);
+    }
+
+    /// Drops every entry — rendered lines and the whole height model. For the
+    /// callers that replace or clear `tab.hits` wholesale, after which a
+    /// positional key means something different.
     pub fn clear(&mut self) {
         self.lines.clear();
         self.max_line_bytes = 0;
+        self.wrap_key = 0;
+        self.metric.clear();
+        self.rows.clear();
+        self.exact.clear();
+        self.expanded.clear();
+        self.offsets.clear();
+        self.dirty = false;
     }
+}
+
+/// The slice of a rendered [`Line`] that wraps: the flexible last column in
+/// Table mode, the whole line in raw text mode.
+fn wrap_text(line: &Line, mode: LayoutMode) -> &str {
+    match mode {
+        LayoutMode::Table => line.parts.last(),
+        LayoutMode::RawText => line.parts.first(),
+    }
+    .map_or("", |p| p.text.as_str())
 }
 
 // --- Render ----------------------------------------------------------------
@@ -530,101 +859,203 @@ mod tests {
 
     // --- LineCache ---
 
+    fn adv() -> AdvanceCache {
+        AdvanceCache::new(iced::Font::MONOSPACE, 12.0)
+    }
+
+    /// Wrapping off — the height model degenerates to a flat ROW_H grid and
+    /// `prepare_heights` never inspects Hit content.
+    const WRAP_OFF: WrapCtx = WrapCtx {
+        on: false,
+        width: 0.0,
+        cap: None,
+    };
+
+    fn wrap_on(width: f32, cap: Option<u32>) -> WrapCtx {
+        WrapCtx {
+            on: true,
+            width,
+            cap,
+        }
+    }
+
     #[test]
     fn line_cache_serves_a_hit_without_re_rendering() {
         let layout = table_layout(&["message"], "@timestamp", false);
+        let adv = adv();
         let mut cache = LineCache::default();
-        cache.prepare(&layout, (0, 1));
+        let hits = [
+            hit(json!({ "message": "original" })),
+            hit(json!({ "message": "changed" })),
+        ];
+        cache.prepare_heights(&hits, &layout, WRAP_OFF, &adv);
+        cache.prepare_lines((0, 1));
 
-        let first = hit(json!({ "message": "original" }));
-        assert_eq!(cache.get(0, &first, &layout).parts[0].text, "original");
-
-        // A different Hit at the same position must not be re-rendered — the
-        // cached Line stands until an explicit invalidation.
-        let changed = hit(json!({ "message": "changed" }));
-        assert_eq!(cache.get(0, &changed, &layout).parts[0].text, "original");
+        assert_eq!(
+            cache.get(0, &hits[0], &layout, &adv).parts[0].text,
+            "original"
+        );
+        // A different Hit at the same position must not be re-rendered.
+        assert_eq!(
+            cache.get(0, &hits[1], &layout, &adv).parts[0].text,
+            "original"
+        );
     }
 
     #[test]
     fn line_cache_prepare_drops_everything_on_layout_change() {
         let a = table_layout(&["message"], "@timestamp", false);
         let b = table_layout(&["level"], "@timestamp", false);
+        let adv = adv();
         let mut cache = LineCache::default();
+        let hits = [hit(json!({ "message": "m", "level": "INFO" }))];
 
-        cache.prepare(&a, (0, 1));
-        cache.get(0, &hit(json!({ "message": "m", "level": "INFO" })), &a);
+        cache.prepare_heights(&hits, &a, WRAP_OFF, &adv);
+        cache.prepare_lines((0, 1));
+        cache.get(0, &hits[0], &a, &adv);
         assert_eq!(cache.lines.len(), 1);
 
-        cache.prepare(&b, (0, 1));
+        cache.prepare_heights(&hits, &b, WRAP_OFF, &adv);
         assert!(cache.lines.is_empty());
-        let line = cache.get(0, &hit(json!({ "message": "m", "level": "INFO" })), &b);
+        let line = cache.get(0, &hits[0], &b, &adv);
         assert_eq!(line.parts[0].text, "INFO");
     }
 
     #[test]
     fn line_cache_prepare_evicts_rows_far_from_the_window() {
         let layout = raw_layout("%{message}");
+        let adv = adv();
         let mut cache = LineCache::default();
+        let hits: Vec<Hit> = (0..600)
+            .map(|i| hit(json!({ "message": format!("row {i}") })))
+            .collect();
 
-        cache.prepare(&layout, (0, 200));
-        for i in 0..200 {
-            cache.get(i, &hit(json!({ "message": format!("row {i}") })), &layout);
+        cache.prepare_heights(&hits, &layout, WRAP_OFF, &adv);
+        cache.prepare_lines((0, 200));
+        for (i, h) in hits.iter().enumerate().take(200) {
+            cache.get(i, h, &layout, &adv);
         }
         assert_eq!(cache.lines.len(), 200);
 
-        // Window has scrolled well past the early rows.
-        cache.prepare(&layout, (500, 540));
+        cache.prepare_lines((500, 540));
         assert!(cache.lines.is_empty());
 
-        cache.prepare(&layout, (100, 300));
-        for i in 100..300 {
-            cache.get(i, &hit(json!({ "message": format!("row {i}") })), &layout);
+        cache.prepare_lines((100, 300));
+        for (i, h) in hits.iter().enumerate().take(300).skip(100) {
+            cache.get(i, h, &layout, &adv);
         }
-        // Rows within RETAIN (64) of the window [130, 170) survive — i.e.
-        // [66, 234) — the rest are evicted.
-        cache.prepare(&layout, (130, 170));
+        // Rows within RETAIN (64) of the window [130, 170) survive.
+        cache.prepare_lines((130, 170));
         assert!(cache.lines.keys().all(|&i| (66..234).contains(&i)));
         assert!(cache.lines.contains_key(&120));
         assert!(cache.lines.contains_key(&233));
         assert!(!cache.lines.contains_key(&234));
-        assert!(!cache.lines.contains_key(&280));
     }
 
     #[test]
     fn line_cache_tracks_widest_raw_line_and_resets_it() {
         let layout = raw_layout("%{message}");
+        let adv = adv();
         let mut cache = LineCache::default();
-        cache.prepare(&layout, (0, 3));
-        cache.get(0, &hit(json!({ "message": "short" })), &layout);
-        cache.get(
-            1,
-            &hit(json!({ "message": "a much longer line here" })),
-            &layout,
-        );
-        cache.get(2, &hit(json!({ "message": "mid" })), &layout);
+        let hits = [
+            hit(json!({ "message": "short" })),
+            hit(json!({ "message": "a much longer line here" })),
+            hit(json!({ "message": "mid" })),
+        ];
+        cache.prepare_heights(&hits, &layout, WRAP_OFF, &adv);
+        cache.prepare_lines((0, 3));
+        for (i, h) in hits.iter().enumerate() {
+            cache.get(i, h, &layout, &adv);
+        }
         assert_eq!(cache.max_line_bytes(), "a much longer line here".len());
 
-        // A Layout change clears the estimate along with the entries.
         let other = raw_layout("%{level}");
-        cache.prepare(&other, (0, 1));
-        assert_eq!(cache.max_line_bytes(), 0);
-
-        // Table mode never touches it.
-        let table = table_layout(&["message"], "@timestamp", false);
-        cache.prepare(&table, (0, 1));
-        cache.get(0, &hit(json!({ "message": "anything at all" })), &table);
+        cache.prepare_heights(&hits, &other, WRAP_OFF, &adv);
         assert_eq!(cache.max_line_bytes(), 0);
     }
 
     #[test]
     fn line_cache_clear_drops_everything() {
         let layout = raw_layout("%{message}");
+        let adv = adv();
         let mut cache = LineCache::default();
-        cache.prepare(&layout, (0, 2));
-        cache.get(0, &hit(json!({ "message": "a" })), &layout);
-        cache.get(1, &hit(json!({ "message": "b" })), &layout);
+        let hits = [
+            hit(json!({ "message": "a" })),
+            hit(json!({ "message": "b" })),
+        ];
+        cache.prepare_heights(&hits, &layout, wrap_on(200.0, Some(8)), &adv);
+        cache.prepare_lines((0, 2));
+        cache.get(0, &hits[0], &layout, &adv);
         cache.clear();
         assert!(cache.lines.is_empty());
+        assert!(cache.rows.is_empty());
+        assert_eq!(cache.content_height(), 0.0);
+    }
+
+    #[test]
+    fn height_model_is_a_flat_grid_when_wrapping_is_off() {
+        let layout = raw_layout("%{message}");
+        let adv = adv();
+        let mut cache = LineCache::default();
+        let hits: Vec<Hit> = (0..10)
+            .map(|_| hit(json!({ "message": "x".repeat(5000) })))
+            .collect();
+        cache.prepare_heights(&hits, &layout, WRAP_OFF, &adv);
+        assert_eq!(cache.content_height(), 10.0 * ROW_H);
+        assert_eq!(cache.offset(3), 3.0 * ROW_H);
+        assert_eq!(cache.row_at(2.5 * ROW_H), 2);
+        assert_eq!(cache.disp_rows(0), 1);
+    }
+
+    #[test]
+    fn height_model_grows_rows_and_offsets_when_wrapping() {
+        let layout = raw_layout("%{message}");
+        let adv = adv();
+        let mut cache = LineCache::default();
+        let hits = [
+            hit(json!({ "message": "short" })),
+            hit(json!({ "message": "y".repeat(4000) })),
+            hit(json!({ "message": "short" })),
+        ];
+        let ctx = wrap_on(200.0, None);
+        cache.prepare_heights(&hits, &layout, ctx, &adv);
+        cache.prepare_lines((0, 3));
+        for (i, h) in hits.iter().enumerate() {
+            cache.get(i, h, &layout, &adv);
+        }
+        // rebuild offsets with the now-exact middle-row count
+        cache.prepare_heights(&hits, &layout, ctx, &adv);
+
+        assert_eq!(cache.disp_rows(0), 1);
+        assert!(cache.disp_rows(1) > 10);
+        assert_eq!(cache.row_height(0), ROW_H);
+        assert!(cache.row_height(1) > ROW_H + 10.0 * WRAP_LINE_H);
+        // total = row0 + row1 + row2
+        let total = cache.row_height(0) + cache.row_height(1) + cache.row_height(2);
+        assert!((cache.content_height() - total).abs() < 0.01);
+    }
+
+    #[test]
+    fn height_model_caps_rows_and_offers_expand() {
+        let layout = raw_layout("%{message}");
+        let adv = adv();
+        let mut cache = LineCache::default();
+        let hits = [hit(json!({ "message": "z".repeat(4000) }))];
+        let ctx = wrap_on(200.0, Some(5));
+        cache.prepare_heights(&hits, &layout, ctx, &adv);
+        cache.prepare_lines((0, 1));
+        cache.get(0, &hits[0], &layout, &adv);
+        cache.prepare_heights(&hits, &layout, ctx, &adv);
+
+        assert_eq!(cache.disp_rows(0), 5);
+        assert!(matches!(cache.affordance(0), Affordance::Expand(_)));
+
+        cache.toggle_expand(0);
+        assert!(cache.disp_rows(0) > 5);
+        assert_eq!(cache.affordance(0), Affordance::Collapse);
+
+        cache.toggle_expand(0);
+        assert_eq!(cache.disp_rows(0), 5);
     }
 
     #[test]

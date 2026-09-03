@@ -43,6 +43,13 @@ cited there.
   Don't add a call to `line::render` in the windowed row loop — go through
   the cache. `format_modal`'s preview is the one deliberate direct caller
   (different draft Layout, off the hot path).
+- **Line wrapping + variable row heights are built** (item 6). A per-tab
+  `wrap` flag (persisted on the Saved Search) drives a row-height model
+  inside `LineCache` — `rows`/`offsets` prefix sums, `wrap_rows` in
+  `advance_cache.rs`, a global `Config.wrap_row_cap`. `ResultTab::row_window`
+  and the spacer maths read the model, not `ROW_H` arithmetic. With `wrap`
+  off the model is a flat `ROW_H` grid and nothing new runs — don't add a
+  `ROW_H`-per-row assumption back.
 - `AdvanceCache` shapes through iced's *own* global font system
   (`iced::advanced::graphics::text::font_system()`) — don't open a second
   `cosmic_text::FontSystem`; it'd double font-loading cost and risk
@@ -230,13 +237,14 @@ can shape the window slice with no `draw()`-time interior mutability. But:
   Medium risk on visual parity for a benefit that doesn't show on available
   hardware.
 
-**When to revisit:** either (a) a Table-mode frame drop reproduces in the
-harness (heavier / genuinely-larger fixture, or the machine that stutters),
-or (b) item 6 (wrapping + variable row heights) gets picked up — that needs
-a custom body widget regardless, and item 4's Hit-keyed shape cache is a
-subset of it. Design them together then; give the state struct a per-Hit
-`height` slot from the start so item 6 extends it rather than adding a
-third cache.
+**Item 6 landed without it (this session).** The "wrapping needs a custom
+body widget regardless" prediction turned out wrong: `column` of
+variable-height rows + a prefix-sum height model in `LineCache` was enough,
+and the per-Hit exact-`wrap_rows` memo (`LineCache::exact`) already gives
+the "measure once, not per frame" win item 4's shape cache was for. A
+`Vec<Paragraph>`-per-Hit shape cache would still cut the *shaping* iced does
+below `view()` for wrapped rows — revisit only if a Table-mode frame drop
+reproduces in the harness (heavier fixture, or the machine that stutters).
 
 ## 5. Raw text mode ("Text" layout mode) — DONE (horizontal virtualization)
 
@@ -301,30 +309,55 @@ vertical motion, so a horizontal sweep is a manual check
 (`LOGLENS_PERF_MODE=text`, scroll right, confirm the full line is reachable
 and nothing clips early).
 
-## 6. Wrapping + variable row heights — the original "eventually" ask
+## 6. Wrapping + variable row heights — DONE (per-tab Wrap toggle)
 
-Not implemented at all. This is what kicked off the whole design
-discussion (see `docs/wide-line-rendering-resources.md` and the
-conversation it came from) but nothing has been built yet:
+Built this session. A per-tab **Wrap** toggle in the options strip (off by
+default, persisted on the Saved Search as `wrap: bool`), honoured by both
+Table mode (the flexible last column wraps; fixed columns still truncate to
+one line) and Text mode (the whole line wraps; item 5's horizontal
+virtualization is bypassed while wrap is on).
 
-- A per-Hit wrapped-row-count estimate, computed from `AdvanceCache`
-  without shaping (`wrap_rows`-style function, verified in the design
-  discussion to exactly match cosmic-text's own `Wrap::Glyph` output —
-  200/200 on real data at three viewport widths).
-- A height model on `ResultTab` (prefix sums over per-Hit heights) to
-  replace the fixed-`ROW_H` assumption baked into `row_window()`,
-  `wants_more()`, and the spacer-height math in `hit_table`/
-  `raw_text_view`.
-- Actually wiring `.wrapping(text::Wrapping::Glyph)` into the render call
-  for wrapped rows, and a cap on how many visual rows one Hit can wrap to
-  (the worst real line in this project's dev data wraps to 67 rows at
-  1200px — needs an expand affordance, not unbounded height).
+- **`AdvanceCache::wrap_rows(text, width, max_rows)`** — visual row count
+  under glyph wrapping from summed grapheme advances, no shaping. A
+  `#[cfg(test)]` parity test drives a real `cosmic_text` buffer with
+  `Wrap::Glyph` over four sample lines × three widths and asserts an exact
+  match — the "verified in the design discussion" claim is now a test.
+- **Row-height model folded into `LineCache`** (items 3/4/6 share one
+  per-Hit cache, as the doc recommended). `rows[i]` is the uncapped visual
+  row count — a cheap byte-length estimate (`len × mono_advance / width` plus
+  one row per hard `\n`) for off-screen Hits, upgraded to an exact
+  `wrap_rows` count the first time the Hit is drawn and then memoised in an
+  `exact` set so a row that stays on screen is measured once, not per frame.
+  `offsets` is the prefix sum of per-Hit pixel heights; `row_window`,
+  `wants_more`, the spacers and the `PerfTick` content height all read it.
+  With Wrap off the model is a flat `ROW_H` grid built with no render pass —
+  the default path is unchanged.
+- **One O(n) render pass** (`view.row_cache.lens`) the first time Wrap turns
+  on, to measure every loaded line's byte length. ~8–12ms for
+  `payloads-150` / `nginx-800` at the harness's 10× repeat; once per result
+  set, kept across an off→on→off→on toggle.
+- **Row cap:** global `Config.wrap_row_cap: Option<usize>` (Settings →
+  Display, default `Some(8)`, blank = no cap). A Hit past the cap is clamped
+  and gets an inline **"＋ N more lines"** button (`Message::ResultHitExpand`
+  → a per-tab `expanded` set on the cache); **"－ collapse"** when expanded.
+  `WRAP_HARD_MAX = 400` visual rows bounds shaping even expanded / uncapped,
+  past which the row shows a "line truncated — open Hit detail" note.
 
-This interacts with items 3 and 4 above: a render cache and a height cache
-are naturally the same shape of per-Hit cache, so if this gets picked up,
-worth designing items 3/4/6 together rather than three separate caches.
+Measured with the item-0 harness, release build, this dev machine, default
+12s × 10 repeat, `LOGLENS_PERF_WRAP=1`:
 
-## 7. Minor: `Prepared::from_rules` rebuilds redundantly per frame — MOOT
+| metric (p50)                          | before (no wrap) | wrap on |
+| ------------------------------------- | ---------------- | ------- |
+| `frame_interval`, `payloads-150` text | 16.7ms           | 16.67ms — **60Hz** |
+| `view.raw_text_rows`, `payloads-150`  | ~0.5ms           | ~1.2ms  |
+| `frame_interval`, `nginx-800` table   | 16.7ms           | 16.68ms — **60Hz** |
+| `view.hit_table_rows`, `nginx-800`    | ~0.62ms          | ~0.54ms |
+| `view.row_cache.lens` (one-off)       | —                | 8–12ms  |
 
-`Prepared` no longer exists — Highlight rules were removed (item 2). Nothing
-is rebuilt per frame here any more.
+Known artifacts (both mirror existing accepted behaviour): the vertical
+scrollbar recalibrates slightly as off-screen estimates are replaced by
+exact counts on the first scroll-through (monotonic-ish, like item 5's
+horizontal extent); the wrapped column is laid out at a width bucketed to
+`WRAP_WIDTH_BUCKET` (8px) so it can be a hair narrower than the true fill
+width. The scripted-scroll harness only drives vertical motion, so wrapped
+rendering fidelity (cap, expand, no clipped last line) is a manual check.

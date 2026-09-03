@@ -7,7 +7,7 @@ use iced::widget::{Id, text_editor};
 
 use crate::config::{SortKey, TimeUnit, Timeframe, TimeframeMode};
 use crate::es::Hit;
-use crate::line::{Layout, LayoutMode, LineCache};
+use crate::line::{Layout, LayoutMode, LineCache, WrapCtx};
 
 /// Draft state for the Search bar's "Custom\u{2026}" timeframe popover: an
 /// editable relative (amount + unit) or absolute (from / to) window, applied
@@ -74,9 +74,34 @@ pub const DETAIL_DEFAULT_H: f32 = 240.0;
 pub const DETAIL_MIN_H: f32 = 90.0;
 pub const DETAIL_MAX_H: f32 = 680.0;
 
-/// Fixed row height, in pixels — the table renders a windowed slice, so every
-/// row must be the same height for scroll maths to line up.
+/// Row height, in pixels, of a single-line (unwrapped) row — and the height
+/// of the *first* visual line of a wrapped row, so an unwrapped row looks
+/// identical whether or not Wrap is on. Additional wrapped lines each add
+/// [`WRAP_LINE_H`].
 pub const ROW_H: f32 = 22.0;
+
+/// Height added per extra visual line in a wrapped row — the shaped line
+/// height for [`CELL_TEXT_SIZE`] monospace text. The wrapping `text` widget
+/// is pinned to this via `LineHeight::Absolute` so the row-height model and
+/// the drawn text always agree.
+pub const WRAP_LINE_H: f32 = 16.0;
+
+/// Extra height reserved at the bottom of a wrapped row that carries an
+/// expand / collapse affordance (or the hard-cap "line truncated" note).
+pub const WRAP_AFFORDANCE_H: f32 = 18.0;
+
+/// Wrap width is bucketed to this many pixels before it keys the row-height
+/// model, so viewport jitter during a window resize doesn't rebuild the
+/// per-Hit estimates every frame. The same bucketed width sizes the wrapping
+/// column, so height and draw stay consistent.
+pub const WRAP_WIDTH_BUCKET: f32 = 8.0;
+
+/// Hard ceiling on the visual rows a single wrapped Hit can occupy, even
+/// expanded or with no user cap — bounds how much text is ever handed to a
+/// `text` widget for shaping. A line past this shows a "line truncated —
+/// open Hit detail" note. 400 \u{d7} [`WRAP_LINE_H`] \u{2248} 6400px, one long
+/// scroll but finite.
+pub const WRAP_HARD_MAX: u32 = 400;
 
 /// Font size Hit text renders at, in Table and Text mode alike. The one input
 /// [`crate::advance_cache::AdvanceCache::shared`] is built from.
@@ -246,6 +271,10 @@ pub struct ResultTab {
     pub fetch_size: usize,
     /// Table or raw text — the Layout mode, carried from the Saved Search.
     pub mode: LayoutMode,
+    /// Wrap long Hit text onto multiple visual rows instead of truncating /
+    /// scrolling horizontally. Off by default; toggled from the options strip
+    /// and persisted on the Saved Search.
+    pub wrap: bool,
     /// Raw text mode's template. Empty until resolved from field caps the
     /// first time raw text mode renders (see [`Layout::default_template`]).
     pub template: String,
@@ -283,17 +312,47 @@ impl ResultTab {
     }
 
     /// The `[start, end)` slice of `hits` to actually build widgets for,
-    /// given the current scroll offset.
-    pub fn row_window(&self) -> (usize, usize) {
+    /// given the current scroll offset. Reads the row-height model
+    /// ([`LineCache::prepare_heights`] must have run this frame), so it is
+    /// correct whether rows are a flat [`ROW_H`] grid or variable-height
+    /// wrapped rows.
+    pub fn row_window(&self, model: &LineCache) -> (usize, usize) {
         let total = self.hits.len();
         if total == 0 {
             return (0, 0);
         }
-        let first_visible = (self.scroll_y / ROW_H).floor().max(0.0) as usize;
-        let visible = (self.viewport_h / ROW_H).ceil() as usize;
-        let start = first_visible.saturating_sub(WINDOW_BUFFER);
-        let end = (first_visible + visible + WINDOW_BUFFER).min(total);
+        let first = model.row_at(self.scroll_y);
+        let last = model.row_at(self.scroll_y + self.viewport_h) + 1;
+        let start = first.saturating_sub(WINDOW_BUFFER);
+        let end = (last + WINDOW_BUFFER).min(total);
         (start.min(end), end)
+    }
+
+    /// The wrap context for this tab's current viewport and the global row
+    /// cap: whether wrapping is on, and the bucketed pixel width the wrapped
+    /// column / line is laid out at. Width is bucketed to
+    /// [`WRAP_WIDTH_BUCKET`] so viewport jitter during a resize doesn't
+    /// rebuild the per-Hit estimates every frame.
+    pub fn wrap_ctx(&self, cap: Option<usize>) -> WrapCtx {
+        let raw_w = match self.mode {
+            LayoutMode::RawText => self.viewport_w - 12.0,
+            LayoutMode::Table => {
+                let last = self.columns.len().saturating_sub(1);
+                let fixed: f32 = self
+                    .columns
+                    .iter()
+                    .take(last)
+                    .map(|c| self.col_width(c))
+                    .sum();
+                self.viewport_w - fixed - 8.0 * last as f32 - 12.0
+            }
+        };
+        let width = (raw_w.max(80.0) / WRAP_WIDTH_BUCKET).floor() * WRAP_WIDTH_BUCKET;
+        WrapCtx {
+            on: self.wrap,
+            width: width.max(WRAP_WIDTH_BUCKET),
+            cap: cap.map(|c| c.max(1) as u32),
+        }
     }
 
     /// Whether a scroll to `offset_y` (viewport `viewport_h`, content
