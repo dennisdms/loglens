@@ -21,8 +21,9 @@ mod style;
 mod tab;
 mod ui;
 mod update;
+mod workspace;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use iced::widget::scrollable::{AbsoluteOffset, RelativeOffset};
@@ -38,11 +39,7 @@ use style::{BG, TEXT_DIM};
 use tab::Tab;
 use ui::centered;
 use ui::chrome::Chrome;
-
-/// Pseudo tree-node name for the Elasticsearch root, tracked in the `expanded`
-/// set like a folder. The control char keeps it from colliding with a real
-/// Connection name.
-const ES_ROOT: &str = "\u{1}Elasticsearch";
+use workspace::{ES_ROOT, Workspace};
 
 /// The display name, as `--version` and `--help` print it. The binary is
 /// `loglens`; this is what a human is shown.
@@ -291,12 +288,9 @@ fn settings_window_settings() -> window::Settings {
 // --- State -----------------------------------------------------------------
 
 struct LogLens {
-    config: Config,
-    /// Open tabs, in tab order.
-    open_tabs: Vec<Tab>,
-    /// Index into `open_tabs`.
-    active_tab: Option<usize>,
-    expanded: HashSet<String>,
+    /// What the app is showing: the Connections and Saved Searches on disk,
+    /// the tabs over them, and which one is in front.
+    ws: Workspace,
     /// One connected [`es::Client`] per Connection, by Connection id, built on
     /// first use. Dropped by [`LogLens::forget_client`] when what it was built
     /// from changes.
@@ -310,8 +304,6 @@ struct LogLens {
     secret_prompt: Option<SecretPrompt>,
     /// Transient status line (config save failures, keyring notices).
     status: Option<String>,
-    /// Source of stable ids for Search forms and Result Tabs.
-    id_seq: u64,
     /// Active drag of a Hit detail panel's top edge.
     detail_drag: Option<DetailDrag>,
     /// Active drag-resize of a Result Tab's table Column.
@@ -662,9 +654,6 @@ enum Message {
 
 impl LogLens {
     fn new() -> (Self, Task<Message>) {
-        let mut expanded = HashSet::new();
-        expanded.insert(ES_ROOT.to_string());
-
         let config = config::load();
         let (main_window, open_main) = window::open(main_window_settings());
 
@@ -681,16 +670,12 @@ impl LogLens {
 
         let app = Self {
             settings_draft: SettingsDraft::from_config(&config),
-            config,
-            open_tabs: Vec::new(),
-            active_tab: None,
-            expanded,
+            ws: Workspace::new(config),
             clients: HashMap::new(),
             connection_form: None,
             search_settings: None,
             secret_prompt: None,
             status: None,
-            id_seq: 0,
             detail_drag: None,
             column_drag: None,
             grip_hover: None,
@@ -722,7 +707,7 @@ impl LogLens {
         // away — the rest of the run drives itself from there (see
         // `Message::PerfTick` and the `PageLoaded` hook).
         let perf_open = if app.perf.is_some() {
-            match perf_open_search(&app.config) {
+            match perf_open_search(&app.ws.config) {
                 Some(msg) => Task::done(msg),
                 None => {
                     eprintln!(
@@ -772,9 +757,9 @@ impl LogLens {
 
         // Tick the Hit-count spinner only while a run is still counting.
         let counting = self
-            .open_tabs
-            .iter()
-            .any(|t| matches!(t, Tab::Result(rt) if matches!(rt.total_hits, TotalHits::Loading)));
+            .ws
+            .results()
+            .any(|rt| matches!(rt.total_hits, TotalHits::Loading));
         let spinner = if counting {
             iced::time::every(std::time::Duration::from_millis(90)).map(|_| Message::SpinnerTick)
         } else {
@@ -822,23 +807,6 @@ impl LogLens {
         Subscription::batch([escape, closes, spinner, perf_tick])
     }
 
-    fn next_id(&mut self) -> u64 {
-        self.id_seq += 1;
-        self.id_seq
-    }
-
-    fn connection(&self, id: &str) -> Option<&Connection> {
-        self.config.connections.iter().find(|c| c.id == id)
-    }
-
-    /// A Connection's display name, for the forms that show which cluster they
-    /// are editing against. Empty when the Connection has been deleted out from
-    /// under an open form \u{2014} the name is a subtitle, not the subject, so a
-    /// blank one is better there than an error.
-    fn conn_name(&self, id: &str) -> &str {
-        self.connection(id).map_or("", |c| c.name.as_str())
-    }
-
     /// The [`es::Client`] for a Connection, connecting and memoizing on first
     /// use so every call to that cluster shares one connection pool. `None` if
     /// the Connection is gone, or its secret isn't available this session
@@ -849,7 +817,7 @@ impl LogLens {
         if let Some(client) = self.clients.get(conn_id) {
             return Some(client.clone());
         }
-        let conn = self.connection(conn_id)?;
+        let conn = self.ws.connection(conn_id)?;
         let auth = match &conn.auth {
             Auth::None => es::AuthValue::None,
             Auth::Basic { username } => es::AuthValue::Basic {
@@ -877,27 +845,9 @@ impl LogLens {
         self.clients.remove(conn_id);
     }
 
-    /// The active tab, when it is a Result Tab.
-    ///
-    /// Most of the chrome is a function of exactly this: the Search bar, the
-    /// options strip, their three overlays, the info bar's Hit-count readout,
-    /// and the Format modal all read one `ResultTab` and nothing else in
-    /// `LogLens`. Written once here so those surfaces can be free functions
-    /// over a `&ResultTab` instead of methods reaching back through `&self`.
-    fn active_result(&self) -> Option<&ResultTab> {
-        match self.active_tab.and_then(|t| self.open_tabs.get(t))? {
-            Tab::Result(tab) => Some(tab),
-            Tab::SearchForm(_) => None,
-        }
-    }
-
-    fn result_mut(&mut self, run_id: u64) -> Option<&mut ResultTab> {
-        self.open_tabs.iter_mut().find_map(|t| match t {
-            Tab::Result(rt) if rt.run_id == run_id => Some(rt.as_mut()),
-            _ => None,
-        })
-    }
-
+    /// A Search form by its id, wherever it is showing: the Search settings
+    /// modal, or a form tab. The modal is checked first because it is what an
+    /// async target or field result belongs to while it is open.
     fn form_mut(&mut self, form_id: u64) -> Option<&mut SearchForm> {
         if self
             .search_settings
@@ -906,16 +856,19 @@ impl LogLens {
         {
             return self.search_settings.as_mut();
         }
-        self.open_tabs.iter_mut().find_map(|t| match t {
-            Tab::SearchForm(f) if f.form_id == form_id => Some(f.as_mut()),
-            _ => None,
-        })
+        self.ws.form_tab_mut(form_id)
     }
 
-    fn active_form_mut(&mut self) -> Option<&mut SearchForm> {
-        match self.active_tab.and_then(|t| self.open_tabs.get_mut(t)) {
-            Some(Tab::SearchForm(f)) => Some(f.as_mut()),
-            _ => None,
+    /// Persists the config, reporting a failure in the status line.
+    ///
+    /// The two saves that do *not* go through here are silent on purpose:
+    /// [`Self::record_update_check`] writes a timestamp nobody asked for, and
+    /// `Message::ApplyUpdate` writes on the way out of the process. Neither
+    /// failure is the user's business, and neither may take the status line
+    /// away from what is.
+    fn save_config(&mut self) {
+        if let Err(err) = self.ws.save() {
+            self.status = Some(format!("Could not save config: {err}"));
         }
     }
 
@@ -925,27 +878,19 @@ impl LogLens {
         if self.search_settings.is_some() {
             return self.search_settings.as_mut();
         }
-        self.active_form_mut()
+        self.ws.active_form_mut()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         let _span = perf::span("update");
         match message {
-            Message::SelectTab(tab) => {
-                if tab < self.open_tabs.len() {
-                    self.active_tab = Some(tab);
-                }
-            }
-            Message::CloseTab(tab) => self.close_tab(tab),
-            Message::ToggleFolder(name) => {
-                if !self.expanded.remove(&name) {
-                    self.expanded.insert(name);
-                }
-            }
+            Message::SelectTab(tab) => self.ws.focus(tab),
+            Message::CloseTab(tab) => self.ws.close_tab(tab),
+            Message::ToggleFolder(name) => self.ws.toggle_folder(name),
 
             Message::NewConnection => {
                 self.connection_form = Some(ConnectionForm::adding());
-                self.expanded.insert(ES_ROOT.to_string());
+                self.ws.expand(ES_ROOT);
             }
             Message::ConnFormName(v) => {
                 if let Some(f) = &mut self.connection_form {
@@ -1022,7 +967,7 @@ impl LogLens {
             Message::SecretPromptCancel => {
                 if let Some(prompt) = self.secret_prompt.take()
                     && let PendingAction::RunSearch { run_id } = prompt.then
-                    && let Some(rt) = self.result_mut(run_id)
+                    && let Some(rt) = self.ws.result_mut(run_id)
                 {
                     rt.refreshing = false;
                     rt.state = RunState::Error(
@@ -1082,13 +1027,14 @@ impl LogLens {
             // Search needs writing, and whether the Run is now stale.
             Message::Result(run_id, msg) => {
                 let edited = self
+                    .ws
                     .result_mut(run_id)
                     .map(|rt| rt.update(msg))
                     .unwrap_or_default();
                 return self.apply_edit(run_id, edited);
             }
             Message::ResultTargetPicked(run_id, v) => {
-                if let Some(rt) = self.result_mut(run_id) {
+                if let Some(rt) = self.ws.result_mut(run_id) {
                     rt.target_draft = v;
                 }
                 return self.commit_target(run_id);
@@ -1105,7 +1051,7 @@ impl LogLens {
                 generation,
                 result,
             } => {
-                if let Some(rt) = self.result_mut(run_id)
+                if let Some(rt) = self.ws.result_mut(run_id)
                     && rt.generation == generation
                 {
                     rt.total_hits = match result {
@@ -1122,7 +1068,7 @@ impl LogLens {
                 append,
             } => {
                 let ok = !matches!(advance.state, es::State::Failed(_));
-                match self.result_mut(run_id) {
+                match self.ws.result_mut(run_id) {
                     // A Page from a superseded run would append Hits from a
                     // Query the tab has moved on from.
                     Some(rt) if rt.generation == generation => apply_page(rt, *advance, append),
@@ -1134,7 +1080,7 @@ impl LogLens {
                 // `_count`, so settle the total here or the Hit-count spinner
                 // subscription would tick through the whole measured run.
                 if !append && ok && self.perf.as_ref().is_some_and(|p| p.run.is_none()) {
-                    if let Some(rt) = self.result_mut(run_id) {
+                    if let Some(rt) = self.ws.result_mut(run_id) {
                         if perf::fixture_path().is_some() {
                             rt.total_hits = TotalHits::Known(rt.hits.len() as u64);
                         }
@@ -1160,7 +1106,7 @@ impl LogLens {
                 // snap it back explicitly rather than relying on a remount.
                 if !append
                     && ok
-                    && let Some(rt) = self.result_mut(run_id)
+                    && let Some(rt) = self.ws.result_mut(run_id)
                 {
                     rt.scroll_y = 0.0;
                     return operation::snap_to(rt.scroll_id.clone(), RelativeOffset::START);
@@ -1175,6 +1121,7 @@ impl LogLens {
                 viewport_w,
             } => {
                 let wants_more = self
+                    .ws
                     .result_mut(run_id)
                     .map(|rt| {
                         rt.scroll_y = offset_y;
@@ -1214,7 +1161,7 @@ impl LogLens {
                     perf::dump();
                     return iced::exit();
                 }
-                let Some(rt) = self.result_mut(run_id) else {
+                let Some(rt) = self.ws.result_mut(run_id) else {
                     perf::dump();
                     return iced::exit();
                 };
@@ -1252,9 +1199,7 @@ impl LogLens {
 
             Message::CloseHitDetail => {
                 self.tree_menu = None;
-                if let Some(Tab::Result(rt)) =
-                    self.active_tab.and_then(|t| self.open_tabs.get_mut(t))
-                {
+                if let Some(rt) = self.ws.active_result_mut() {
                     rt.selected_hit = None;
                     rt.header_menu = None;
                     rt.sort_panel_open = false;
@@ -1278,7 +1223,7 @@ impl LogLens {
                     let delta = drag.last_y.map_or(0.0, |prev| prev - y);
                     drag.last_y = Some(y);
                     if delta != 0.0
-                        && let Some(rt) = self.result_mut(run_id)
+                        && let Some(rt) = self.ws.result_mut(run_id)
                     {
                         rt.detail_height = (rt.detail_height + delta)
                             .clamp(results::DETAIL_MIN_H, results::DETAIL_MAX_H);
@@ -1300,7 +1245,7 @@ impl LogLens {
                     let delta = drag.last_x.map_or(0.0, |prev| x - prev);
                     drag.last_x = Some(x);
                     if delta != 0.0
-                        && let Some(rt) = self.result_mut(run_id)
+                        && let Some(rt) = self.ws.result_mut(run_id)
                     {
                         rt.resize_column(index, delta);
                     }
@@ -1322,13 +1267,13 @@ impl LogLens {
             Message::TreeMenuDismiss => self.tree_menu = None,
             Message::EditConnection(id) => {
                 self.tree_menu = None;
-                if let Some(conn) = self.connection(&id) {
+                if let Some(conn) = self.ws.connection(&id) {
                     self.connection_form = Some(ConnectionForm::editing(conn));
                 }
             }
             Message::RequestDeleteConnection(id) => {
                 self.tree_menu = None;
-                if let Some(conn) = self.connection(&id) {
+                if let Some(conn) = self.ws.connection(&id) {
                     self.confirm = Some(Confirm::DeleteConnection {
                         id: conn.id.clone(),
                         name: conn.name.clone(),
@@ -1361,7 +1306,7 @@ impl LogLens {
                 if let Some(id) = self.settings_window {
                     return window::gain_focus(id);
                 }
-                self.settings_draft = SettingsDraft::from_config(&self.config);
+                self.settings_draft = SettingsDraft::from_config(&self.ws.config);
                 let (id, open) = window::open(settings_window_settings());
                 self.settings_window = Some(id);
                 return open.discard();
@@ -1458,7 +1403,7 @@ impl LogLens {
                 // Saved Searches, settings or the keyring. Its own failure is
                 // swallowed, because nobody asked for this save and it must not
                 // take the place of the Update they are waiting on.
-                let _ = config::save(&self.config);
+                let _ = self.ws.save();
 
                 self.updating = Some(Updating::Busy("Downloading\u{2026}"));
                 return Task::perform(update::apply(release, exe), Message::UpdateApplied);
@@ -1535,8 +1480,8 @@ impl LogLens {
     /// *did* ask for still reports its own failures; the only cost here is one
     /// redundant check tomorrow.
     fn record_update_check(&mut self) {
-        self.config.last_update_check = Some(chrono::Utc::now());
-        let _ = config::save(&self.config);
+        self.ws.config.last_update_check = Some(chrono::Utc::now());
+        let _ = self.ws.save();
     }
 
     // --- Settings window ---------------------------------------------------
@@ -1597,48 +1542,28 @@ impl LogLens {
             fetch_size,
         }
         .normalized();
-        self.config.es = es;
-        self.config.wrap_row_cap = wrap_row_cap;
-        self.settings_draft = SettingsDraft::from_config(&self.config);
+        self.ws.config.es = es;
+        self.ws.config.wrap_row_cap = wrap_row_cap;
+        self.settings_draft = SettingsDraft::from_config(&self.ws.config);
 
-        for tab in &mut self.open_tabs {
-            if let Tab::Result(rt) = tab {
-                rt.max_results = es.max_results;
-                rt.fetch_size = es.fetch_size;
-                let limits = rt.limits();
-                if let Some(run) = &mut rt.run {
-                    run.relimit(limits);
-                }
-                // A changed `wrap_row_cap` reaches the row-height model
-                // through `WrapCtx` — the next `prepare_heights` re-keys and
-                // rebuilds it, no explicit reset needed.
+        for rt in self.ws.results_mut() {
+            rt.max_results = es.max_results;
+            rt.fetch_size = es.fetch_size;
+            let limits = rt.limits();
+            if let Some(run) = &mut rt.run {
+                run.relimit(limits);
             }
+            // A changed `wrap_row_cap` reaches the row-height model through
+            // `WrapCtx` — the next `prepare_heights` re-keys and rebuilds it,
+            // no explicit reset needed.
         }
 
-        if let Err(err) = config::save(&self.config) {
-            self.status = Some(format!("Could not save config: {err}"));
-        }
+        self.save_config();
 
         match self.settings_window.take() {
             Some(id) => window::close(id),
             None => Task::none(),
         }
-    }
-
-    // --- Tabs ----------------------------------------------------------
-
-    fn close_tab(&mut self, tab: usize) {
-        if tab >= self.open_tabs.len() {
-            return;
-        }
-
-        self.open_tabs.remove(tab);
-        self.active_tab = match self.active_tab {
-            _ if self.open_tabs.is_empty() => None,
-            Some(active) if active > tab => Some(active - 1),
-            Some(active) if active == tab => Some(tab.min(self.open_tabs.len() - 1)),
-            other => other,
-        };
     }
 
     // --- Connection form ----------------------------------------------
@@ -1709,6 +1634,7 @@ impl LogLens {
             auth: form.auth(),
             skip_tls_verify: form.skip_tls_verify,
             searches: self
+                .ws
                 .connection(&id)
                 .map(|c| c.searches.clone())
                 .unwrap_or_default(),
@@ -1723,15 +1649,10 @@ impl LogLens {
             secrets::delete(&id);
         }
 
-        match self.config.connections.iter_mut().find(|c| c.id == id) {
-            Some(existing) => *existing = connection,
-            None => self.config.connections.push(connection),
-        }
+        self.ws.upsert_connection(connection);
         self.forget_client(&id);
 
-        if let Err(err) = config::save(&self.config) {
-            self.status = Some(format!("Could not save config: {err}"));
-        }
+        self.save_config();
 
         Task::none()
     }
@@ -1739,11 +1660,10 @@ impl LogLens {
     // --- Search form -------------------------------------------------
 
     fn open_search_form(&mut self, conn_id: String) -> Task<Message> {
-        let form_id = self.next_id();
+        let form_id = self.ws.next_id();
         let form = SearchForm::new(form_id, conn_id.clone());
-        self.open_tabs.push(Tab::SearchForm(Box::new(form)));
-        self.active_tab = Some(self.open_tabs.len() - 1);
-        self.expanded.insert(conn_id.clone());
+        self.ws.place(Tab::SearchForm(Box::new(form)), None);
+        self.ws.expand(&conn_id);
 
         let targets = match self.client_for(&conn_id) {
             Some(client) => Task::perform(async move { client.targets().await }, move |targets| {
@@ -1763,15 +1683,11 @@ impl LogLens {
 
     /// Opens the Search settings modal pre-filled from an existing Saved Search.
     fn open_search_settings(&mut self, conn_id: String, search_id: String) -> Task<Message> {
-        let Some(saved) = self
-            .connection(&conn_id)
-            .and_then(|c| c.searches.iter().find(|s| s.id == search_id))
-            .cloned()
-        else {
+        let Some(saved) = self.ws.saved(&conn_id, &search_id).cloned() else {
             return Task::none();
         };
 
-        let form_id = self.next_id();
+        let form_id = self.ws.next_id();
         let mut form = SearchForm::from_saved(form_id, conn_id.clone(), &saved);
         // The edit modal has no Target field, so it never needs the index list
         // or a `_field_caps` prewarm.
@@ -1781,7 +1697,8 @@ impl LogLens {
     }
 
     fn delete_search(&mut self, conn_id: String, search_id: String) {
-        // Close the Search settings modal if it targets this search.
+        // The Search settings modal is not a tab, so the Workspace does not
+        // know to close it.
         if self
             .search_settings
             .as_ref()
@@ -1790,20 +1707,8 @@ impl LogLens {
         {
             self.search_settings = None;
         }
-        // Close an open Result Tab or form for this search.
-        while let Some(pos) = self.open_tabs.iter().position(|t| match t {
-            Tab::Result(rt) => rt.saved_id == search_id,
-            Tab::SearchForm(f) => f.saved_id.as_deref() == Some(search_id.as_str()),
-        }) {
-            self.close_tab(pos);
-        }
-
-        if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id) {
-            conn.searches.retain(|s| s.id != search_id);
-        }
-        if let Err(err) = config::save(&self.config) {
-            self.status = Some(format!("Could not save config: {err}"));
-        }
+        self.ws.delete_search(&conn_id, &search_id);
+        self.save_config();
     }
 
     fn delete_connection(&mut self, conn_id: String) -> Task<Message> {
@@ -1815,26 +1720,13 @@ impl LogLens {
         {
             self.search_settings = None;
         }
-        self.close_connection_tabs(&conn_id);
-
-        self.config.connections.retain(|c| c.id != conn_id);
+        self.ws.delete_connection(&conn_id);
+        // The secret and the memoized Client are not part of the document set,
+        // so they are dropped here rather than by the Workspace.
         secrets::delete(&conn_id);
         self.forget_client(&conn_id);
-        self.expanded.remove(&conn_id);
-        if let Err(err) = config::save(&self.config) {
-            self.status = Some(format!("Could not save config: {err}"));
-        }
+        self.save_config();
         Task::none()
-    }
-
-    /// Closes every tab — Result or Search form — belonging to a Connection.
-    fn close_connection_tabs(&mut self, conn_id: &str) {
-        while let Some(pos) = self.open_tabs.iter().position(|t| match t {
-            Tab::Result(rt) => rt.connection_id == conn_id,
-            Tab::SearchForm(f) => f.connection_id == conn_id,
-        }) {
-            self.close_tab(pos);
-        }
     }
 
     /// Fetches `_field_caps` for the Search form's Target, if it has one.
@@ -1882,7 +1774,7 @@ impl LogLens {
     /// Writes a Result Tab's Live Search back onto its Saved Search and
     /// persists the config.
     fn sync_saved_from_result(&mut self, run_id: u64) {
-        let Some((conn_id, saved_id, live)) = self.result_mut(run_id).map(|rt| {
+        let Some((conn_id, saved_id, live)) = self.ws.result_mut(run_id).map(|rt| {
             (
                 rt.connection_id.clone(),
                 rt.saved_id.clone(),
@@ -1891,14 +1783,10 @@ impl LogLens {
         }) else {
             return;
         };
-        if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id)
-            && let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id)
-        {
+        if let Some(saved) = self.ws.saved_mut(&conn_id, &saved_id) {
             live.write_back(saved);
         }
-        if let Err(err) = config::save(&self.config) {
-            self.status = Some(format!("Could not save config: {err}"));
-        }
+        self.save_config();
     }
 
     /// Starts committing the Search bar's Target draft. A blank or unchanged
@@ -1908,7 +1796,7 @@ impl LogLens {
     /// re-run happen in [`Self::on_target_probed`] on success; a failure (e.g.
     /// the index does not exist) surfaces in the status bar instead.
     fn commit_target(&mut self, run_id: u64) -> Task<Message> {
-        let Some(rt) = self.result_mut(run_id) else {
+        let Some(rt) = self.ws.result_mut(run_id) else {
             return Task::none();
         };
         rt.target_panel_open = false;
@@ -1935,7 +1823,7 @@ impl LogLens {
                 })
             }
             None => {
-                if let Some(rt) = self.result_mut(run_id) {
+                if let Some(rt) = self.ws.result_mut(run_id) {
                     rt.target_probe = None;
                     rt.target_draft = rt.search.target.clone();
                 }
@@ -1955,7 +1843,7 @@ impl LogLens {
         candidate: String,
         result: Result<es::FieldCaps, es::Error>,
     ) -> Task<Message> {
-        let Some(rt) = self.result_mut(run_id) else {
+        let Some(rt) = self.ws.result_mut(run_id) else {
             return Task::none();
         };
         // A newer probe (or a plain re-open) has superseded this one.
@@ -1988,17 +1876,17 @@ impl LogLens {
     }
 
     fn save_search_form(&mut self) -> Task<Message> {
-        let Some(idx) = self.active_tab else {
+        let Some(idx) = self.ws.active_tab else {
             return Task::none();
         };
-        let Some(Tab::SearchForm(form)) = self.open_tabs.get(idx) else {
+        let Some(Tab::SearchForm(form)) = self.ws.open_tabs.get(idx) else {
             return Task::none();
         };
 
         let saved = match form.to_saved() {
             Ok(saved) => saved,
             Err(err) => {
-                if let Some(f) = self.active_form_mut() {
+                if let Some(f) = self.ws.active_form_mut() {
                     f.error = Some(err);
                 }
                 return Task::none();
@@ -2006,21 +1894,16 @@ impl LogLens {
         };
         let conn_id = form.connection_id.clone();
 
-        let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id) else {
+        if self.ws.connection(&conn_id).is_none() {
             return Task::none();
-        };
-        match conn.searches.iter_mut().find(|s| s.id == saved.id) {
-            Some(existing) => *existing = saved.clone(),
-            None => conn.searches.push(saved.clone()),
         }
+        self.ws.upsert_search(&conn_id, saved.clone());
 
-        if let Err(err) = config::save(&self.config) {
-            self.status = Some(format!("Could not save config: {err}"));
-        }
-        self.expanded.insert(conn_id.clone());
+        self.save_config();
+        self.ws.expand(&conn_id);
 
         // Carry the form's already-fetched fields into the Result Tab.
-        let (caps, editing) = match self.open_tabs.get(idx) {
+        let (caps, editing) = match self.ws.open_tabs.get(idx) {
             Some(Tab::SearchForm(f)) => (f.fields.caps().cloned(), f.saved_id.is_some()),
             _ => (None, false),
         };
@@ -2050,23 +1933,15 @@ impl LogLens {
 
         // The modal edits Name and Timestamp field only; the Target is
         // re-pointed from the Search bar.
-        if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id)
-            && let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id)
-        {
+        if let Some(saved) = self.ws.saved_mut(&conn_id, &saved_id) {
             saved.name = name;
             saved.timestamp_field = timestamp_field;
         }
-        if let Err(err) = config::save(&self.config) {
-            self.status = Some(format!("Could not save config: {err}"));
-        }
+        self.save_config();
 
         // Re-run an open Result Tab for this Saved Search; do nothing if none
         // is open (editing settings never opens a tab).
-        let has_tab = self
-            .open_tabs
-            .iter()
-            .any(|t| matches!(t, Tab::Result(rt) if rt.saved_id == saved_id));
-        if has_tab {
+        if self.ws.result_tab_for(&saved_id).is_some() {
             self.open_result_tab(conn_id, saved_id, None, None, true)
         } else {
             Task::none()
@@ -2085,35 +1960,27 @@ impl LogLens {
         caps: Option<es::FieldCaps>,
         rerun_existing: bool,
     ) -> Task<Message> {
-        if let Some(existing) = self
-            .open_tabs
-            .iter()
-            .position(|t| matches!(t, Tab::Result(rt) if rt.saved_id == saved_id))
-        {
+        if let Some(existing) = self.ws.result_tab_for(&saved_id) {
+            // Saved from a form tab for a Saved Search that is already open:
+            // the form goes, and the tab it duplicates comes forward. Closing
+            // it shifts the indices, so the tab is found again afterwards.
             if let Some(form_idx) = replace
                 && form_idx != existing
             {
-                self.open_tabs.remove(form_idx);
+                self.ws.close_tab(form_idx);
             }
-            let existing = self
-                .open_tabs
-                .iter()
-                .position(|t| matches!(t, Tab::Result(rt) if rt.saved_id == saved_id));
-            self.active_tab = existing;
+            let existing = self.ws.result_tab_for(&saved_id);
+            self.ws.active_tab = existing;
 
             // A saved edit refreshes the open Result Tab's parameters and
             // re-runs it; a plain re-open just focuses it.
             if rerun_existing
-                && let (Some(idx), Some(saved)) = (
-                    existing,
-                    self.connection(&conn_id)
-                        .and_then(|c| c.searches.iter().find(|s| s.id == saved_id))
-                        .cloned(),
-                )
+                && let (Some(idx), Some(saved)) =
+                    (existing, self.ws.saved(&conn_id, &saved_id).cloned())
             {
                 let (gte, lte) = saved.timeframe.bounds();
                 let target = saved.target.clone();
-                let run_id = match self.open_tabs.get_mut(idx) {
+                let run_id = match self.ws.open_tabs.get_mut(idx) {
                     Some(Tab::Result(rt)) => {
                         let target_changed = rt.search.target != saved.target;
                         rt.adopt(search::Live::from_saved(&saved));
@@ -2136,6 +2003,7 @@ impl LogLens {
                 };
                 // Refetch field caps if the new Target left us without any.
                 let refetch: Task<Message> = if self
+                    .ws
                     .result_mut(run_id)
                     .is_some_and(|rt| rt.all_fields.is_empty())
                 {
@@ -2154,35 +2022,23 @@ impl LogLens {
             return Task::none();
         }
 
-        let Some(conn) = self.connection(&conn_id) else {
-            return Task::none();
-        };
-        let Some(saved) = conn.searches.iter().find(|s| s.id == saved_id).cloned() else {
+        let Some(saved) = self.ws.saved(&conn_id, &saved_id).cloned() else {
             return Task::none();
         };
 
-        let run_id = self.next_id();
+        let run_id = self.ws.next_id();
         let tab = ResultTab::new(
             run_id,
             conn_id.clone(),
             &saved,
             caps,
-            self.config.es,
-            self.config.utc_timestamps,
+            self.ws.config.es,
+            self.ws.config.utc_timestamps,
         );
         let need_fields = tab.all_fields.is_empty();
         let target = tab.search.target.clone();
 
-        match replace {
-            Some(i) if i < self.open_tabs.len() => {
-                self.open_tabs[i] = Tab::Result(Box::new(tab));
-                self.active_tab = Some(i);
-            }
-            _ => {
-                self.open_tabs.push(Tab::Result(Box::new(tab)));
-                self.active_tab = Some(self.open_tabs.len() - 1);
-            }
-        }
+        self.ws.place(Tab::Result(Box::new(tab)), replace);
 
         let client = self.client_for(&conn_id);
 
@@ -2202,7 +2058,7 @@ impl LogLens {
                 Message::Result(run_id, Msg::TargetsLoaded(targets))
             }),
             None => {
-                if let Some(rt) = self.result_mut(run_id) {
+                if let Some(rt) = self.ws.result_mut(run_id) {
                     rt.targets_loading = false;
                 }
                 Task::none()
@@ -2215,7 +2071,7 @@ impl LogLens {
     /// Freshens the range, then starts a new Run: its first Page, and beside
     /// it the `_count` of everything the Query matches.
     fn start_run(&mut self, run_id: u64) -> Task<Message> {
-        let Some((conn_id, generation, query, limits)) = self.result_mut(run_id).map(|rt| {
+        let Some((conn_id, generation, query, limits)) = self.ws.result_mut(run_id).map(|rt| {
             // If this tab already had a table up, keep the strips pinned and
             // the previous rows on screen while the re-run is in flight, so
             // nothing flickers. The old Hits are swapped out wholesale when
@@ -2257,7 +2113,7 @@ impl LogLens {
         }
 
         let Some(client) = self.client_for(&conn_id) else {
-            let Some(conn) = self.connection(&conn_id) else {
+            let Some(conn) = self.ws.connection(&conn_id) else {
                 return Task::none();
             };
             let name = conn.name.clone();
@@ -2289,7 +2145,7 @@ impl LogLens {
     /// Fetches the next Page of a Result Tab's Run. A no-op unless the tab has
     /// a Run to advance — which it has not while a Page is already in flight.
     fn load_more(&mut self, run_id: u64) -> Task<Message> {
-        let Some((generation, run)) = self.result_mut(run_id).and_then(|rt| {
+        let Some((generation, run)) = self.ws.result_mut(run_id).and_then(|rt| {
             let run = rt.run.take()?;
             rt.paging = Paging::Loading;
             Some((rt.generation, run))
@@ -2321,7 +2177,7 @@ impl LogLens {
         // area. The two optional strips only appear while a Result Tab is
         // active.
         let mut right: Vec<Element<'_, Message>> = Vec::new();
-        let active = self.active_result();
+        let active = self.ws.active_result();
         let search_bar = active.map(ui::search_bar::search_bar);
         let options_bar = active.and_then(ui::search_bar::options_bar);
         let (has_search_bar, has_options_bar) = (search_bar.is_some(), options_bar.is_some());
@@ -2333,14 +2189,14 @@ impl LogLens {
             right.push(options_bar);
             right.push(rule::horizontal(1.0).into());
         }
-        right.push(ui::menu::tab_bar(&self.open_tabs, self.active_tab));
+        right.push(ui::menu::tab_bar(&self.ws.open_tabs, self.ws.active_tab));
         right.push(rule::horizontal(1.0).into());
         right.push(self.main_area());
 
         let body = row![
             ui::tree::sidebar(
-                &self.config.connections,
-                &self.expanded,
+                &self.ws.config.connections,
+                &self.ws.expanded,
                 active.map(|rt| rt.saved_id.as_str()),
             ),
             rule::vertical(1.0),
@@ -2409,7 +2265,7 @@ impl LogLens {
         if let Some(form) = &self.search_settings {
             layers.push(ui::modals::search_settings(
                 form,
-                self.conn_name(&form.connection_id),
+                self.ws.conn_name(&form.connection_id),
             ));
         }
         if let Some(tab) = active
@@ -2438,18 +2294,18 @@ impl LogLens {
     }
 
     fn main_area(&self) -> Element<'_, Message> {
-        match self.active_tab.and_then(|t| self.open_tabs.get(t)) {
+        match self.ws.active_tab.and_then(|t| self.ws.open_tabs.get(t)) {
             Some(Tab::SearchForm(form)) => ui::modals::search_form(
                 form,
-                self.conn_name(&form.connection_id),
-                self.active_tab.unwrap_or(0),
+                self.ws.conn_name(&form.connection_id),
+                self.ws.active_tab.unwrap_or(0),
             ),
             Some(Tab::Result(tab)) => ui::results::result_view(
                 tab,
                 self.header_hover,
                 self.grip_hover,
                 self.column_drag.as_ref(),
-                self.config.wrap_row_cap,
+                self.ws.config.wrap_row_cap,
             ),
             None => centered("Open a Saved Search from the sidebar", TEXT_DIM),
         }

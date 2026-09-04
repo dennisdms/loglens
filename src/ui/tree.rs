@@ -15,7 +15,8 @@ use iced::{Element, Fill, Padding, Point};
 use crate::config::Connection;
 use crate::style::{self, ERR_RED, PANEL, TEXT, TEXT_DIM};
 use crate::ui::chrome::{self, Anchor, anchored};
-use crate::{ES_ROOT, Message, TreeMenu};
+use crate::workspace::ES_ROOT;
+use crate::{Message, TreeMenu};
 
 /// Inner width of the tree right-click menu.
 const MENU_W: f32 = 130.0;
