@@ -1,7 +1,8 @@
 //! Opt-in frame-timing instrumentation for the wide-line scroll-performance
 //! work. A no-op unless `LOGLENS_PERF=1` (the scripted-scroll harness,
-//! `LOGLENS_PERF_SCROLL=1`, turns it on too). See `docs/testing.md` for how to
-//! run it and `docs/plans/wide-line-perf-followups.md` item 0 for why.
+//! `LOGLENS_PERF_SCROLL=1`, turns it on too). See
+//! `.claude/skills/dev/references/performance-benchmarking.md` for how to run
+//! it and `docs/plans/wide-line-perf-followups.md` item 0 for why.
 //!
 //! What this measures: the two phases that are *this app's* code — `update()`
 //! and `view()`, plus the windowed row-build loop inside `view()` — and, in

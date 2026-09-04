@@ -134,7 +134,8 @@ pub enum Affordance {
 /// loaded result set (paging appends; sort / refresh replace wholesale and
 /// call [`LineCache::clear`]). A content hash would cost hashing multi-KB JSON
 /// per row per frame and would over-report its hit rate against the
-/// scroll-harness's identical-copy fixtures (see `docs/testing.md`).
+/// scroll-harness's identical-copy fixtures (see
+/// `.claude/skills/dev/references/performance-benchmarking.md`).
 ///
 /// Height model: `rows[i]` is the best-known *uncapped* visual row count for
 /// Hit `i` — a byte-length estimate for off-screen Hits, upgraded to an exact

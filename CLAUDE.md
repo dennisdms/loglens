@@ -1,3 +1,1 @@
-Log Lens. A cross-platform IDE for browsing logs built in Rust.
-
-Testing — the `cargo test` suite and the scroll-performance harness: `docs/testing.md`.
+Log Lens. A performant, cross-platform IDE for browsing logs. Built in Rust using Iced.

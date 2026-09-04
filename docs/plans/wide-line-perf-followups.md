@@ -62,7 +62,8 @@ remaining time goes, based on isolated microbenchmarks (see the git history
 for the `advance_cache.rs`/`results_view.rs` change) — not a profile of the
 live app while it's actually stuttering.
 
-**The harness now exists — how to run it: `docs/testing.md`.** `src/perf.rs`
+**The harness now exists — how to run it:
+`.claude/skills/dev/references/performance-benchmarking.md`.** `src/perf.rs`
 plus `LOGLENS_PERF_SCROLL=1` drives a fixed scroll over a checked-in fixture
 (`benches/fixtures/*.json`), no cluster needed, and prints per-frame p50/p90/
 p99/max for `update`, `view`, and the windowed row-build loop, plus the
