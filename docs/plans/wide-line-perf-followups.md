@@ -18,7 +18,7 @@ cited there.
 
 - Cell text in **Table mode** is truncated to its column's pixel width
   before being handed to a `text` widget — see `part_widget` and
-  `hit_table` in `src/results_view.rs`, backed by
+  `hit_table` in `src/ui/results/`, backed by
   `AdvanceCache::take_width` in `src/advance_cache.rs`. Measured 110 rows ×
   200px column: **10.5ms → 103µs**.
 - **Highlight rules were removed** (item 2). A `Part` is plain text;
@@ -34,9 +34,10 @@ cited there.
   every line. `ResultTab` carries `scroll_x` / `viewport_w` alongside
   `scroll_y` / `viewport_h`, fed by `Message::ResultScrolled`.
 - The view layer for a Result Tab (table, raw text, popovers, Format modal)
-  lives in `src/results_view.rs` now, as free functions — not
-  `impl LogLens` methods in `main.rs`. Extend it there, not back on
-  `LogLens`.
+  lives in `src/ui/results/` now, as free functions — not `impl LogLens`
+  methods in `main.rs`. Extend it there, not back on `LogLens`. The two
+  Layout modes share one vertically-windowed row list, `rows::windowed`;
+  a mode supplies its row content and a width policy, nothing more.
 - **`line::render` is cached per Hit** (item 3). `hit_table`/`raw_text_view`
   read through `tab.line_cache` (`line::LineCache`), keyed by Hit position,
   invalidated by `Layout::fingerprint()` and `ResultTab::reset_line_cache`.

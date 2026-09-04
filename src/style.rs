@@ -17,6 +17,12 @@ pub const BORDER: Color = Color::from_rgb8(0x3c, 0x3c, 0x3c);
 pub const TEXT: Color = Color::from_rgb8(0xd4, 0xd4, 0xd4);
 /// Muted / secondary text.
 pub const TEXT_DIM: Color = Color::from_rgb8(0x8a, 0x8a, 0x8a);
+/// Success / connection-ok.
+pub const OK_GREEN: Color = Color::from_rgb8(0x6c, 0xc0, 0x7a);
+/// Failure / error text and alert fills.
+pub const ERR_RED: Color = Color::from_rgb8(0xe0, 0x6c, 0x6c);
+/// Warning — a notice that is not yet a failure.
+pub const WARN_AMBER: Color = Color::from_rgb8(0xd6, 0xa5, 0x4c);
 /// Selection / active highlight.
 pub const ACCENT: Color = Color::from_rgb8(0x09, 0x47, 0x71);
 /// Pointer-hover highlight for menu / list rows. Deliberately lighter than

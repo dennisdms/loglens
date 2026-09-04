@@ -15,7 +15,7 @@
 //!
 //! Everything here is gated on [`enabled`], which reads the environment once.
 //! When off, [`span`] returns `None` and [`record`] returns immediately, so
-//! the instrumentation left in `main.rs` / `results_view.rs` costs a single
+//! the instrumentation left in `main.rs` / `ui/results/` costs a single
 //! predictable branch per call.
 
 use std::collections::BTreeMap;

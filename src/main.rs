@@ -15,11 +15,11 @@ mod icons;
 mod line;
 mod perf;
 mod results;
-mod results_view;
 mod search;
 mod secrets;
 mod style;
 mod tab;
+mod ui;
 mod update;
 
 use std::collections::{HashMap, HashSet};
@@ -28,8 +28,8 @@ use std::path::Path;
 use iced::widget::scrollable::{AbsoluteOffset, RelativeOffset};
 use iced::widget::svg::Handle;
 use iced::widget::{
-    Id, button, checkbox, column, container, mouse_area, opaque, operation, pick_list, radio, row,
-    rule, scrollable, space, stack, svg, text, text_editor, text_input,
+    Id, button, checkbox, column, container, mouse_area, operation, pick_list, radio, row, rule,
+    scrollable, space, stack, svg, text, text_editor, text_input,
 };
 use iced::window;
 use iced::{Border, Color, Element, Fill, Length, Padding, Point, Size, Subscription, Task, Theme};
@@ -39,8 +39,9 @@ use config::{TimeUnit, TimeframeChoice, TimeframeMode};
 use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
 use results::{Paging, ResultTab, RunState, TimeframeDraft, TotalHits};
 use search::{Fields, SearchForm};
-use style::{ACCENT, BG, BORDER, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
+use style::{ACCENT, BG, ERR_RED, OK_GREEN, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
 use tab::Tab;
+use ui::{centered, error_pill, field_label, meta, modal_card, thousands};
 
 /// Pseudo tree-node name for the Elasticsearch root, tracked in the `expanded`
 /// set like a folder. The control char keeps it from colliding with a real
@@ -64,10 +65,6 @@ const MENU_BAR_H: f32 = 26.0;
 fn menu_anchor_x(index: usize) -> f32 {
     MENU_BAR_PAD_LEFT + index as f32 * (MENU_LABEL_W + MENU_LABEL_GAP)
 }
-
-const OK_GREEN: Color = Color::from_rgb8(0x6c, 0xc0, 0x7a);
-const ERR_RED: Color = Color::from_rgb8(0xe0, 0x6c, 0x6c);
-const WARN_AMBER: Color = Color::from_rgb8(0xd6, 0xa5, 0x4c);
 
 /// The display name, as `--version` and `--help` print it. The binary is
 /// `loglens`; this is what a human is shown.
@@ -2786,7 +2783,7 @@ impl LogLens {
             && tab.format_open
             && tab.search.mode == line::LayoutMode::RawText
         {
-            layers.push(results_view::format_modal(tab));
+            layers.push(ui::results::format_modal(tab));
         }
         if let Some(prompt) = &self.secret_prompt {
             layers.push(self.secret_prompt_modal(prompt));
@@ -2810,7 +2807,7 @@ impl LogLens {
     fn main_area(&self) -> Element<'_, Message> {
         match self.active_tab.and_then(|t| self.open_tabs.get(t)) {
             Some(Tab::SearchForm(form)) => self.search_form_view(form),
-            Some(Tab::Result(tab)) => results_view::result_view(
+            Some(Tab::Result(tab)) => ui::results::result_view(
                 tab,
                 self.header_hover,
                 self.grip_hover,
@@ -3500,7 +3497,7 @@ impl LogLens {
         // The "Sort fields" popover is *not* pushed inline here — it floats as a
         // stack layer (`sort_fields_popover_overlay`) so opening it never reflows
         // the strips or table below.
-        Some(results_view::result_sort_bar(tab))
+        Some(ui::results::result_sort_bar(tab))
     }
 
     /// The Search bar shown at the top of the right column, above the options
@@ -3598,7 +3595,7 @@ impl LogLens {
         // includes its trailing 1px rule.
         let top = 25.0 + 40.0;
 
-        let card = container(results_view::timeframe_popover(tab)).width(Length::Fixed(CARD_W));
+        let card = container(ui::results::timeframe_popover(tab)).width(Length::Fixed(CARD_W));
         let anchored = container(column![
             space().height(top),
             row![space().width(Fill), card, space().width(12.0)],
@@ -3841,8 +3838,8 @@ impl LogLens {
     //
     // The Hit table, raw text mode, Hit detail panel, header menu, Sort
     // fields / Custom timeframe popover content, and the Format modal all
-    // live in `results_view.rs` now — they only ever needed a `ResultTab`
-    // plus a few transient hover fields, never the rest of `LogLens`.
+    // live in `ui::results` now — they only ever needed a `ResultTab` plus a
+    // few transient hover fields, never the rest of `LogLens`.
 
     /// The floating "Sort fields" editor, anchored under the options strip's
     /// "Sort fields" button as a stack layer so it never reflows the strips or
@@ -3868,7 +3865,7 @@ impl LogLens {
         // the options strip row's left padding (12).
         let left = 253.0;
 
-        let card = container(results_view::sort_fields_popover(tab)).width(Length::Fixed(CARD_W));
+        let card = container(ui::results::sort_fields_popover(tab)).width(Length::Fixed(CARD_W));
         let anchored = container(column![
             space().height(top),
             row![space().width(left), card, space().width(Fill)],
@@ -4085,19 +4082,6 @@ fn update_check_task(trigger: update::Trigger) -> Task<Message> {
     })
 }
 
-fn field_label<'a>(label: &'a str) -> Element<'a, Message> {
-    text(label).size(12.0).color(TEXT_DIM).into()
-}
-
-fn centered<'a>(label: &'a str, color: Color) -> Element<'a, Message> {
-    container(text(label.to_string()).size(14.0).color(color))
-        .center_x(Fill)
-        .center_y(Fill)
-        .width(Fill)
-        .height(Fill)
-        .into()
-}
-
 /// The floating Edit / Delete dropdown opened by right-clicking a tree row.
 fn tree_menu_block<'a>(edit: Message, delete: Message) -> Element<'a, Message> {
     container(
@@ -4139,47 +4123,6 @@ fn test_result(state: &TestState) -> Element<'_, Message> {
             .color(ERR_RED)
             .into(),
     }
-}
-
-/// Centres `content` in a panel card over a dimmed backdrop.
-fn modal_card<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
-    modal_card_sized(content, 460.0)
-}
-
-/// [`modal_card`] with an explicit card width — for modals that need more room
-/// than the default (e.g. the Format modal's log-line preview).
-fn modal_card_sized<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> {
-    let card = container(content).width(width).padding(20.0).style(|_| {
-        let mut s = style::panel(PANEL);
-        s.border = Border {
-            color: BORDER,
-            width: 1.0,
-            radius: 4.0.into(),
-        };
-        s
-    });
-
-    let backdrop = container(card)
-        .width(Fill)
-        .height(Fill)
-        .center_x(Fill)
-        .center_y(Fill)
-        .style(|_| container::Style {
-            background: Some(
-                Color {
-                    a: 0.6,
-                    ..Color::BLACK
-                }
-                .into(),
-            ),
-            ..container::Style::default()
-        });
-
-    // `opaque` swallows clicks on the backdrop; the `mouse_area` swallows scroll
-    // wheel events. Without this a scroll while a modal is open reaches — and
-    // moves — the Result Tab behind it. Inner scrollables still scroll: they
-    // capture the event first, before it ever reaches this `mouse_area`.
-    opaque(mouse_area(backdrop).on_scroll(|_| Message::Ignore))
 }
 
 /// Folds a fetched Page into a Result Tab: replacing Hits on a first run,
@@ -4231,10 +4174,6 @@ fn apply_page(rt: &mut ResultTab, advance: es::Advance, append: bool) {
     };
 }
 
-fn meta<'a>(value: &str) -> Element<'a, Message> {
-    text(value.to_string()).size(12.0).color(TEXT_DIM).into()
-}
-
 /// The `OpenSavedSearch` message the scroll-perf harness opens on boot: the
 /// Saved Search whose id or name matches `LOGLENS_PERF_SEARCH`, or the first
 /// one configured when that is unset. `None` if the config has no searches.
@@ -4257,41 +4196,6 @@ fn perf_open_search(config: &Config) -> Option<Message> {
     None
 }
 
-/// A solid-red alert pill for the info bar: a warning triangle, `msg`, and a
-/// `\u{00d7}` button that clears the notice.
-fn error_pill<'a>(run_id: u64, msg: &str) -> Element<'a, Message> {
-    container(
-        row![
-            svg(Handle::clone(&icons::WARNING))
-                .width(Length::Fixed(12.0))
-                .height(Length::Fixed(12.0))
-                .style(|_theme, _status| svg::Style {
-                    color: Some(Color::WHITE)
-                }),
-            text(msg.to_string()).size(12.0).color(Color::WHITE),
-            button(text("\u{00d7}").size(12.0).color(Color::WHITE))
-                .on_press(Message::DismissTargetError(run_id))
-                .padding(Padding::new(0.0).left(4.0).right(4.0))
-                .style(style::bare_button()),
-        ]
-        .spacing(6.0)
-        .align_y(iced::Alignment::Center),
-    )
-    // No vertical padding and a borderless (still rounded) fill so the pill
-    // stays within a single line of the info bar — see `info_bar`.
-    .padding(Padding::new(0.0).left(8.0).right(4.0))
-    .style(|_| {
-        let mut s = style::panel(ERR_RED);
-        s.border = Border {
-            color: ERR_RED,
-            width: 0.0,
-            radius: 3.0.into(),
-        };
-        s
-    })
-    .into()
-}
-
 /// One frame of the braille activity spinner, chosen by a monotonic counter.
 fn spinner_frame(frame: usize) -> &'static str {
     const FRAMES: [&str; 10] = [
@@ -4299,17 +4203,4 @@ fn spinner_frame(frame: usize) -> &'static str {
         "\u{2827}", "\u{2807}", "\u{280f}",
     ];
     FRAMES[frame % FRAMES.len()]
-}
-
-/// Groups an integer into thousands: `1234567` → `1,234,567`.
-fn thousands(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
 }
