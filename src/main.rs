@@ -26,22 +26,19 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use iced::widget::scrollable::{AbsoluteOffset, RelativeOffset};
-use iced::widget::{
-    Id, button, checkbox, column, container, operation, radio, row, rule, scrollable, space, stack,
-    text, text_editor, text_input,
-};
+use iced::widget::{Id, column, container, operation, row, rule, stack, text_editor};
 use iced::window;
-use iced::{Border, Color, Element, Fill, Length, Padding, Point, Size, Subscription, Task, Theme};
+use iced::{Element, Fill, Point, Size, Subscription, Task, Theme};
 
 use config::{Auth, Config, Connection};
 use config::{TimeUnit, TimeframeChoice, TimeframeMode};
 use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
 use results::{Paging, ResultTab, RunState, TimeframeDraft, TotalHits};
 use search::{Fields, SearchForm};
-use style::{ACCENT, BG, ERR_RED, OK_GREEN, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
+use style::{BG, TEXT_DIM};
 use tab::Tab;
-use ui::chrome::{self, Anchor, Chrome, anchored, menu_anchor_x};
-use ui::{centered, error_pill, field_label, meta, modal_card, thousands};
+use ui::centered;
+use ui::chrome::Chrome;
 
 /// Pseudo tree-node name for the Elasticsearch root, tracked in the `expanded`
 /// set like a folder. The control char keeps it from colliding with a real
@@ -902,6 +899,14 @@ impl LogLens {
 
     fn connection(&self, id: &str) -> Option<&Connection> {
         self.config.connections.iter().find(|c| c.id == id)
+    }
+
+    /// A Connection's display name, for the forms that show which cluster they
+    /// are editing against. Empty when the Connection has been deleted out from
+    /// under an open form \u{2014} the name is a subtitle, not the subject, so a
+    /// blank one is better there than an error.
+    fn conn_name(&self, id: &str) -> &str {
+        self.connection(id).map_or("", |c| c.name.as_str())
     }
 
     /// The [`es::Client`] for a Connection, connecting and memoizing on first
@@ -2701,7 +2706,7 @@ impl LogLens {
     fn view(&self, window: window::Id) -> Element<'_, Message> {
         let _span = perf::span("view");
         if Some(window) == self.settings_window {
-            return self.settings_view();
+            return ui::settings::view(&self.settings_draft);
         }
         self.main_view()
     }
@@ -2724,7 +2729,7 @@ impl LogLens {
             right.push(options_bar);
             right.push(rule::horizontal(1.0).into());
         }
-        right.push(self.tab_bar());
+        right.push(ui::menu::tab_bar(&self.open_tabs, self.active_tab));
         right.push(rule::horizontal(1.0).into());
         right.push(self.main_area());
 
@@ -2732,7 +2737,7 @@ impl LogLens {
             ui::tree::sidebar(
                 &self.config.connections,
                 &self.expanded,
-                self.active_result().map(|rt| rt.saved_id.as_str()),
+                active.map(|rt| rt.saved_id.as_str()),
             ),
             rule::vertical(1.0),
             column(right).width(Fill),
@@ -2741,18 +2746,24 @@ impl LogLens {
 
         // Built as a Vec rather than a `column!` so the Update banner and the
         // rule beneath it appear together or not at all.
-        let mut frame: Vec<Element<'_, Message>> =
-            vec![self.menu_bar(), rule::horizontal(1.0).into()];
+        let mut frame: Vec<Element<'_, Message>> = vec![
+            ui::menu::bar(self.file_menu_open, self.help_menu_open),
+            rule::horizontal(1.0).into(),
+        ];
         let mut banner_h = None;
-        if let Some((banner, height)) = self.update_banner() {
+        if let Some((banner, height)) = ui::menu::update_banner(
+            self.new_release.as_ref(),
+            self.updating.as_ref(),
+            &self.flavour,
+        ) {
             frame.push(banner);
             frame.push(rule::horizontal(1.0).into());
             banner_h = Some(height);
         }
         frame.push(container(body).width(Fill).height(Fill).into());
-        frame.push(self.status_bar());
+        frame.push(ui::menu::status_bar(self.status.as_deref()));
         frame.push(rule::horizontal(1.0).into());
-        frame.push(self.info_bar());
+        frame.push(ui::menu::info_bar(active, self.spinner_frame));
 
         // Everything above is the fixed chrome; every overlay below is a layer
         // over the whole window that has to be told where that chrome ended.
@@ -2765,10 +2776,12 @@ impl LogLens {
             .into();
 
         let mut layers: Vec<Element<'_, Message>> = vec![base];
-        if let Some(menu) = self.file_menu_overlay(&metrics) {
+        if let Some(menu) = ui::menu::file_overlay(self.file_menu_open, &metrics) {
             layers.push(menu);
         }
-        if let Some(menu) = self.help_menu_overlay(&metrics) {
+        if let Some(menu) =
+            ui::menu::help_overlay(self.help_menu_open, self.checking_for_updates, &metrics)
+        {
             layers.push(menu);
         }
         if let Some(menu) = ui::tree::menu_overlay(self.tree_menu.as_ref(), self.tree_menu_at) {
@@ -2787,10 +2800,13 @@ impl LogLens {
             layers.push(dropdown);
         }
         if let Some(form) = &self.connection_form {
-            layers.push(self.connection_form_modal(form));
+            layers.push(ui::modals::connection_form(form));
         }
         if let Some(form) = &self.search_settings {
-            layers.push(self.search_settings_modal(form));
+            layers.push(ui::modals::search_settings(
+                form,
+                self.conn_name(&form.connection_id),
+            ));
         }
         if let Some(tab) = active
             && tab.format_open
@@ -2799,13 +2815,13 @@ impl LogLens {
             layers.push(ui::results::format_modal(tab));
         }
         if let Some(prompt) = &self.secret_prompt {
-            layers.push(self.secret_prompt_modal(prompt));
+            layers.push(ui::modals::secret_prompt(prompt));
         }
         if let Some(confirm) = &self.confirm {
-            layers.push(self.confirm_modal(confirm));
+            layers.push(ui::modals::confirm(confirm));
         }
         if self.about_open {
-            layers.push(self.about_modal());
+            layers.push(ui::menu::about_modal());
         }
 
         // Always wrap in a `stack`, even with no overlays: collapsing to the
@@ -2819,7 +2835,11 @@ impl LogLens {
 
     fn main_area(&self) -> Element<'_, Message> {
         match self.active_tab.and_then(|t| self.open_tabs.get(t)) {
-            Some(Tab::SearchForm(form)) => self.search_form_view(form),
+            Some(Tab::SearchForm(form)) => ui::modals::search_form(
+                form,
+                self.conn_name(&form.connection_id),
+                self.active_tab.unwrap_or(0),
+            ),
             Some(Tab::Result(tab)) => ui::results::result_view(
                 tab,
                 self.header_hover,
@@ -2830,879 +2850,9 @@ impl LogLens {
             None => centered("Open a Saved Search from the sidebar", TEXT_DIM),
         }
     }
-
-    fn status_bar(&self) -> Element<'_, Message> {
-        let Some(status) = &self.status else {
-            return space().height(0.0).into();
-        };
-        container(
-            row![
-                text(status.clone()).size(12.0).color(TEXT),
-                space().width(Fill),
-                button(text("Dismiss").size(12.0).color(TEXT_DIM))
-                    .on_press(Message::DismissStatus)
-                    .padding(2.0)
-                    .style(style::bare_button()),
-            ]
-            .align_y(iced::Alignment::Center),
-        )
-        .style(|_| style::panel(PANEL_ALT))
-        .width(Fill)
-        .padding(Padding::new(4.0).left(12.0).right(12.0))
-        .into()
-    }
-
-    /// A persistent info bar across the very bottom of the window, carrying
-    /// summary details for the active tab: the loaded-Hit count for a Result
-    /// Tab on the left, and a failed Target switch (a red outlined pill) on
-    /// the right.
-    fn info_bar(&self) -> Element<'_, Message> {
-        let mut items: Vec<Element<'_, Message>> = Vec::new();
-        if let Some(tab) = self.active_result() {
-            items.push(self.hit_count_readout(tab));
-            if let Some(err) = &tab.target_error {
-                items.push(space().width(Fill).into());
-                items.push(error_pill(tab.run_id, err));
-            }
-        }
-        // Fixed height so a transient `error_pill` (taller than the plain
-        // hit-count readout) can't nudge the whole bar upward when it appears.
-        container(row(items).spacing(12.0).align_y(iced::Alignment::Center))
-            .style(|_| style::panel(PANEL_ALT))
-            .width(Fill)
-            .height(Length::Fixed(24.0))
-            .align_y(iced::alignment::Vertical::Center)
-            .padding(Padding::new(0.0).left(12.0).right(12.0))
-            .into()
-    }
-
-    /// The bottom-bar Hit-count readout: how many Hits are loaded into the
-    /// table, then the total matching Hits once `_count` lands — an animated
-    /// spinner stands in for the total while it is still in flight, and it is
-    /// dropped entirely if the count failed.
-    fn hit_count_readout<'a>(&self, tab: &'a ResultTab) -> Element<'a, Message> {
-        let loaded = thousands(tab.hits.len() as u64);
-        match tab.total_hits {
-            TotalHits::Loading => row![
-                meta(&format!("Loaded {loaded} of")),
-                text(spinner_frame(self.spinner_frame))
-                    .size(12.0)
-                    .color(TEXT_DIM),
-                meta("hits"),
-            ]
-            .spacing(5.0)
-            .align_y(iced::Alignment::Center)
-            .into(),
-            TotalHits::Known(total) => {
-                meta(&format!("Loaded {loaded} of {} hits", thousands(total)))
-            }
-            TotalHits::Failed => meta(&format!("Loaded {loaded} hits")),
-        }
-    }
-
-    fn tab_bar(&self) -> Element<'_, Message> {
-        if self.open_tabs.is_empty() {
-            return container(space().height(34.0))
-                .style(|_| style::panel(PANEL_ALT))
-                .width(Fill)
-                .into();
-        }
-
-        let tabs = self
-            .open_tabs
-            .iter()
-            .enumerate()
-            .map(|(i, tab)| -> Element<'_, Message> {
-                let active = self.active_tab == Some(i);
-                let name = tab.title();
-
-                container(
-                    row![
-                        button(
-                            text(name)
-                                .size(13.0)
-                                .color(if active { TEXT } else { TEXT_DIM })
-                        )
-                        .on_press(Message::SelectTab(i))
-                        .padding(Padding::new(6.0).left(12.0).right(6.0))
-                        .style(style::bare_button()),
-                        button(text("\u{00d7}").size(13.0).color(TEXT_DIM))
-                            .on_press(Message::CloseTab(i))
-                            .padding(Padding::new(6.0).left(2.0).right(10.0))
-                            .style(style::bare_button()),
-                    ]
-                    .align_y(iced::Alignment::Center),
-                )
-                .style(move |_| {
-                    let mut s = style::panel(if active { BG } else { PANEL_ALT });
-                    if active {
-                        s.border = Border {
-                            color: ACCENT,
-                            width: 0.0,
-                            ..Border::default()
-                        };
-                    }
-                    s
-                })
-                .into()
-            });
-
-        container(row(tabs).width(Fill))
-            .style(|_| style::panel(PANEL_ALT))
-            .width(Fill)
-            .into()
-    }
-
-    /// The always-present Menu bar across the top of the window. `File` and
-    /// `Help` open dropdowns (see [`Self::file_menu_overlay`] and
-    /// [`Self::help_menu_overlay`]); `View` is still inert.
-    ///
-    /// Every label occupies the same fixed cell width. A dropdown is a
-    /// free-floating overlay layer stacked over the whole window, so nothing
-    /// tells it where the label it hangs under actually landed; uniform cells
-    /// turn the anchor into [`menu_anchor_x`] arithmetic instead of a number
-    /// measured off a screenshot and re-measured whenever a label is renamed.
-    fn menu_bar(&self) -> Element<'_, Message> {
-        container(
-            row![
-                menu_bar_label("File", self.file_menu_open, Message::FileMenuToggle),
-                // Inert, so it is rendered as dimmed text in a cell of the same
-                // width rather than as a button that does nothing when pressed.
-                container(text("View").size(chrome::MENU_LABEL_SIZE).color(TEXT_DIM))
-                    .width(Length::Fixed(chrome::MENU_LABEL_W))
-                    .center_x(Fill),
-                menu_bar_label("Help", self.help_menu_open, Message::HelpMenuToggle),
-            ]
-            .spacing(chrome::MENU_LABEL_GAP)
-            .align_y(iced::Alignment::Center),
-        )
-        .style(|_| style::panel(PANEL_ALT))
-        .width(Fill)
-        // Height comes out of these constants, and `chrome::MENU_BAR_H` is
-        // derived from the same ones — the dropdowns anchored under this bar
-        // have no way to measure where it actually ended. See `ui::chrome`.
-        .padding(
-            Padding::new(chrome::MENU_BAR_PAD_Y)
-                .left(chrome::MENU_BAR_PAD_LEFT)
-                .right(12.0),
-        )
-        .into()
-    }
-
-    /// The floating "Help" dropdown, anchored under its Menu bar label.
-    fn help_menu_overlay(&self, metrics: &Chrome) -> Option<Element<'_, Message>> {
-        if !self.help_menu_open {
-            return None;
-        }
-
-        // While a check is in flight the item says so and stops responding.
-        // The unauthenticated GitHub API allows 60 requests an hour per IP,
-        // shared by everyone behind an office NAT, and a menu item that looks
-        // like it did nothing invites exactly the repeated clicking that spends
-        // them.
-        let checking = self.checking_for_updates;
-        let check = button(
-            text(if checking {
-                "Checking for updates\u{2026}"
-            } else {
-                "Check for updates\u{2026}"
-            })
-            .size(12.0)
-            .color(if checking { TEXT_DIM } else { TEXT }),
-        )
-        .on_press_maybe((!checking).then_some(Message::CheckForUpdates))
-        .width(Fill)
-        .padding(Padding::new(4.0).left(10.0).right(10.0))
-        .style(style::picker_row(false));
-
-        let block = chrome::menu_popup(
-            column![
-                check,
-                button(text("About").size(12.0).color(TEXT))
-                    .on_press(Message::OpenAbout)
-                    .width(Fill)
-                    .padding(Padding::new(4.0).left(10.0).right(10.0))
-                    .style(style::picker_row(false)),
-            ]
-            .spacing(1.0),
-            178.0,
-        );
-
-        Some(anchored(
-            block,
-            // Index 2: the bar reads File, View, Help.
-            Anchor::Left {
-                x: menu_anchor_x(2),
-                y: metrics.below_menu_bar,
-            },
-            Message::HelpMenuDismiss,
-        ))
-    }
-
-    /// The Update banner: a strip directly below the Menu bar naming the newer
-    /// Release, showing its notes, and carrying a \u{00d7} that hides it.
-    ///
-    /// A banner rather than a modal, because a new Release is never urgent and
-    /// a modal would take the window away from whatever query the user is in
-    /// the middle of reading. A banner rather than an indicator dot, because a
-    /// dot is too easy to never notice at all.
-    ///
-    /// Dismissing hides it for the rest of the session only \u{2014} see
-    /// `new_release`.
-    ///
-    /// What it offers depends on the Install flavour. An installer-managed copy
-    /// gets an Update button. A Portable copy gets the releases page and no
-    /// button: running the installer from a copy on a USB stick would install a
-    /// second one into `%LOCALAPPDATA%` while the user carried on running this
-    /// one, so the honest offer is the download.
-    /// Returns the banner and the height it was built to occupy — the one
-    /// piece of chrome that cannot be a constant, since it is there or not
-    /// depending on whether a Release was found, and two different heights
-    /// depending on whether that Release carried notes. Everything anchored
-    /// below it is displaced by exactly this, so it is reported rather than
-    /// guessed at from the outside. See [`ui::chrome::Chrome`].
-    fn update_banner(&self) -> Option<(Element<'_, Message>, f32)> {
-        let release = self.new_release.as_ref()?;
-
-        let mut left = column![
-            text(format!("{APP_NAME} {} is available.", release.version))
-                .size(chrome::BANNER_TITLE_SIZE)
-                .color(Color::WHITE),
-        ]
-        .spacing(chrome::BANNER_SPACING);
-
-        let notes = release.notes.trim();
-        let height = if notes.is_empty() {
-            chrome::BANNER_H_BARE
-        } else {
-            // GitHub's generated notes are markdown of no fixed length, shown
-            // as the plain text they are. Given a fixed height — not merely a
-            // maximum — so that a long changelog neither pushes the tab strip
-            // off the bottom of the window nor moves the overlays anchored
-            // under this banner. Longer notes scroll within it.
-            left = left.push(
-                container(scrollable(text(notes.to_string()).size(12.0).color(
-                    Color {
-                        a: 0.85,
-                        ..Color::WHITE
-                    },
-                )))
-                .height(Length::Fixed(chrome::BANNER_NOTES_H)),
-            );
-            chrome::BANNER_H_NOTES
-        };
-
-        let portable = self.flavour.installed_exe().is_none();
-        if portable {
-            left = left.push(
-                text(
-                    "This copy is portable, so it does not update itself. \
-                     Download the new version from the releases page.",
-                )
-                .size(12.0)
-                .color(Color {
-                    a: 0.85,
-                    ..Color::WHITE
-                }),
-            );
-        }
-
-        // A failed download or a failed apply is always shown: the user pressed
-        // a button, and unlike a background Update check nobody is being
-        // spared an interruption they did not ask for.
-        if let Some(Updating::Failed(err)) = &self.updating {
-            left = left.push(
-                text(format!("Update failed: {err}"))
-                    .size(12.0)
-                    .color(ERR_RED),
-            );
-        }
-
-        // The Update button belongs to installer-managed copies only, and goes
-        // away while one is running so it cannot be pressed twice.
-        let mut trailing: Vec<Element<'_, Message>> = Vec::new();
-        if let Some(Updating::Busy(step)) = &self.updating {
-            trailing.push(
-                text(*step)
-                    .size(12.0)
-                    .color(Color {
-                        a: 0.85,
-                        ..Color::WHITE
-                    })
-                    .into(),
-            );
-        } else if !portable {
-            // Pressing it again after a failure is the user's call to make;
-            // what must never happen is a retry they did not ask for.
-            let again = matches!(self.updating, Some(Updating::Failed(_)));
-            trailing.push(
-                button(
-                    text(if again { "Try again" } else { "Update" })
-                        .size(12.0)
-                        .color(TEXT),
-                )
-                .on_press(Message::ApplyUpdate)
-                .padding(Padding::new(4.0).left(12.0).right(12.0))
-                .style(style::icon_button(false))
-                .into(),
-            );
-        }
-
-        // The way to the Release for anyone who cannot, or could not, be
-        // updated in place. Every failure path keeps this beside it.
-        if portable || matches!(self.updating, Some(Updating::Failed(_))) {
-            trailing.push(
-                button(text("Releases page").size(12.0).color(TEXT))
-                    .on_press(Message::OpenReleasesPage)
-                    .padding(Padding::new(4.0).left(12.0).right(12.0))
-                    .style(style::icon_button(false))
-                    .into(),
-            );
-        }
-
-        Some((
-            container(
-                row![
-                    left.width(Fill),
-                    space().width(12.0),
-                    row(trailing).spacing(6.0).align_y(iced::Alignment::Center),
-                    space().width(8.0),
-                    button(text("\u{00d7}").size(14.0).color(Color::WHITE))
-                        .on_press(Message::DismissUpdateBanner)
-                        .padding(Padding::new(2.0).left(6.0).right(6.0))
-                        .style(style::bare_button()),
-                ]
-                .align_y(iced::Alignment::Start),
-            )
-            .style(|_| style::panel(ACCENT))
-            .width(Fill)
-            .padding(Padding::new(chrome::BANNER_PAD_Y).left(12.0).right(8.0))
-            .into(),
-            height,
-        ))
-    }
-
-    /// The About dialog: what this build is, where it came from, and where it
-    /// leaves a trace when it crashes.
-    ///
-    /// An overlay modal in the main window rather than a second OS window like
-    /// Settings. Settings earns a window of its own because it is an editor
-    /// people leave open beside the app while they work; About is read once and
-    /// dismissed, and giving four lines of text its own taskbar button and
-    /// alt-tab entry costs more than it returns.
-    fn about_modal(&self) -> Element<'_, Message> {
-        // Shown as a path rather than opened, so a user asked for the crash log
-        // can find the file. `None` only on a system with no data directory at
-        // all, where there is no crash log to point at.
-        let crash_log = crashlog::log_path().map_or_else(
-            || "unavailable: no data directory on this system".to_string(),
-            |path| path.display().to_string(),
-        );
-
-        let card = column![
-            text("About Log Lens").size(16.0).color(TEXT),
-            space().height(2.0),
-            // `VERSION`, not the crate version the Update check compares
-            // against: the commit hash is what makes the first bug report
-            // against "0.1.0" say which 0.1.0.
-            text(format!("{APP_NAME} {VERSION}")).size(13.0).color(TEXT),
-            space().height(8.0),
-            field_label("Repository"),
-            text(update::REPOSITORY_URL).size(12.0).color(TEXT_DIM),
-            space().height(8.0),
-            field_label("Crash log"),
-            text(crash_log).size(12.0).color(TEXT_DIM),
-            space().height(12.0),
-            row![
-                space().width(Fill),
-                button(text("Close").size(13.0).color(TEXT))
-                    .on_press(Message::CloseAbout)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::picker_row(true)),
-            ],
-        ]
-        .spacing(4.0)
-        .width(Fill);
-
-        modal_card(card.into())
-    }
-
-    /// The floating "File" dropdown, anchored under its Menu bar label.
-    fn file_menu_overlay(&self, metrics: &Chrome) -> Option<Element<'_, Message>> {
-        if !self.file_menu_open {
-            return None;
-        }
-        let block = chrome::menu_popup(
-            button(text("Settings").size(12.0).color(TEXT))
-                .on_press(Message::OpenSettings)
-                .width(Fill)
-                .padding(Padding::new(4.0).left(10.0).right(10.0))
-                .style(style::picker_row(false)),
-            150.0,
-        );
-
-        Some(anchored(
-            block,
-            // Index 0: the bar reads File, View, Help.
-            Anchor::Left {
-                x: menu_anchor_x(0),
-                y: metrics.below_menu_bar,
-            },
-            Message::FileMenuDismiss,
-        ))
-    }
-
-    /// The Settings window body: a single Elasticsearch page with the two fetch
-    /// limits. Rendered whenever `view` is asked for the Settings window.
-    fn settings_view(&self) -> Element<'_, Message> {
-        let draft = &self.settings_draft;
-
-        let max_results = column![
-            field_label("Max Results"),
-            text("Stop fetching once a tab has loaded this many documents.")
-                .size(11.0)
-                .color(TEXT_DIM),
-            text_input("", &draft.max_results)
-                .on_input(Message::SettingsMaxResults)
-                .on_submit(Message::SettingsSave)
-                .padding(6.0)
-                .width(Length::Fixed(140.0)),
-        ]
-        .spacing(4.0);
-
-        let fetch_size = column![
-            field_label("Fetch size"),
-            text("Documents per request while paging (max 10,000).")
-                .size(11.0)
-                .color(TEXT_DIM),
-            text_input("", &draft.fetch_size)
-                .on_input(Message::SettingsFetchSize)
-                .on_submit(Message::SettingsSave)
-                .padding(6.0)
-                .width(Length::Fixed(140.0)),
-        ]
-        .spacing(4.0);
-
-        let wrap_cap = column![
-            field_label("Wrap row cap"),
-            text(
-                "With Wrap on, the most visual rows one Hit shows before a \
-                 \u{201c}\u{2026} more lines\u{201d} toggle. Blank = no cap."
-            )
-            .size(11.0)
-            .color(TEXT_DIM),
-            text_input("none", &draft.wrap_row_cap)
-                .on_input(Message::SettingsWrapCap)
-                .on_submit(Message::SettingsSave)
-                .padding(6.0)
-                .width(Length::Fixed(140.0)),
-        ]
-        .spacing(4.0);
-
-        let mut col = column![
-            text("Elasticsearch").size(16.0).color(TEXT),
-            text(
-                "How many log documents Log Lens pulls from a cluster, and in \
-                 what size batches."
-            )
-            .size(11.0)
-            .color(TEXT_DIM),
-            space().height(4.0),
-            max_results,
-            fetch_size,
-            rule::horizontal(1.0),
-            text("Display").size(16.0).color(TEXT),
-            space().height(4.0),
-            wrap_cap,
-        ]
-        .spacing(10.0);
-
-        if let Some(err) = &draft.error {
-            col = col.push(text(err.clone()).size(12.0).color(ERR_RED));
-        }
-
-        col = col.push(space().height(6.0));
-        col = col.push(
-            row![
-                button(text("Save").size(13.0).color(TEXT))
-                    .on_press(Message::SettingsSave)
-                    .padding(Padding::new(6.0).left(16.0).right(16.0))
-                    .style(style::picker_row(true)),
-                button(text("Cancel").size(13.0).color(TEXT_DIM))
-                    .on_press(Message::SettingsClose)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::bare_button()),
-            ]
-            .spacing(8.0),
-        );
-
-        container(scrollable(col).height(Fill))
-            .style(|_| style::panel(BG))
-            .width(Fill)
-            .height(Fill)
-            .padding(20.0)
-            .into()
-    }
-
-    // --- Search settings (create form + edit modal) ------------------
-
-    /// The structural fields shared by the new-Saved-Search form and the Search
-    /// settings modal: name, timestamp field, and — only when `include_target`
-    /// — the Target (with typeahead). The edit modal omits the Target; it is
-    /// re-pointed from the Search bar instead.
-    fn search_settings_fields<'a>(
-        &'a self,
-        form: &'a SearchForm,
-        include_target: bool,
-    ) -> Vec<Element<'a, Message>> {
-        let mut fields: Vec<Element<'a, Message>> = vec![
-            field_label("Name"),
-            text_input("checkout-errors", &form.name)
-                .on_input(Message::SearchName)
-                .padding(6.0)
-                .into(),
-        ];
-
-        if include_target {
-            fields.push(field_label("Target — index, data stream, or pattern"));
-            fields.push(
-                text_input("logs-*", &form.target)
-                    .on_input(Message::SearchTargetInput)
-                    .padding(6.0)
-                    .into(),
-            );
-            if form.targets_loading {
-                fields.push(
-                    text("Loading indices\u{2026}")
-                        .size(11.0)
-                        .color(TEXT_DIM)
-                        .into(),
-                );
-            } else {
-                let matches = form.target_matches();
-                if !matches.is_empty() {
-                    let mut opts = column![].spacing(1.0);
-                    for name in matches {
-                        opts = opts.push(
-                            button(text(name.clone()).size(12.0))
-                                .on_press(Message::SearchTargetPicked(name.clone()))
-                                .width(Fill)
-                                .padding(Padding::new(3.0).left(8.0))
-                                .style(style::picker_row(false)),
-                        );
-                    }
-                    fields.push(container(opts).style(|_| style::panel(PANEL)).into());
-                }
-            }
-        }
-
-        fields.push(field_label("Timestamp field"));
-        fields.push(
-            text_input("@timestamp", &form.timestamp_field)
-                .on_input(Message::SearchTimestampField)
-                .padding(6.0)
-                .into(),
-        );
-        fields
-    }
-
-    /// The new-Saved-Search form tab: only the structural fields. Query string,
-    /// timeframe, Columns and sort get defaults and are tuned from the Search
-    /// bar once the Result Tab opens.
-    fn search_form_view<'a>(&'a self, form: &'a SearchForm) -> Element<'a, Message> {
-        let cancel_idx = self.active_tab.unwrap_or(0);
-        let conn_name = self
-            .connection(&form.connection_id)
-            .map(|c| c.name.clone())
-            .unwrap_or_default();
-
-        let mut col = column![
-            text("New Search").size(16.0).color(TEXT),
-            text(format!("on {conn_name}")).size(12.0).color(TEXT_DIM),
-            text(
-                "Query string, timeframe, Columns and sort are tuned from the \
-                 Search bar once this opens."
-            )
-            .size(11.0)
-            .color(TEXT_DIM),
-            space().height(6.0),
-        ]
-        .spacing(6.0)
-        .max_width(560.0);
-
-        for field in self.search_settings_fields(form, true) {
-            col = col.push(field);
-        }
-
-        if let Some(err) = &form.error {
-            col = col.push(text(err.clone()).size(12.0).color(ERR_RED));
-        }
-
-        col = col.push(space().height(10.0));
-        col = col.push(
-            row![
-                button(text("Save & Run").size(13.0).color(TEXT))
-                    .on_press(Message::SearchSave)
-                    .padding(Padding::new(6.0).left(16.0).right(16.0))
-                    .style(style::picker_row(true)),
-                button(text("Cancel").size(13.0).color(TEXT_DIM))
-                    .on_press(Message::CloseTab(cancel_idx))
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::bare_button()),
-            ]
-            .spacing(8.0),
-        );
-
-        container(scrollable(col.padding(Padding::new(0.0).right(12.0))).height(Fill))
-            .style(|_| style::panel(BG))
-            .width(Fill)
-            .height(Fill)
-            .padding(16.0)
-            .into()
-    }
-
-    /// The Search settings modal: the same three fields as the create form,
-    /// shown over the current tab rather than as a tab of its own. Saving it
-    /// re-runs an open Result Tab for the Saved Search.
-    fn search_settings_modal<'a>(&'a self, form: &'a SearchForm) -> Element<'a, Message> {
-        let conn_name = self
-            .connection(&form.connection_id)
-            .map(|c| c.name.clone())
-            .unwrap_or_default();
-
-        let mut card = column![
-            text("Search settings").size(16.0).color(TEXT),
-            text(format!("on {conn_name}")).size(12.0).color(TEXT_DIM),
-            space().height(2.0),
-        ]
-        .spacing(6.0)
-        .width(Fill);
-
-        for field in self.search_settings_fields(form, false) {
-            card = card.push(field);
-        }
-
-        if let Some(err) = &form.error {
-            card = card.push(text(err.clone()).size(12.0).color(ERR_RED));
-        }
-
-        card = card.push(space().height(8.0));
-        card = card.push(
-            row![
-                space().width(Fill),
-                button(text("Cancel").size(13.0).color(TEXT_DIM))
-                    .on_press(Message::SearchSettingsCancel)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::bare_button()),
-                button(text("Save").size(13.0).color(TEXT))
-                    .on_press(Message::SearchSettingsSave)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::picker_row(true)),
-            ]
-            .spacing(8.0),
-        );
-
-        modal_card(card.into())
-    }
-
-    // --- Modals ------------------------------------------------------
-
-    fn connection_form_modal<'a>(&'a self, form: &'a ConnectionForm) -> Element<'a, Message> {
-        let mut fields: Vec<Element<'a, Message>> = vec![
-            text(form.title()).size(16.0).color(TEXT).into(),
-            field_label("Name"),
-            text_input("Production logs", &form.name)
-                .on_input(Message::ConnFormName)
-                .padding(6.0)
-                .into(),
-            field_label("URL"),
-            text_input("https://localhost:9200", &form.url)
-                .on_input(Message::ConnFormUrl)
-                .padding(6.0)
-                .into(),
-            field_label("Authentication"),
-            row(AuthKind::ALL.iter().map(|&kind| {
-                radio(
-                    kind.label(),
-                    kind,
-                    Some(form.auth_kind),
-                    Message::ConnFormAuthKind,
-                )
-                .size(14.0)
-                .into()
-            }))
-            .spacing(16.0)
-            .into(),
-        ];
-
-        if form.auth_kind == AuthKind::Basic {
-            fields.push(field_label("Username"));
-            fields.push(
-                text_input("elastic", &form.username)
-                    .on_input(Message::ConnFormUsername)
-                    .padding(6.0)
-                    .into(),
-            );
-        }
-        if form.auth_kind.needs_secret() {
-            let secret_label = if form.auth_kind == AuthKind::Basic {
-                "Password"
-            } else {
-                "API key"
-            };
-            fields.push(field_label(secret_label));
-            let placeholder = if form.editing_id.is_some() {
-                "(unchanged)"
-            } else {
-                ""
-            };
-            fields.push(
-                text_input(placeholder, &form.secret)
-                    .on_input(Message::ConnFormSecret)
-                    .secure(true)
-                    .padding(6.0)
-                    .into(),
-            );
-        }
-
-        fields.push(
-            checkbox(form.skip_tls_verify)
-                .label("Skip TLS certificate verification")
-                .on_toggle(Message::ConnFormSkipTls)
-                .size(14.0)
-                .into(),
-        );
-
-        fields.push(space().height(4.0).into());
-        fields.push(
-            row![
-                button(text("Test").size(13.0))
-                    .on_press(Message::ConnFormTest)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::bare_button()),
-                test_result(&form.test),
-            ]
-            .spacing(12.0)
-            .align_y(iced::Alignment::Center)
-            .into(),
-        );
-
-        if let Some(err) = &form.error {
-            fields.push(text(err.clone()).size(12.0).color(ERR_RED).into());
-        }
-
-        fields.push(space().height(8.0).into());
-        fields.push(
-            row![
-                space().width(Fill),
-                button(text("Cancel").size(13.0).color(TEXT_DIM))
-                    .on_press(Message::ConnFormCancel)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::bare_button()),
-                button(text("Save").size(13.0).color(TEXT))
-                    .on_press(Message::ConnFormSave)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::picker_row(true)),
-            ]
-            .spacing(8.0)
-            .into(),
-        );
-
-        modal_card(column(fields).spacing(6.0).width(Fill).into())
-    }
-
-    fn secret_prompt_modal<'a>(&'a self, prompt: &'a SecretPrompt) -> Element<'a, Message> {
-        let card = column![
-            text("Secret required").size(16.0).color(TEXT),
-            text(format!(
-                "The keyring is unavailable. Enter the secret for {} for this session.",
-                prompt.connection_name
-            ))
-            .size(12.0)
-            .color(TEXT_DIM),
-            space().height(4.0),
-            text_input("", &prompt.value)
-                .on_input(Message::SecretPromptValue)
-                .on_submit(Message::SecretPromptSubmit)
-                .secure(true)
-                .padding(6.0),
-            space().height(8.0),
-            row![
-                space().width(Fill),
-                button(text("Cancel").size(13.0).color(TEXT_DIM))
-                    .on_press(Message::SecretPromptCancel)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::bare_button()),
-                button(text("Continue").size(13.0).color(TEXT))
-                    .on_press(Message::SecretPromptSubmit)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::picker_row(true)),
-            ]
-            .spacing(8.0),
-        ]
-        .spacing(6.0)
-        .width(Fill);
-
-        modal_card(card.into())
-    }
-
-    fn confirm_modal<'a>(&'a self, confirm: &'a Confirm) -> Element<'a, Message> {
-        let (title, body, proceed) = match confirm {
-            Confirm::DeleteConnection { name, .. } => (
-                "Delete Connection",
-                format!("Delete \"{name}\" and all of its Saved Searches? This cannot be undone."),
-                "Delete",
-            ),
-        };
-
-        let card = column![
-            text(title).size(16.0).color(TEXT),
-            text(body).size(12.0).color(TEXT_DIM),
-            space().height(10.0),
-            row![
-                space().width(Fill),
-                button(text("Cancel").size(13.0).color(TEXT_DIM))
-                    .on_press(Message::ConfirmCancel)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(style::bare_button()),
-                button(text(proceed).size(13.0).color(TEXT))
-                    .on_press(Message::ConfirmProceed)
-                    .padding(Padding::new(6.0).left(14.0).right(14.0))
-                    .style(|_theme: &Theme, status| {
-                        let base = style::picker_row(true)(_theme, status);
-                        button::Style {
-                            background: Some(ERR_RED.into()),
-                            ..base
-                        }
-                    }),
-            ]
-            .spacing(8.0),
-        ]
-        .spacing(6.0)
-        .width(Fill);
-
-        modal_card(card.into())
-    }
 }
 
 // --- Small view helpers ----------------------------------------------------
-
-/// One Menu bar label that opens a dropdown, in a cell of the shared width so
-/// [`menu_anchor_x`] can place that dropdown underneath it.
-fn menu_bar_label<'a>(label: &'a str, open: bool, toggle: Message) -> Element<'a, Message> {
-    button(
-        text(label)
-            .size(chrome::MENU_LABEL_SIZE)
-            .color(TEXT)
-            .width(Fill)
-            .center(),
-    )
-    .on_press(toggle)
-    .width(Length::Fixed(chrome::MENU_LABEL_W))
-    .padding(Padding::new(chrome::MENU_LABEL_PAD))
-    .style(style::picker_row(open))
-    .into()
-}
 
 /// Runs one Update check, tagging the result with why it ran so that
 /// [`update::outcome`] can decide what may be shown.
@@ -3716,21 +2866,6 @@ fn update_check_task(trigger: update::Trigger) -> Task<Message> {
 fn non_empty(s: &str) -> Option<&str> {
     let t = s.trim();
     (!t.is_empty()).then_some(t)
-}
-
-fn test_result(state: &TestState) -> Element<'_, Message> {
-    match state {
-        TestState::Idle => space().width(0.0).into(),
-        TestState::Running => text("Testing\u{2026}").size(12.0).color(TEXT_DIM).into(),
-        TestState::Ok(msg) => text(format!("\u{2713} {msg}"))
-            .size(12.0)
-            .color(OK_GREEN)
-            .into(),
-        TestState::Failed(err) => text(format!("\u{2717} {err}"))
-            .size(12.0)
-            .color(ERR_RED)
-            .into(),
-    }
 }
 
 /// Folds a fetched Page into a Result Tab: replacing Hits on a first run,
@@ -3802,13 +2937,4 @@ fn perf_open_search(config: &Config) -> Option<Message> {
         }
     }
     None
-}
-
-/// One frame of the braille activity spinner, chosen by a monotonic counter.
-fn spinner_frame(frame: usize) -> &'static str {
-    const FRAMES: [&str; 10] = [
-        "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}",
-        "\u{2827}", "\u{2807}", "\u{280f}",
-    ];
-    FRAMES[frame % FRAMES.len()]
 }

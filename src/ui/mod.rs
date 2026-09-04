@@ -9,8 +9,11 @@
 //! field label, a number written the way a person reads one.
 
 pub(crate) mod chrome;
+pub(crate) mod menu;
+pub(crate) mod modals;
 pub(crate) mod results;
 pub(crate) mod search_bar;
+pub(crate) mod settings;
 pub(crate) mod tree;
 
 use iced::widget::svg::Handle;
