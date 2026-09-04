@@ -5,11 +5,15 @@ use std::collections::HashMap;
 
 use iced::widget::{Id, text_editor};
 
-use crate::config::{TimeUnit, Timeframe, TimeframeMode};
+use crate::config::{EsSettings, SavedSearch, TimeUnit, Timeframe, TimeframeMode};
 use crate::es;
 use crate::es::Hit;
 use crate::line::{Layout, LayoutMode, LineCache, WrapCtx};
 use crate::search::{Edited, Live};
+
+mod update;
+
+pub use update::Msg;
 
 /// Draft state for the Search bar's "Custom\u{2026}" timeframe popover: an
 /// editable relative (amount + unit) or absolute (from / to) window, applied
@@ -287,6 +291,71 @@ pub struct ResultTab {
 }
 
 impl ResultTab {
+    /// A tab for one Saved Search, before its first run: the Search bar drafts
+    /// seeded from the saved values, the range frozen from its Timeframe, and
+    /// no Hits yet.
+    ///
+    /// `caps` is the Target's field list when a previous tab already fetched
+    /// it. Passing it lets the raw text template resolve here rather than a
+    /// round trip later; without it the template is left for
+    /// [`Msg::FieldsLoaded`] to resolve when `_field_caps` lands.
+    pub fn new(
+        run_id: u64,
+        connection_id: String,
+        saved: &SavedSearch,
+        caps: Option<es::FieldCaps>,
+        es: EsSettings,
+        utc: bool,
+    ) -> Self {
+        let (gte, lte) = saved.timeframe.bounds();
+        let (all_fields, sortable_fields) = caps.map(|c| (c.all, c.sortable)).unwrap_or_default();
+        let mut tab = Self {
+            run_id,
+            connection_id,
+            saved_id: saved.id.clone(),
+            search: Live::from_saved(saved),
+            target_draft: saved.target.clone(),
+            target_probe: None,
+            target_error: None,
+            target_options: Vec::new(),
+            targets_loading: true,
+            target_panel_open: false,
+            query_draft: saved.query_string.clone(),
+            column_draft: String::new(),
+            col_widths: HashMap::new(),
+            sort_panel_open: false,
+            header_menu: None,
+            all_fields,
+            sortable_fields,
+            tf: TimeframeDraft::from_timeframe(&saved.timeframe),
+            gte,
+            lte,
+            hits: Vec::new(),
+            state: RunState::Loading,
+            refreshing: false,
+            scroll_id: Id::unique(),
+            paging: Paging::Idle,
+            total_hits: TotalHits::Loading,
+            generation: 0,
+            scroll_y: 0.0,
+            viewport_h: 600.0,
+            scroll_x: 0.0,
+            viewport_w: 1200.0,
+            selected_hit: None,
+            detail_content: text_editor::Content::new(),
+            detail_height: DETAIL_DEFAULT_H,
+            utc,
+            max_results: es.max_results,
+            fetch_size: es.fetch_size,
+            template_draft: saved.template.clone(),
+            format_open: false,
+            line_cache: Default::default(),
+            run: None,
+        };
+        tab.resolve_template();
+        tab
+    }
+
     /// Whether the options and Search strips should be shown for this tab. True
     /// once a run has produced a table (or an empty result), and held true
     /// through an in-place re-run so the strips — and everything below them —

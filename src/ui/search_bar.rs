@@ -14,7 +14,7 @@ use iced::widget::{button, column, container, pick_list, row, svg, text, text_in
 use iced::{Element, Fill, Length, Padding};
 
 use crate::config::TimeframeChoice;
-use crate::results::ResultTab;
+use crate::results::{Msg, ResultTab};
 use crate::style::{self, PANEL, TEXT, TEXT_DIM};
 use crate::ui::chrome::{self, Anchor, Chrome, anchored};
 use crate::{Message, icons, ui};
@@ -46,7 +46,7 @@ pub(crate) fn search_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         .matches_preset()
         .unwrap_or(TimeframeChoice::Custom);
     let timeframe_ctl = pick_list(&TimeframeChoice::ALL[..], Some(selected), move |choice| {
-        Message::ResultTimeframeChoice(run_id, choice)
+        Message::Result(run_id, Msg::TimeframeChoice(choice))
     })
     .text_size(12.0)
     .padding(4.0);
@@ -58,13 +58,13 @@ pub(crate) fn search_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     // list.
     let target_ctl = row![
         text_input("index or data stream", &tab.target_draft)
-            .on_input(move |v| Message::ResultTargetDraft(run_id, v))
+            .on_input(move |v| Message::Result(run_id, Msg::TargetDraft(v)))
             .on_submit(Message::ResultTargetSubmit(run_id))
             .size(12.0)
             .padding(4.0)
             .width(Length::Fixed(160.0)),
         button(text("\u{25be}").size(9.0).color(TEXT_DIM))
-            .on_press(Message::ResultTargetPanelToggle(run_id))
+            .on_press(Message::Result(run_id, Msg::TargetPanelToggle))
             .padding(Padding::new(4.0).left(6.0).right(6.0))
             .style(style::picker_row(tab.target_panel_open)),
     ]
@@ -75,8 +75,8 @@ pub(crate) fn search_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         row![
             target_ctl,
             text_input("Lucene Query", &tab.query_draft)
-                .on_input(move |v| Message::ResultQueryDraft(run_id, v))
-                .on_submit(Message::ResultQuerySubmit(run_id))
+                .on_input(move |v| Message::Result(run_id, Msg::QueryDraft(v)))
+                .on_submit(Message::Result(run_id, Msg::QuerySubmit))
                 .size(12.0)
                 .padding(4.0)
                 .width(Fill),
@@ -139,7 +139,7 @@ pub(crate) fn timeframe_overlay<'a>(
             inset: chrome::CONTENT_PAD_RIGHT,
             y: metrics.below_search_bar,
         },
-        Message::ResultTfCancel(run_id),
+        Message::Result(run_id, Msg::TfCancel),
     ))
 }
 
@@ -196,7 +196,7 @@ pub(crate) fn target_overlay<'a>(
             x: chrome::CONTENT_LEFT,
             y: metrics.below_search_bar,
         },
-        Message::ResultTargetPanelDismiss(run_id),
+        Message::Result(run_id, Msg::TargetPanelDismiss),
     ))
 }
 
@@ -226,6 +226,6 @@ pub(crate) fn sort_overlay<'a>(
             x: chrome::CONTENT_LEFT,
             y: metrics.below_options_bar,
         },
-        Message::ResultSortPanelDismiss(run_id),
+        Message::Result(run_id, Msg::SortPanelDismiss),
     ))
 }

@@ -9,7 +9,7 @@ use iced::widget::{
 use iced::{Color, Element, Fill, Length, Padding};
 
 use super::rows::{RowWidth, paging_footer, part_widget, windowed};
-use crate::results::{FILL_COLUMN_MAX_W, ResultTab};
+use crate::results::{FILL_COLUMN_MAX_W, Msg, ResultTab};
 use crate::style;
 use crate::{ColumnDrag, Message, icons};
 
@@ -69,7 +69,7 @@ pub(super) fn hit_table<'a>(
                 let show_dots = header_hover == Some(i) || tab.header_menu == Some(i);
                 let dots: Element<'_, Message> = if show_dots {
                     button(text("\u{22ee}").size(12.0).color(style::TEXT_DIM))
-                        .on_press(Message::ResultHeaderMenu(run_id, i))
+                        .on_press(Message::Result(run_id, Msg::HeaderMenu(i)))
                         .padding(Padding::new(0.0).left(2.0).right(2.0))
                         .style(style::bare_button())
                         .into()
@@ -232,7 +232,7 @@ fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Mess
         entry(
             &icons::ARROW_LEFT,
             "Move column left",
-            (index > 0).then_some(Message::ResultColumnMove(run_id, index, -1)),
+            (index > 0).then_some(Message::Result(run_id, Msg::ColumnMove(index, -1))),
         )
         .into(),
     );
@@ -240,7 +240,7 @@ fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Mess
         entry(
             &icons::ARROW_RIGHT,
             "Move column right",
-            (index < last).then_some(Message::ResultColumnMove(run_id, index, 1)),
+            (index < last).then_some(Message::Result(run_id, Msg::ColumnMove(index, 1))),
         )
         .into(),
     );
@@ -248,7 +248,7 @@ fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Mess
         entry(
             &icons::TRASH,
             "Remove column",
-            Some(Message::ResultColumnRemove(run_id, index)),
+            Some(Message::Result(run_id, Msg::ColumnRemove(index))),
         )
         .into(),
     );
@@ -262,7 +262,7 @@ fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Mess
         .collect();
     let add_ctl: Element<'_, Message> = if !available.is_empty() {
         pick_list(available, None::<String>, move |f| {
-            Message::ResultColumnAddField(run_id, f)
+            Message::Result(run_id, Msg::ColumnAddField(f))
         })
         .placeholder("Add column\u{2026}")
         .text_size(12.0)
@@ -272,13 +272,13 @@ fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Mess
     } else {
         row![
             text_input("Add column\u{2026}", &tab.column_draft)
-                .on_input(move |v| Message::ResultColumnDraft(run_id, v))
-                .on_submit(Message::ResultColumnAdd(run_id))
+                .on_input(move |v| Message::Result(run_id, Msg::ColumnDraft(v)))
+                .on_submit(Message::Result(run_id, Msg::ColumnAdd))
                 .size(12.0)
                 .padding(4.0)
                 .width(Fill),
             button(text("+").size(12.0).color(style::TEXT))
-                .on_press(Message::ResultColumnAdd(run_id))
+                .on_press(Message::Result(run_id, Msg::ColumnAdd))
                 .padding(Padding::new(4.0).left(8.0).right(8.0))
                 .style(style::picker_row(true)),
         ]
@@ -300,7 +300,7 @@ fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Mess
         entry(
             &icons::SORT_ASCENDING,
             "Sort ascending",
-            Some(Message::ResultSortSet(run_id, field.clone(), false)),
+            Some(Message::Result(run_id, Msg::SortSet(field.clone(), false))),
         )
         .into(),
     );
@@ -308,7 +308,7 @@ fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Mess
         entry(
             &icons::SORT_DESCENDING,
             "Sort descending",
-            Some(Message::ResultSortSet(run_id, field.clone(), true)),
+            Some(Message::Result(run_id, Msg::SortSet(field.clone(), true))),
         )
         .into(),
     );
@@ -317,7 +317,7 @@ fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Mess
             entry(
                 &icons::SORT_REMOVE,
                 "Remove from sort",
-                Some(Message::ResultSortRemove(run_id, field.clone())),
+                Some(Message::Result(run_id, Msg::SortRemove(field.clone()))),
             )
             .into(),
         );
@@ -349,7 +349,7 @@ fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Mess
             .width(Fill)
             .height(Fill),
     )
-    .on_press(Message::ResultHeaderMenuDismiss(run_id))
-    .on_right_press(Message::ResultHeaderMenuDismiss(run_id))
+    .on_press(Message::Result(run_id, Msg::HeaderMenuDismiss))
+    .on_right_press(Message::Result(run_id, Msg::HeaderMenuDismiss))
     .into()
 }

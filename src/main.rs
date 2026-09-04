@@ -26,14 +26,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use iced::widget::scrollable::{AbsoluteOffset, RelativeOffset};
-use iced::widget::{Id, column, container, operation, row, rule, stack, text_editor};
+use iced::widget::{column, container, operation, row, rule, stack};
 use iced::window;
 use iced::{Element, Fill, Point, Size, Subscription, Task, Theme};
 
 use config::{Auth, Config, Connection};
-use config::{TimeUnit, TimeframeChoice, TimeframeMode};
 use connection::{AuthKind, ConnectionForm, EndpointError, TestState};
-use results::{Paging, ResultTab, RunState, TimeframeDraft, TotalHits};
+use results::{Msg, Paging, ResultTab, RunState, TotalHits};
 use search::{Fields, SearchForm};
 use style::{BG, TEXT_DIM};
 use tab::Tab;
@@ -527,19 +526,10 @@ enum Message {
     SearchSettingsSave,
     /// Dismiss the Search settings modal without saving.
     SearchSettingsCancel,
-    // Result tab: live query string, timeframe, columns + sort
-    /// The async Target listing for a Result Tab's suggestion dropdown landed.
-    ResultTargetsLoaded {
-        run_id: u64,
-        targets: Vec<String>,
-    },
-    /// A keystroke in the Search bar's Target input; also opens the dropdown.
-    ResultTargetDraft(u64, String),
-    /// Toggle the Target suggestion dropdown (the caret button next to the
-    /// field).
-    ResultTargetPanelToggle(u64),
-    /// Dismiss the Target suggestion dropdown without committing.
-    ResultTargetPanelDismiss(u64),
+    // Result tab: everything one tab answers on its own — the Search bar
+    // drafts, the timeframe popover, Columns, sort, Layout, the Format modal
+    // and the Hit detail panel. See [`results::Msg`].
+    Result(u64, results::Msg),
     /// Pick a suggestion from the Target dropdown (commits + re-runs).
     ResultTargetPicked(u64, String),
     /// Commit the Target draft (Enter): re-run against the new Target, or
@@ -553,29 +543,6 @@ enum Message {
         candidate: String,
         result: Result<es::FieldCaps, es::Error>,
     },
-    ResultQueryDraft(u64, String),
-    ResultQuerySubmit(u64),
-    /// A timeframe dropdown pick: a preset applies immediately, `Custom` opens
-    /// the popover.
-    ResultTimeframeChoice(u64, TimeframeChoice),
-    ResultTfMode(u64, TimeframeMode),
-    ResultTfRelAmount(u64, String),
-    ResultTfRelUnit(u64, TimeUnit),
-    ResultTfAbsFrom(u64, String),
-    ResultTfAbsTo(u64, String),
-    /// Apply the "Custom\u{2026}" popover's draft timeframe and re-run.
-    ResultTfApply(u64),
-    /// Dismiss the popover without changing the timeframe.
-    ResultTfCancel(u64),
-    ResultFieldsLoaded {
-        run_id: u64,
-        result: Result<es::FieldCaps, es::Error>,
-    },
-    ResultColumnDraft(u64, String),
-    ResultColumnAdd(u64),
-    ResultColumnAddField(u64, String),
-    ResultColumnRemove(u64, usize),
-    ResultColumnMove(u64, usize, isize),
     /// Drag-resize of a table Column by its header's right edge.
     ColumnDragStart(u64, usize),
     ColumnDragTo(f32),
@@ -584,43 +551,8 @@ enum Message {
     GripHover(Option<usize>),
     /// Pointer entered (`Some`) or left (`None`) a table Column header.
     HeaderHover(Option<usize>),
-    /// Toggle a column header's "\u{22ee}" settings menu (by column index).
-    ResultHeaderMenu(u64, usize),
-    /// Close any open column header settings menu.
-    ResultHeaderMenuDismiss(u64),
-    /// Toggle the options strip's "Sort fields" popover.
-    ResultSortPanel(u64),
-    /// Close the "Sort fields" popover (click outside).
-    ResultSortPanelDismiss(u64),
-    /// Set a field's sort direction, adding it to the sort order if new.
-    ResultSortSet(u64, String, bool),
-    /// Drop a field from the sort order.
-    ResultSortRemove(u64, String),
-    /// Reorder the sort key at the given position by `delta` places.
-    ResultSortMove(u64, usize, isize),
-    /// Clear the whole sort order.
-    ResultSortClear(u64),
-    // Result tab: Layout mode + raw text template
-    /// Switch a Result Tab between Table and raw text mode.
-    ResultLayoutMode(u64, line::LayoutMode),
-    /// Toggle line wrapping (variable row heights) for a Result Tab.
-    ResultWrap(u64),
-    /// Expand / collapse one wrapped Hit past the global row cap.
-    ResultHitExpand(u64, usize),
-    /// A keystroke in the raw text template input.
-    ResultTemplateDraft(u64, String),
-    /// Commit the raw text template draft (Enter).
-    ResultTemplateSubmit(u64),
-    /// Open the raw-text "Format" modal for a Result Tab.
-    OpenFormat(u64),
-    /// Commit the template draft and close the "Format" modal.
-    CloseFormat(u64),
-    /// Discard the template draft and close the "Format" modal.
-    FormatCancel(u64),
     // Hit detail panel
-    HitClicked(u64, usize),
     CloseHitDetail,
-    DetailEdit(u64, text_editor::Action),
     DetailDragStart(u64),
     DetailDragTo(f32),
     DetailDragEnd,
@@ -723,8 +655,6 @@ enum Message {
     WindowClosed(window::Id),
     // Misc
     DismissStatus,
-    /// Clear the active Result Tab's failed-Target-switch notice.
-    DismissTargetError(u64),
     /// Deliberately does nothing — used to let a modal backdrop swallow scroll
     /// events so they never reach the widgets behind it.
     Ignore,
@@ -1147,34 +1077,15 @@ impl LogLens {
             Message::SearchSettingsSave => return self.save_search_settings(),
             Message::SearchSettingsCancel => self.search_settings = None,
 
-            Message::ResultTargetsLoaded { run_id, targets } => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.targets_loading = false;
-                    rt.target_options = targets;
-                }
-            }
-            Message::ResultTargetDraft(run_id, v) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.target_draft = v;
-                    rt.target_panel_open = true;
-                    rt.target_error = None;
-                }
-            }
-            Message::ResultTargetPanelToggle(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.target_panel_open = !rt.target_panel_open;
-                    if rt.target_panel_open {
-                        rt.tf.open = false;
-                    } else {
-                        rt.target_draft = rt.search.target.clone();
-                    }
-                }
-            }
-            Message::ResultTargetPanelDismiss(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.target_panel_open = false;
-                    rt.target_draft = rt.search.target.clone();
-                }
+            // Everything a Result Tab answers on its own goes through here.
+            // `Edited` is the whole of what comes back: whether the Saved
+            // Search needs writing, and whether the Run is now stale.
+            Message::Result(run_id, msg) => {
+                let edited = self
+                    .result_mut(run_id)
+                    .map(|rt| rt.update(msg))
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::ResultTargetPicked(run_id, v) => {
                 if let Some(rt) = self.result_mut(run_id) {
@@ -1188,252 +1099,6 @@ impl LogLens {
                 candidate,
                 result,
             } => return self.on_target_probed(run_id, candidate, result),
-
-            Message::ResultQueryDraft(run_id, v) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.query_draft = v;
-                }
-            }
-            Message::ResultQuerySubmit(run_id) => {
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| {
-                        let draft = rt.query_draft.clone();
-                        rt.search.set_query_string(draft)
-                    })
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::ResultTimeframeChoice(run_id, choice) => match choice.to_timeframe() {
-                Some(timeframe) => {
-                    let edited = self
-                        .result_mut(run_id)
-                        .map(|rt| {
-                            rt.tf.open = false;
-                            rt.search.set_timeframe(timeframe)
-                        })
-                        .unwrap_or_default();
-                    return self.apply_edit(run_id, edited);
-                }
-                None => {
-                    if let Some(rt) = self.result_mut(run_id) {
-                        let current = rt.search.timeframe.clone();
-                        rt.tf.seed(&current);
-                    }
-                }
-            },
-            Message::ResultTfMode(run_id, mode) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.tf.mode = mode;
-                }
-            }
-            Message::ResultTfRelAmount(run_id, v) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.tf.rel_amount = v;
-                }
-            }
-            Message::ResultTfRelUnit(run_id, unit) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.tf.rel_unit = unit;
-                }
-            }
-            Message::ResultTfAbsFrom(run_id, v) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.tf.abs_from = v;
-                }
-            }
-            Message::ResultTfAbsTo(run_id, v) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.tf.abs_to = v;
-                }
-            }
-            Message::ResultTfApply(run_id) => {
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| {
-                        let timeframe = rt.tf.to_timeframe();
-                        rt.tf.open = false;
-                        rt.search.set_timeframe(timeframe)
-                    })
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::ResultTfCancel(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.tf.open = false;
-                }
-            }
-            Message::ResultFieldsLoaded { run_id, result } => {
-                if let Ok(caps) = result {
-                    let edited = self
-                        .result_mut(run_id)
-                        .map(|rt| {
-                            rt.all_fields = caps.all;
-                            rt.sortable_fields = caps.sortable;
-                            rt.resolve_template()
-                        })
-                        .unwrap_or_default();
-                    return self.apply_edit(run_id, edited);
-                }
-            }
-            Message::ResultColumnDraft(run_id, v) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.column_draft = v;
-                }
-            }
-            Message::ResultColumnAdd(run_id) => {
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| {
-                        let draft = rt.column_draft.clone();
-                        rt.add_column_from_draft(&draft)
-                    })
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::ResultColumnAddField(run_id, field) => {
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| rt.add_column_from_draft(&field))
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::ResultColumnRemove(run_id, i) => {
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| {
-                        rt.header_menu = None;
-                        rt.search.remove_column(i)
-                    })
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::ResultColumnMove(run_id, i, delta) => {
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| {
-                        rt.header_menu = None;
-                        rt.search.move_column(i, delta)
-                    })
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::ResultHeaderMenu(run_id, index) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.header_menu = if rt.header_menu == Some(index) {
-                        None
-                    } else {
-                        Some(index)
-                    };
-                }
-            }
-            Message::ResultHeaderMenuDismiss(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.header_menu = None;
-                }
-            }
-            Message::ResultSortPanel(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.sort_panel_open = !rt.sort_panel_open;
-                }
-            }
-            Message::ResultSortPanelDismiss(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.sort_panel_open = false;
-                }
-            }
-            Message::ResultSortSet(run_id, field, desc) => {
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| {
-                        rt.header_menu = None;
-                        rt.search.set_sort_dir(&field, desc)
-                    })
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::ResultSortRemove(run_id, field) => {
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| {
-                        rt.header_menu = None;
-                        rt.search.remove_sort(&field)
-                    })
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::ResultSortMove(run_id, index, delta) => {
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| rt.search.move_sort(index, delta))
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::ResultSortClear(run_id) => {
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| rt.search.clear_sort())
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-
-            Message::ResultLayoutMode(run_id, mode) => {
-                // Entering raw text mode for the first time also resolves the
-                // template, which is a second edit to persist — hence the `|`.
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| rt.search.set_mode(mode) | rt.resolve_template())
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::ResultWrap(run_id) => {
-                // The next `prepare_heights` sees the `WrapCtx` change and
-                // rebuilds the row-height model; a one-off render pass measures
-                // every line the first time wrap turns on.
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| rt.search.toggle_wrap())
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::ResultHitExpand(run_id, index) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.line_cache.get_mut().toggle_expand(index);
-                }
-            }
-            Message::ResultTemplateDraft(run_id, v) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.template_draft = v;
-                }
-            }
-            Message::ResultTemplateSubmit(run_id) => {
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| rt.commit_template())
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::OpenFormat(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.format_open = true;
-                }
-            }
-            Message::CloseFormat(run_id) => {
-                let edited = self
-                    .result_mut(run_id)
-                    .map(|rt| {
-                        rt.format_open = false;
-                        rt.commit_template()
-                    })
-                    .unwrap_or_default();
-                return self.apply_edit(run_id, edited);
-            }
-            Message::FormatCancel(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.template_draft = rt.search.template.clone();
-                    rt.format_open = false;
-                }
-            }
 
             Message::TotalHitsLoaded {
                 run_id,
@@ -1585,11 +1250,6 @@ impl LogLens {
             Message::RetryPage(run_id) => return self.load_more(run_id),
             Message::RefreshResult(run_id) => return self.start_run(run_id),
 
-            Message::HitClicked(run_id, index) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.toggle_detail(index);
-                }
-            }
             Message::CloseHitDetail => {
                 self.tree_menu = None;
                 if let Some(Tab::Result(rt)) =
@@ -1604,13 +1264,6 @@ impl LogLens {
                         rt.target_panel_open = false;
                         rt.target_draft = rt.search.target.clone();
                     }
-                }
-            }
-            Message::DetailEdit(run_id, action) => {
-                if !action.is_edit()
-                    && let Some(rt) = self.result_mut(run_id)
-                {
-                    rt.detail_content.perform(action);
                 }
             }
             Message::DetailDragStart(run_id) => {
@@ -1858,14 +1511,6 @@ impl LogLens {
             }
 
             Message::DismissStatus => self.status = None,
-            Message::DismissTargetError(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.target_error = None;
-                }
-            }
-            // A scroll (or stray press) on a modal backdrop routes here so the
-            // `mouse_area` in `modal_card_sized` can capture the event and keep
-            // it from reaching the Result Tab behind the modal.
             Message::Ignore => {}
         }
 
@@ -2497,7 +2142,7 @@ impl LogLens {
                     match self.client_for(&conn_id) {
                         Some(client) => Task::perform(
                             async move { client.fields(&target).await },
-                            move |result| Message::ResultFieldsLoaded { run_id, result },
+                            move |result| Message::Result(run_id, Msg::FieldsLoaded(result)),
                         ),
                         None => Task::none(),
                     }
@@ -2517,55 +2162,14 @@ impl LogLens {
         };
 
         let run_id = self.next_id();
-        let (gte, lte) = saved.timeframe.bounds();
-        let (all_fields, sortable_fields) = caps.map(|c| (c.all, c.sortable)).unwrap_or_default();
-        let mut tab = ResultTab {
+        let tab = ResultTab::new(
             run_id,
-            connection_id: conn_id.clone(),
-            saved_id,
-            search: search::Live::from_saved(&saved),
-            target_draft: saved.target.clone(),
-            target_probe: None,
-            target_error: None,
-            target_options: Vec::new(),
-            targets_loading: true,
-            target_panel_open: false,
-            query_draft: saved.query_string.clone(),
-            column_draft: String::new(),
-            col_widths: HashMap::new(),
-            sort_panel_open: false,
-            header_menu: None,
-            all_fields,
-            sortable_fields,
-            tf: TimeframeDraft::from_timeframe(&saved.timeframe),
-            gte,
-            lte,
-            hits: Vec::new(),
-            state: RunState::Loading,
-            refreshing: false,
-            scroll_id: Id::unique(),
-            paging: Paging::Idle,
-            total_hits: TotalHits::Loading,
-            generation: 0,
-            scroll_y: 0.0,
-            viewport_h: 600.0,
-            scroll_x: 0.0,
-            viewport_w: 1200.0,
-            selected_hit: None,
-            detail_content: text_editor::Content::new(),
-            detail_height: results::DETAIL_DEFAULT_H,
-            utc: self.config.utc_timestamps,
-            max_results: self.config.es.max_results,
-            fetch_size: self.config.es.fetch_size,
-            template_draft: saved.template.clone(),
-            format_open: false,
-            line_cache: Default::default(),
-            run: None,
-        };
-        // Resolve the raw text template up front if the field list is already
-        // known; otherwise it is resolved lazily when `ResultFieldsLoaded`
-        // lands (see that handler).
-        tab.resolve_template();
+            conn_id.clone(),
+            &saved,
+            caps,
+            self.config.es,
+            self.config.utc_timestamps,
+        );
         let need_fields = tab.all_fields.is_empty();
         let target = tab.search.target.clone();
 
@@ -2586,7 +2190,7 @@ impl LogLens {
             (Some(client), true) => {
                 let client = client.clone();
                 Task::perform(async move { client.fields(&target).await }, move |result| {
-                    Message::ResultFieldsLoaded { run_id, result }
+                    Message::Result(run_id, Msg::FieldsLoaded(result))
                 })
             }
             _ => Task::none(),
@@ -2595,7 +2199,7 @@ impl LogLens {
         // Populate the Search bar's Target suggestion dropdown for this tab.
         let fetch_targets: Task<Message> = match client {
             Some(client) => Task::perform(async move { client.targets().await }, move |targets| {
-                Message::ResultTargetsLoaded { run_id, targets }
+                Message::Result(run_id, Msg::TargetsLoaded(targets))
             }),
             None => {
                 if let Some(rt) = self.result_mut(run_id) {

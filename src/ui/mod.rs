@@ -22,6 +22,7 @@ use iced::{Border, Color, Element, Fill, Length, Padding};
 
 use crate::Message;
 use crate::icons;
+use crate::results::Msg;
 use crate::style::{self, BORDER, ERR_RED, PANEL, TEXT_DIM};
 
 pub(crate) fn field_label<'a>(label: &'a str) -> Element<'a, Message> {
@@ -98,7 +99,7 @@ pub(crate) fn error_pill<'a>(run_id: u64, msg: &str) -> Element<'a, Message> {
                 }),
             text(msg.to_string()).size(12.0).color(Color::WHITE),
             button(text("\u{00d7}").size(12.0).color(Color::WHITE))
-                .on_press(Message::DismissTargetError(run_id))
+                .on_press(Message::Result(run_id, Msg::DismissTargetError))
                 .padding(Padding::new(0.0).left(4.0).right(4.0))
                 .style(style::bare_button()),
         ]

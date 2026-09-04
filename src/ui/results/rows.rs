@@ -15,7 +15,7 @@ use iced::{Element, Fill, Font, Length, Padding, Pixels};
 use crate::Message;
 use crate::advance_cache::AdvanceCache;
 use crate::line::{self, Affordance};
-use crate::results::{self, Paging, ResultTab, TotalHits, WRAP_LINE_H};
+use crate::results::{self, Msg, Paging, ResultTab, TotalHits, WRAP_LINE_H};
 use crate::style::{self, ERR_RED};
 use crate::ui::thousands;
 
@@ -52,7 +52,7 @@ pub(super) struct Row<'a> {
 /// the viewport ([`ResultTab::row_window`]), stands spacers in for everything
 /// above and below it so the scrollbar still spans every loaded Hit, and wraps
 /// each mode's content in the row shell they share: selection fill, fixed
-/// height, clip, the expand/collapse affordance strip, and the `HitClicked`
+/// height, clip, the expand/collapse affordance strip, and the [`Msg::HitClicked`]
 /// mouse area.
 ///
 /// `content` is called once per Hit in the window and returns only that mode's
@@ -132,7 +132,7 @@ pub(super) fn windowed<'a>(
 
         body.push(
             mouse_area(shell)
-                .on_press(Message::HitClicked(run_id, index))
+                .on_press(Message::Result(run_id, Msg::HitClicked(index)))
                 .into(),
         );
     }
@@ -265,7 +265,7 @@ fn affordance_strip<'a>(
     };
     Some(
         button(text(label).size(10.0).color(style::ACCENT))
-            .on_press(Message::ResultHitExpand(run_id, index))
+            .on_press(Message::Result(run_id, Msg::HitExpand(index)))
             .padding(Padding::new(1.0).left(4.0).right(4.0))
             .style(style::bare_button())
             .into(),

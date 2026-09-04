@@ -14,7 +14,7 @@ use super::rows::part_widget;
 use crate::Message;
 use crate::config::{TimeUnit, TimeframeMode};
 use crate::line;
-use crate::results::{ROW_H, ResultTab};
+use crate::results::{Msg, ROW_H, ResultTab};
 use crate::style::{self, WARN_AMBER};
 use crate::ui::{field_label, modal_card_sized};
 
@@ -71,8 +71,8 @@ pub(crate) fn format_modal<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     card = card.push(text("Format").size(12.0).color(style::TEXT_DIM));
     card = card.push(
         text_input("%{field.path} template", &tab.template_draft)
-            .on_input(move |v| Message::ResultTemplateDraft(run_id, v))
-            .on_submit(Message::ResultTemplateSubmit(run_id))
+            .on_input(move |v| Message::Result(run_id, Msg::TemplateDraft(v)))
+            .on_submit(Message::Result(run_id, Msg::TemplateSubmit))
             .size(12.0)
             .padding(4.0)
             .font(Font::MONOSPACE)
@@ -146,11 +146,11 @@ pub(crate) fn format_modal<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         row![
             space().width(Fill),
             button(text("Cancel").size(13.0).color(style::TEXT_DIM))
-                .on_press(Message::FormatCancel(run_id))
+                .on_press(Message::Result(run_id, Msg::FormatCancel))
                 .padding(Padding::new(6.0).left(14.0).right(14.0))
                 .style(style::bare_button()),
             button(text("Done").size(13.0).color(style::TEXT))
-                .on_press(Message::CloseFormat(run_id))
+                .on_press(Message::Result(run_id, Msg::CloseFormat))
                 .padding(Padding::new(6.0).left(14.0).right(14.0))
                 .style(style::picker_row(true)),
         ]
@@ -174,7 +174,7 @@ pub(crate) fn sort_fields_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message
         let field = key.field.clone();
 
         let remove = button(text("\u{00d7}").size(12.0).color(style::TEXT_DIM))
-            .on_press(Message::ResultSortRemove(run_id, field.clone()))
+            .on_press(Message::Result(run_id, Msg::SortRemove(field.clone())))
             .padding(2.0)
             .style(style::bare_button());
 
@@ -189,11 +189,11 @@ pub(crate) fn sort_fields_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message
             ("A\u{2013}Z", "Z\u{2013}A")
         };
         let asc = button(text(asc_label).size(11.0).color(style::TEXT))
-            .on_press(Message::ResultSortSet(run_id, field.clone(), false))
+            .on_press(Message::Result(run_id, Msg::SortSet(field.clone(), false)))
             .padding(Padding::new(3.0).left(10.0).right(10.0))
             .style(style::picker_row(!key.desc));
         let desc = button(text(desc_label).size(11.0).color(style::TEXT))
-            .on_press(Message::ResultSortSet(run_id, field.clone(), true))
+            .on_press(Message::Result(run_id, Msg::SortSet(field.clone(), true)))
             .padding(Padding::new(3.0).left(10.0).right(10.0))
             .style(style::picker_row(key.desc));
 
@@ -201,13 +201,13 @@ pub(crate) fn sort_fields_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message
             .padding(1.0)
             .style(style::bare_button());
         if i > 0 {
-            up = up.on_press(Message::ResultSortMove(run_id, i, -1));
+            up = up.on_press(Message::Result(run_id, Msg::SortMove(i, -1)));
         }
         let mut down = button(text("\u{25be}").size(10.0).color(style::TEXT_DIM))
             .padding(1.0)
             .style(style::bare_button());
         if i < last {
-            down = down.on_press(Message::ResultSortMove(run_id, i, 1));
+            down = down.on_press(Message::Result(run_id, Msg::SortMove(i, 1)));
         }
 
         rows = rows.push(
@@ -247,7 +247,7 @@ pub(crate) fn sort_fields_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message
             .into()
     } else {
         pick_list(available, None::<String>, move |f| {
-            Message::ResultSortSet(run_id, f, true)
+            Message::Result(run_id, Msg::SortSet(f, true))
         })
         .placeholder("Pick fields to sort by")
         .text_size(11.0)
@@ -261,7 +261,7 @@ pub(crate) fn sort_fields_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message
     if !tab.search.sort.is_empty() {
         footer = footer.push(
             button(text("Clear sorting").size(11.0).color(style::ACCENT))
-                .on_press(Message::ResultSortClear(run_id))
+                .on_press(Message::Result(run_id, Msg::SortClear))
                 .padding(Padding::new(3.0).left(8.0).right(8.0))
                 .style(style::bare_button()),
         );
@@ -299,14 +299,14 @@ pub(crate) fn timeframe_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message> 
             "Relative",
             TimeframeMode::Relative,
             Some(tf.mode),
-            move |m| Message::ResultTfMode(run_id, m),
+            move |m| Message::Result(run_id, Msg::TfMode(m)),
         )
         .size(14.0),
         radio(
             "Absolute",
             TimeframeMode::Absolute,
             Some(tf.mode),
-            move |m| Message::ResultTfMode(run_id, m),
+            move |m| Message::Result(run_id, Msg::TfMode(m)),
         )
         .size(14.0),
     ]
@@ -316,7 +316,7 @@ pub(crate) fn timeframe_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message> 
         TimeframeMode::Relative => {
             let units = row(TimeUnit::ALL.iter().map(move |&u| {
                 radio(u.label(), u, Some(tf.rel_unit), move |u| {
-                    Message::ResultTfRelUnit(run_id, u)
+                    Message::Result(run_id, Msg::TfRelUnit(u))
                 })
                 .size(14.0)
                 .into()
@@ -325,8 +325,8 @@ pub(crate) fn timeframe_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message> 
             row![
                 text("Last").size(13.0).color(style::TEXT),
                 text_input("15", &tf.rel_amount)
-                    .on_input(move |v| Message::ResultTfRelAmount(run_id, v))
-                    .on_submit(Message::ResultTfApply(run_id))
+                    .on_input(move |v| Message::Result(run_id, Msg::TfRelAmount(v)))
+                    .on_submit(Message::Result(run_id, Msg::TfApply))
                     .width(60.0)
                     .padding(6.0),
                 units,
@@ -339,14 +339,14 @@ pub(crate) fn timeframe_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message> 
             column![
                 field_label("From"),
                 text_input("2026-08-28T09:00:00", &tf.abs_from)
-                    .on_input(move |v| Message::ResultTfAbsFrom(run_id, v))
+                    .on_input(move |v| Message::Result(run_id, Msg::TfAbsFrom(v)))
                     .padding(6.0),
             ]
             .spacing(4.0),
             column![
                 field_label("To"),
                 text_input("2026-08-28T10:00:00", &tf.abs_to)
-                    .on_input(move |v| Message::ResultTfAbsTo(run_id, v))
+                    .on_input(move |v| Message::Result(run_id, Msg::TfAbsTo(v)))
                     .padding(6.0),
             ]
             .spacing(4.0),
@@ -358,11 +358,11 @@ pub(crate) fn timeframe_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message> 
     let actions = row![
         space().width(Fill),
         button(text("Cancel").size(12.0).color(style::TEXT_DIM))
-            .on_press(Message::ResultTfCancel(run_id))
+            .on_press(Message::Result(run_id, Msg::TfCancel))
             .padding(Padding::new(4.0).left(12.0).right(12.0))
             .style(style::bare_button()),
         button(text("Apply").size(12.0).color(style::TEXT))
-            .on_press(Message::ResultTfApply(run_id))
+            .on_press(Message::Result(run_id, Msg::TfApply))
             .padding(Padding::new(4.0).left(14.0).right(14.0))
             .style(style::picker_row(true)),
     ]

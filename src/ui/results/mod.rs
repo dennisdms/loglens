@@ -20,7 +20,7 @@ use iced::widget::{
 use iced::{Border, Color, Element, Fill, Font, Length, Padding};
 
 use crate::line;
-use crate::results::{ResultTab, RunState};
+use crate::results::{Msg, ResultTab, RunState};
 use crate::style::{self, ERR_RED};
 use crate::ui::centered;
 use crate::ui::chrome;
@@ -102,7 +102,7 @@ fn hit_detail<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     .align_y(iced::Alignment::Center);
 
     let editor = text_editor(&tab.detail_content)
-        .on_action(move |action| Message::DetailEdit(run_id, action))
+        .on_action(move |action| Message::Result(run_id, Msg::DetailEdit(action)))
         .font(Font::MONOSPACE)
         .size(12.0)
         .height(Fill)
@@ -158,7 +158,7 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         .spacing(5.0)
         .align_y(iced::Alignment::Center),
     )
-    .on_press(Message::ResultSortPanel(run_id))
+    .on_press(Message::Result(run_id, Msg::SortPanel))
     .padding(Padding::new(chrome::OPTIONS_BTN_PAD_Y).left(9.0).right(9.0))
     .style(style::icon_button(tab.sort_panel_open));
     let sort_ctl = tooltip(sort_btn, tip("Sort fields"), tooltip::Position::Bottom).gap(4.0);
@@ -174,7 +174,7 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         (&icons::TABLE, "Table", line::LayoutMode::RawText)
     };
     let mode_btn = button(icon_box(mode_icon, style::TEXT))
-        .on_press(Message::ResultLayoutMode(run_id, next_mode))
+        .on_press(Message::Result(run_id, Msg::LayoutMode(next_mode)))
         .padding(Padding::new(chrome::OPTIONS_BTN_PAD_Y).left(9.0).right(9.0))
         .style(style::icon_button(false));
     let mut group = row![tooltip(mode_btn, tip(mode_label), tooltip::Position::Bottom).gap(4.0)]
@@ -188,7 +188,7 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     } else {
         style::TEXT_DIM
     }))
-    .on_press(Message::ResultWrap(run_id))
+    .on_press(Message::Result(run_id, Msg::Wrap))
     .padding(Padding::new(chrome::OPTIONS_BTN_PAD_Y).left(9.0).right(9.0))
     .style(style::icon_button(tab.search.wrap));
     group = group.push(
@@ -206,7 +206,7 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
 
     if is_raw {
         let format_btn = button(icon_box(&icons::FORMAT, style::TEXT))
-            .on_press(Message::OpenFormat(run_id))
+            .on_press(Message::Result(run_id, Msg::OpenFormat))
             .padding(Padding::new(chrome::OPTIONS_BTN_PAD_Y).left(9.0).right(9.0))
             .style(style::icon_button(tab.format_open));
         group = group.push(tooltip(format_btn, tip("Format"), tooltip::Position::Bottom).gap(4.0));
