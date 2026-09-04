@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use iced::widget::{Id, text_editor};
 
 use crate::config::{SortKey, TimeUnit, Timeframe, TimeframeMode};
+use crate::es;
 use crate::es::Hit;
 use crate::line::{Layout, LayoutMode, LineCache, WrapCtx};
 
@@ -141,13 +142,15 @@ pub enum RunState {
     Loaded,
     /// The run completed with zero Hits.
     Empty,
-    /// The cluster (or transport) returned an error; shown verbatim.
+    /// The run failed; the message is shown verbatim. Not an [`es::Error`]:
+    /// a run can also fail before it reaches a cluster at all, when the
+    /// Connection's secret isn't available.
     Error(String),
 }
 
 /// The total number of Hits matching a Result Tab's query, fetched via
-/// `_count` alongside the first Page. Independent of the Retention cap on
-/// loaded Hits, so it can (and often will) exceed `hits.len()`.
+/// `_count` alongside the first Page. Independent of Max Results, so it can
+/// (and often will) exceed `hits.len()`.
 #[derive(Debug, Clone)]
 pub enum TotalHits {
     /// The `_count` request is in flight.
@@ -167,10 +170,10 @@ pub enum Paging {
     Loading,
     /// The cluster returned every matching Hit; nothing more to fetch.
     Exhausted,
-    /// Stopped at the 10,000-Hit Retention cap.
+    /// Stopped at Max Results. The cluster may hold more.
     Capped,
     /// The last next-Page fetch failed; loaded Hits are untouched, retry resumes.
-    Failed(String),
+    Failed(es::Error),
 }
 
 /// One open Result Tab.
@@ -213,7 +216,7 @@ pub struct ResultTab {
     /// here fall back to a default width (wider for the timestamp Column).
     pub col_widths: HashMap<String, f32>,
     /// Sort order, highest priority first. Empty falls back to the timestamp
-    /// field, descending (see [`ResultTab::effective_sort`]).
+    /// field, descending — `es` applies that default.
     pub sort: Vec<SortKey>,
     /// Whether the Search bar's "Sort fields" popover is open.
     pub sort_panel_open: bool,
@@ -244,9 +247,9 @@ pub struct ResultTab {
     pub paging: Paging,
     /// Total matching Hits (`_count`), loaded asynchronously each run.
     pub total_hits: TotalHits,
-    /// Bumped at the start of every run so a late `_count` response from a
-    /// superseded run is discarded rather than shown.
-    pub total_generation: u64,
+    /// Bumped at the start of every run, so a Page or `_count` that arrives
+    /// from a superseded run is discarded rather than applied.
+    pub generation: u64,
     /// Latest scroll offset / viewport height, for windowed rendering.
     pub scroll_y: f32,
     pub viewport_h: f32,
@@ -290,6 +293,11 @@ pub struct ResultTab {
     /// never re-entrant. Reset via [`ResultTab::reset_line_cache`] whenever
     /// `hits` is cleared or replaced.
     pub line_cache: RefCell<LineCache>,
+    /// The run this tab's Hits are coming from. `None` while a Page is in
+    /// flight — [`Run::next_page`](es::Run::next_page) consumes it and the
+    /// landing Page hands it back — which is also what stops two Page fetches
+    /// overlapping.
+    pub run: Option<es::Run>,
 }
 
 impl ResultTab {
@@ -360,16 +368,30 @@ impl ResultTab {
     pub fn wants_more(&self, offset_y: f32, viewport_h: f32, content_h: f32) -> bool {
         matches!(self.state, RunState::Loaded)
             && self.paging == Paging::Idle
-            && self.hits.len() < self.max_results
             && content_h - (offset_y + viewport_h) < 600.0
     }
 
-    /// The `search_after` cursor for the next Page: the last Hit's sort values.
-    pub fn next_cursor(&self) -> Option<Vec<serde_json::Value>> {
-        self.hits
-            .last()
-            .map(|h| h.sort.clone())
-            .filter(|s| !s.is_empty())
+    /// What this tab is asking the cluster for right now: its Target, the
+    /// Search bar's query string, the Timeframe bounds frozen at the start of
+    /// the run, and the sort.
+    pub fn query(&self) -> es::Query {
+        es::Query {
+            target: self.target.clone(),
+            query_string: self.query_string.clone(),
+            timestamp_field: self.timestamp_field.clone(),
+            gte: self.gte.clone(),
+            lte: self.lte.clone(),
+            sort: self
+                .sort
+                .iter()
+                .map(|key| (key.field.clone(), key.desc))
+                .collect(),
+        }
+    }
+
+    /// How far a run of this tab may page, from the Settings window.
+    pub fn limits(&self) -> es::Limits {
+        es::Limits::new(self.fetch_size, self.max_results)
     }
 
     /// Suggestions for the current Target draft: case-insensitive substring
@@ -431,19 +453,6 @@ impl ResultTab {
         if index < self.columns.len() && target >= 0 && (target as usize) < self.columns.len() {
             self.columns.swap(index, target as usize);
         }
-    }
-
-    /// The sort keys to actually send to Elasticsearch as `(field, descending)`
-    /// pairs: the tab's own keys, or the timestamp field descending when none
-    /// are set. Never empty.
-    pub fn effective_sort(&self) -> Vec<(String, bool)> {
-        if self.sort.is_empty() {
-            return vec![(self.timestamp_field.clone(), true)];
-        }
-        self.sort
-            .iter()
-            .map(|key| (key.field.clone(), key.desc))
-            .collect()
     }
 
     /// This field's position in the sort order, if it is sorted on.

@@ -6,6 +6,14 @@
 > Fetch size capped at Elasticsearch's 10,000 per-request limit. Everything below
 > holds; read "1,000" / "10,000" as those defaults.
 
+> **Amended 2026-09-03:** the decision is unchanged, but it is no longer the
+> caller's to carry out. The protocol below — the `[<field>, _doc]` sort, the
+> cursor taken from the last Hit's sort values, the size of the next Page, and
+> the stop at Max Results — now lives entirely in `es::Run`. A Result Tab holds
+> a Run and asks it for Pages; it never sees `search_after`. The perf harness's
+> fixture loader is a second `Run` adapter (`es::Run::fixture`) rather than a
+> branch in the caller.
+
 ## Context
 
 A Result Tab loads Hits in Pages of 1,000 and appends more as the user scrolls,

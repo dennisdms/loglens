@@ -677,10 +677,7 @@ mod tests {
     use serde_json::json;
 
     fn hit(source: Value) -> Hit {
-        Hit {
-            source,
-            sort: Vec::new(),
-        }
+        Hit::detached(source)
     }
 
     fn table_layout(columns: &[&str], timestamp_field: &str, utc: bool) -> Layout {

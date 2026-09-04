@@ -44,9 +44,6 @@ impl Default for Config {
     }
 }
 
-/// Hard ceiling on the batch size Elasticsearch will return in one `_search`.
-pub const FETCH_SIZE_MAX: usize = 10_000;
-
 /// Default cap on a wrapped Hit's visual rows before the expand affordance.
 pub fn default_wrap_row_cap() -> Option<usize> {
     Some(8)
@@ -68,7 +65,7 @@ pub struct EsSettings {
     #[serde(default = "default_max_results")]
     pub max_results: usize,
     /// How many documents to pull per `_search` request while paging. Capped at
-    /// [`FETCH_SIZE_MAX`] (Elasticsearch's own per-request ceiling).
+    /// [`es::FETCH_SIZE_MAX`](crate::es::FETCH_SIZE_MAX).
     #[serde(default = "default_fetch_size")]
     pub fetch_size: usize,
 }
@@ -84,11 +81,11 @@ impl Default for EsSettings {
 
 impl EsSettings {
     /// Clamps both values into their sane ranges: at least one document each,
-    /// and `fetch_size` no larger than [`FETCH_SIZE_MAX`].
+    /// and `fetch_size` no larger than Elasticsearch's own per-request ceiling.
     pub fn normalized(self) -> Self {
         Self {
             max_results: self.max_results.max(1),
-            fetch_size: self.fetch_size.clamp(1, FETCH_SIZE_MAX),
+            fetch_size: self.fetch_size.clamp(1, crate::es::FETCH_SIZE_MAX),
         }
     }
 }

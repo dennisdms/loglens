@@ -322,6 +322,10 @@ struct LogLens {
     /// Index into `open_tabs`.
     active_tab: Option<usize>,
     expanded: HashSet<String>,
+    /// One connected [`es::Client`] per Connection, by Connection id, built on
+    /// first use. Dropped by [`LogLens::forget_client`] when what it was built
+    /// from changes.
+    clients: HashMap<String, es::Client>,
     /// The Connection form, when adding or editing one.
     connection_form: Option<ConnectionForm>,
     /// The Search settings modal, when editing an existing Saved Search's
@@ -516,7 +520,7 @@ enum Message {
     ConnFormSecret(String),
     ConnFormSkipTls(bool),
     ConnFormTest,
-    ConnFormTestDone(Result<es::ClusterInfo, String>),
+    ConnFormTestDone(Result<es::ClusterInfo, es::Error>),
     ConnFormSave,
     ConnFormCancel,
     // Secret prompt
@@ -531,7 +535,7 @@ enum Message {
     },
     SearchTargetsLoaded {
         form_id: u64,
-        result: Result<Vec<String>, String>,
+        targets: Vec<String>,
     },
     SearchName(String),
     SearchTargetInput(String),
@@ -539,7 +543,7 @@ enum Message {
     SearchTimestampField(String),
     SearchFieldsLoaded {
         form_id: u64,
-        result: Result<es::FieldCaps, String>,
+        result: Result<es::FieldCaps, es::Error>,
     },
     /// Save & Run the new-Saved-Search form tab.
     SearchSave,
@@ -548,10 +552,10 @@ enum Message {
     /// Dismiss the Search settings modal without saving.
     SearchSettingsCancel,
     // Result tab: live query string, timeframe, columns + sort
-    /// The async `list_targets` for a Result Tab's suggestion dropdown landed.
+    /// The async Target listing for a Result Tab's suggestion dropdown landed.
     ResultTargetsLoaded {
         run_id: u64,
-        result: Result<Vec<String>, String>,
+        targets: Vec<String>,
     },
     /// A keystroke in the Search bar's Target input; also opens the dropdown.
     ResultTargetDraft(u64, String),
@@ -571,7 +575,7 @@ enum Message {
     ResultTargetProbed {
         run_id: u64,
         candidate: String,
-        result: Result<es::FieldCaps, String>,
+        result: Result<es::FieldCaps, es::Error>,
     },
     ResultQueryDraft(u64, String),
     ResultQuerySubmit(u64),
@@ -589,7 +593,7 @@ enum Message {
     ResultTfCancel(u64),
     ResultFieldsLoaded {
         run_id: u64,
-        result: Result<es::FieldCaps, String>,
+        result: Result<es::FieldCaps, es::Error>,
     },
     ResultColumnDraft(u64, String),
     ResultColumnAdd(u64),
@@ -649,15 +653,19 @@ enum Message {
     TotalHitsLoaded {
         run_id: u64,
         generation: u64,
-        result: Result<u64, String>,
+        result: Result<u64, es::Error>,
     },
     /// Advance the Hit-count spinner one frame.
     SpinnerTick,
     /// One frame of the scripted-scroll performance harness (see `PerfHarness`).
     PerfTick,
+    /// A Page of a Result Tab's Run landed. Carries the Run back so the tab
+    /// can ask it for the next one.
     PageLoaded {
         run_id: u64,
-        result: Result<es::Page, String>,
+        generation: u64,
+        advance: Box<es::Advance>,
+        /// Whether this Page extends the tab's Hits or replaces them.
         append: bool,
     },
     ResultScrolled {
@@ -771,6 +779,7 @@ impl LogLens {
             open_tabs: Vec::new(),
             active_tab: None,
             expanded,
+            clients: HashMap::new(),
             connection_form: None,
             search_settings: None,
             secret_prompt: None,
@@ -916,9 +925,17 @@ impl LogLens {
         self.config.connections.iter().find(|c| c.id == id)
     }
 
-    /// Builds an [`es::Endpoint`] for a Connection, or `None` if its secret
-    /// isn't available this session (keyring missing, not yet re-entered).
-    fn endpoint_for(&self, conn: &Connection) -> Option<es::Endpoint> {
+    /// The [`es::Client`] for a Connection, connecting and memoizing on first
+    /// use so every call to that cluster shares one connection pool. `None` if
+    /// the Connection is gone, or its secret isn't available this session
+    /// (keyring missing, not yet re-entered) — the caller prompts for it.
+    ///
+    /// Hands back a clone, which is cheap, so the borrow ends here.
+    fn client_for(&mut self, conn_id: &str) -> Option<es::Client> {
+        if let Some(client) = self.clients.get(conn_id) {
+            return Some(client.clone());
+        }
+        let conn = self.connection(conn_id)?;
         let auth = match &conn.auth {
             Auth::None => es::AuthValue::None,
             Auth::Basic { username } => es::AuthValue::Basic {
@@ -929,11 +946,21 @@ impl LogLens {
                 key: secrets::get(&conn.id)?,
             },
         };
-        Some(es::Endpoint {
+        let client = es::Client::connect(es::Endpoint {
             url: conn.url.clone(),
             auth,
             skip_tls_verify: conn.skip_tls_verify,
         })
+        .ok()?;
+        self.clients.insert(conn_id.to_string(), client.clone());
+        Some(client)
+    }
+
+    /// Drops the memoized Client for a Connection, so the next call rebuilds it.
+    /// Called whenever what it was built from — URL, auth, TLS setting, secret
+    /// — may have changed.
+    fn forget_client(&mut self, conn_id: &str) {
+        self.clients.remove(conn_id);
     }
 
     fn result_mut(&mut self, run_id: u64) -> Option<&mut ResultTab> {
@@ -1033,7 +1060,7 @@ impl LogLens {
                             "{} · Elasticsearch {}",
                             info.cluster_name, info.version
                         )),
-                        Err(err) => TestState::Failed(err),
+                        Err(err) => TestState::Failed(err.to_string()),
                     };
                 }
             }
@@ -1050,6 +1077,7 @@ impl LogLens {
             Message::SecretPromptSubmit => {
                 if let Some(prompt) = self.secret_prompt.take() {
                     secrets::remember_session(&prompt.connection_id, &prompt.value);
+                    self.forget_client(&prompt.connection_id);
                     if let Some(f) = &mut self.connection_form {
                         f.secret = prompt.value.clone();
                     }
@@ -1079,13 +1107,10 @@ impl LogLens {
             Message::OpenSavedSearch { connection, search } => {
                 return self.open_result_tab(connection, search, None, None, false);
             }
-            Message::SearchTargetsLoaded { form_id, result } => {
+            Message::SearchTargetsLoaded { form_id, targets } => {
                 if let Some(f) = self.form_mut(form_id) {
                     f.targets_loading = false;
-                    if let Ok(mut options) = result {
-                        options.sort();
-                        f.target_options = options;
-                    }
+                    f.target_options = targets;
                 }
             }
             Message::SearchName(v) => {
@@ -1124,13 +1149,10 @@ impl LogLens {
             Message::SearchSettingsSave => return self.save_search_settings(),
             Message::SearchSettingsCancel => self.search_settings = None,
 
-            Message::ResultTargetsLoaded { run_id, result } => {
+            Message::ResultTargetsLoaded { run_id, targets } => {
                 if let Some(rt) = self.result_mut(run_id) {
                     rt.targets_loading = false;
-                    if let Ok(mut options) = result {
-                        options.sort();
-                        rt.target_options = options;
-                    }
+                    rt.target_options = targets;
                 }
             }
             Message::ResultTargetDraft(run_id, v) => {
@@ -1444,7 +1466,7 @@ impl LogLens {
                 result,
             } => {
                 if let Some(rt) = self.result_mut(run_id)
-                    && rt.total_generation == generation
+                    && rt.generation == generation
                 {
                     rt.total_hits = match result {
                         Ok(total) => TotalHits::Known(total),
@@ -1455,12 +1477,16 @@ impl LogLens {
             Message::SpinnerTick => self.spinner_frame = self.spinner_frame.wrapping_add(1),
             Message::PageLoaded {
                 run_id,
-                result,
+                generation,
+                advance,
                 append,
             } => {
-                let ok = result.is_ok();
-                if let Some(rt) = self.result_mut(run_id) {
-                    apply_page(rt, result, append);
+                let ok = !matches!(advance.state, es::State::Failed(_));
+                match self.result_mut(run_id) {
+                    // A Page from a superseded run would append Hits from a
+                    // Query the tab has moved on from.
+                    Some(rt) if rt.generation == generation => apply_page(rt, *advance, append),
+                    _ => return Task::none(),
                 }
 
                 // Scroll-perf harness: the target tab's first Page is in, so
@@ -1959,6 +1985,10 @@ impl LogLens {
             if let Tab::Result(rt) = tab {
                 rt.max_results = es.max_results;
                 rt.fetch_size = es.fetch_size;
+                let limits = rt.limits();
+                if let Some(run) = &mut rt.run {
+                    run.relimit(limits);
+                }
                 // A changed `wrap_row_cap` reaches the row-height model
                 // through `WrapCtx` — the next `prepare_heights` re-keys and
                 // rebuilds it, no explicit reset needed.
@@ -2000,7 +2030,18 @@ impl LogLens {
         match form.endpoint() {
             Ok(endpoint) => {
                 form.test = TestState::Running;
-                Task::perform(es::ping(endpoint), Message::ConnFormTestDone)
+                // The form may be describing a Connection that isn't saved yet,
+                // so this Client is one-off rather than memoized.
+                match es::Client::connect(endpoint) {
+                    Ok(client) => Task::perform(
+                        async move { client.ping().await },
+                        Message::ConnFormTestDone,
+                    ),
+                    Err(err) => {
+                        form.test = TestState::Failed(err.to_string());
+                        Task::none()
+                    }
+                }
             }
             Err(EndpointError::MissingUrl) => {
                 form.test = TestState::Failed("Enter a URL first".to_string());
@@ -2066,6 +2107,7 @@ impl LogLens {
             Some(existing) => *existing = connection,
             None => self.config.connections.push(connection),
         }
+        self.forget_client(&id);
 
         if let Err(err) = config::save(&self.config) {
             self.status = Some(format!("Could not save config: {err}"));
@@ -2083,9 +2125,9 @@ impl LogLens {
         self.active_tab = Some(self.open_tabs.len() - 1);
         self.expanded.insert(conn_id.clone());
 
-        let targets = match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
-            Some(endpoint) => Task::perform(es::list_targets(endpoint), move |result| {
-                Message::SearchTargetsLoaded { form_id, result }
+        let targets = match self.client_for(&conn_id) {
+            Some(client) => Task::perform(async move { client.targets().await }, move |targets| {
+                Message::SearchTargetsLoaded { form_id, targets }
             }),
             None => {
                 if let Some(f) = self.form_mut(form_id) {
@@ -2157,6 +2199,7 @@ impl LogLens {
 
         self.config.connections.retain(|c| c.id != conn_id);
         secrets::delete(&conn_id);
+        self.forget_client(&conn_id);
         self.expanded.remove(&conn_id);
         if let Err(err) = config::save(&self.config) {
             self.status = Some(format!("Could not save config: {err}"));
@@ -2191,13 +2234,13 @@ impl LogLens {
         if let Some(f) = self.form_mut(form_id) {
             f.fields = Fields::Loading;
         }
-        let Some(endpoint) = self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) else {
+        let Some(client) = self.client_for(&conn_id) else {
             if let Some(f) = self.form_mut(form_id) {
                 f.fields = Fields::Failed;
             }
             return Task::none();
         };
-        Task::perform(es::field_caps(endpoint, target), move |result| {
+        Task::perform(async move { client.fields(&target).await }, move |result| {
             Message::SearchFieldsLoaded { form_id, result }
         })
     }
@@ -2272,10 +2315,10 @@ impl LogLens {
         rt.target_probe = Some(draft.clone());
         let conn_id = rt.connection_id.clone();
 
-        match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
-            Some(endpoint) => {
+        match self.client_for(&conn_id) {
+            Some(client) => {
                 let candidate = draft.clone();
-                Task::perform(es::field_caps(endpoint, draft), move |result| {
+                Task::perform(async move { client.fields(&draft).await }, move |result| {
                     Message::ResultTargetProbed {
                         run_id,
                         candidate,
@@ -2302,7 +2345,7 @@ impl LogLens {
         &mut self,
         run_id: u64,
         candidate: String,
-        result: Result<es::FieldCaps, String>,
+        result: Result<es::FieldCaps, es::Error>,
     ) -> Task<Message> {
         let Some(rt) = self.result_mut(run_id) else {
             return Task::none();
@@ -2315,6 +2358,12 @@ impl LogLens {
 
         let caps = match result {
             Ok(caps) => caps,
+            Err(es::Error::NoSuchTarget(_)) => {
+                rt.target_draft = rt.target.clone();
+                rt.target_error =
+                    Some(format!("Target \u{201c}{candidate}\u{201d} does not exist"));
+                return Task::none();
+            }
             Err(err) => {
                 rt.target_draft = rt.target.clone();
                 rt.target_error = Some(format!("Target \u{201c}{candidate}\u{201d}: {err}"));
@@ -2499,12 +2548,11 @@ impl LogLens {
                     .result_mut(run_id)
                     .is_some_and(|rt| rt.all_fields.is_empty())
                 {
-                    match self.connection(&conn_id).and_then(|c| self.endpoint_for(c)) {
-                        Some(endpoint) => {
-                            Task::perform(es::field_caps(endpoint, target), move |result| {
-                                Message::ResultFieldsLoaded { run_id, result }
-                            })
-                        }
+                    match self.client_for(&conn_id) {
+                        Some(client) => Task::perform(
+                            async move { client.fields(&target).await },
+                            move |result| Message::ResultFieldsLoaded { run_id, result },
+                        ),
                         None => Task::none(),
                     }
                 } else {
@@ -2558,7 +2606,7 @@ impl LogLens {
             scroll_id: Id::unique(),
             paging: Paging::Idle,
             total_hits: TotalHits::Loading,
-            total_generation: 0,
+            generation: 0,
             scroll_y: 0.0,
             viewport_h: 600.0,
             scroll_x: 0.0,
@@ -2575,6 +2623,7 @@ impl LogLens {
             template_draft: saved.template.clone(),
             format_open: false,
             line_cache: Default::default(),
+            run: None,
         };
         // Resolve the raw text template up front if the field list is already
         // known; otherwise it is resolved lazily when `ResultFieldsLoaded`
@@ -2594,11 +2643,12 @@ impl LogLens {
             }
         }
 
-        let endpoint = self.connection(&conn_id).and_then(|c| self.endpoint_for(c));
+        let client = self.client_for(&conn_id);
 
-        let fetch_fields: Task<Message> = match (&endpoint, need_fields) {
-            (Some(endpoint), true) => {
-                Task::perform(es::field_caps(endpoint.clone(), target), move |result| {
+        let fetch_fields: Task<Message> = match (&client, need_fields) {
+            (Some(client), true) => {
+                let client = client.clone();
+                Task::perform(async move { client.fields(&target).await }, move |result| {
                     Message::ResultFieldsLoaded { run_id, result }
                 })
             }
@@ -2606,9 +2656,9 @@ impl LogLens {
         };
 
         // Populate the Search bar's Target suggestion dropdown for this tab.
-        let fetch_targets: Task<Message> = match &endpoint {
-            Some(endpoint) => Task::perform(es::list_targets(endpoint.clone()), move |result| {
-                Message::ResultTargetsLoaded { run_id, result }
+        let fetch_targets: Task<Message> = match client {
+            Some(client) => Task::perform(async move { client.targets().await }, move |targets| {
+                Message::ResultTargetsLoaded { run_id, targets }
             }),
             None => {
                 if let Some(rt) = self.result_mut(run_id) {
@@ -2621,172 +2671,96 @@ impl LogLens {
         Task::batch([fetch_fields, fetch_targets, self.start_run(run_id)])
     }
 
-    /// Freshens the range, then fetches the first Page (and the `_count`).
+    /// Freshens the range, then starts a new Run: its first Page, and beside
+    /// it the `_count` of everything the Query matches.
     fn start_run(&mut self, run_id: u64) -> Task<Message> {
-        // Scroll-perf harness: load Hits from a saved `_search` response on
-        // disk instead of hitting a cluster, so a run is byte-identical every
-        // time and needs no Elasticsearch. See `src/perf.rs`.
-        if let Some(path) = perf::fixture_path() {
-            if let Some(rt) = self.result_mut(run_id) {
-                rt.refreshing = false;
-                rt.state = RunState::Loading;
+        let Some((conn_id, generation, query, limits)) = self.result_mut(run_id).map(|rt| {
+            // If this tab already had a table up, keep the strips pinned and
+            // the previous rows on screen while the re-run is in flight, so
+            // nothing flickers. The old Hits are swapped out wholesale when
+            // the new first Page lands (see `PageLoaded`).
+            rt.refreshing = matches!(rt.state, RunState::Loaded | RunState::Empty);
+            rt.state = RunState::Loading;
+            rt.selected_hit = None;
+            // The previous Run is dead the moment a new one starts; the tab
+            // gets the new one when its first Page lands.
+            rt.run = None;
+            if !rt.refreshing {
                 rt.hits.clear();
                 rt.reset_line_cache();
                 rt.paging = Paging::Idle;
                 rt.scroll_y = 0.0;
-                rt.total_hits = TotalHits::Loading;
             }
-            let repeat = perf::hits_repeat();
-            return Task::perform(
-                async move {
-                    std::fs::read_to_string(&path)
-                        .map_err(|e| e.to_string())
-                        .and_then(|body| es::parse_page(&body))
-                        .map(|mut page| {
-                            // Stand in for a set `repeat`× the size by
-                            // concatenating the fixture onto itself, rather
-                            // than checking in a `repeat`× bigger file.
-                            if repeat > 1 {
-                                let base = page.hits.clone();
-                                page.hits.reserve(base.len() * (repeat - 1));
-                                for _ in 1..repeat {
-                                    page.hits.extend(base.iter().cloned());
-                                }
-                            }
-                            page
-                        })
-                },
-                move |result| Message::PageLoaded {
-                    run_id,
-                    result,
-                    append: false,
-                },
-            );
-        }
-
-        let Some((conn_id, target, generation, count_params, search_params)) =
-            self.result_mut(run_id).map(|rt| {
-                // If this tab already had a table up, keep the strips pinned and
-                // the previous rows on screen while the re-run is in flight, so
-                // nothing flickers. The old Hits are swapped out wholesale when
-                // the new first Page lands (see `PageLoaded`).
-                rt.refreshing = matches!(rt.state, RunState::Loaded | RunState::Empty);
-                rt.state = RunState::Loading;
-                rt.selected_hit = None;
-                if !rt.refreshing {
-                    rt.hits.clear();
-                    rt.reset_line_cache();
-                    rt.paging = Paging::Idle;
-                    rt.scroll_y = 0.0;
-                }
-                // Re-resolve the range so a relative window re-anchors to "now".
-                let (gte, lte) = rt.timeframe.bounds();
-                rt.gte = gte;
-                rt.lte = lte;
-                rt.total_hits = TotalHits::Loading;
-                rt.total_generation += 1;
-                let count_params = es::CountParams {
-                    query_string: rt.query_string.clone(),
-                    timestamp_field: rt.timestamp_field.clone(),
-                    gte: rt.gte.clone(),
-                    lte: rt.lte.clone(),
-                };
-                let search_params = es::SearchParams {
-                    query_string: rt.query_string.clone(),
-                    timestamp_field: rt.timestamp_field.clone(),
-                    gte: rt.gte.clone(),
-                    lte: rt.lte.clone(),
-                    sort: rt.effective_sort(),
-                    size: rt.fetch_size.min(rt.max_results),
-                    search_after: None,
-                };
-                (
-                    rt.connection_id.clone(),
-                    rt.target.clone(),
-                    rt.total_generation,
-                    count_params,
-                    search_params,
-                )
-            })
-        else {
-            return Task::none();
-        };
-
-        let Some(conn) = self.connection(&conn_id) else {
-            return Task::none();
-        };
-
-        match self.endpoint_for(conn) {
-            Some(endpoint) => Task::batch([
-                Task::perform(
-                    es::count(endpoint.clone(), target.clone(), count_params),
-                    move |result| Message::TotalHitsLoaded {
-                        run_id,
-                        generation,
-                        result,
-                    },
-                ),
-                Task::perform(es::search(endpoint, target, search_params), move |result| {
-                    Message::PageLoaded {
-                        run_id,
-                        result,
-                        append: false,
-                    }
-                }),
-            ]),
-            None => {
-                let name = conn.name.clone();
-                self.secret_prompt = Some(SecretPrompt {
-                    connection_id: conn_id,
-                    connection_name: name,
-                    value: String::new(),
-                    then: PendingAction::RunSearch { run_id },
-                });
-                Task::none()
-            }
-        }
-    }
-
-    /// Fetches the next Page for a Result Tab via `search_after`.
-    /// A no-op unless the tab is idle, under the cap, and has a cursor.
-    fn load_more(&mut self, run_id: u64) -> Task<Message> {
-        let Some((conn_id, target, params)) = self.result_mut(run_id).and_then(|rt| {
-            let cursor = rt.next_cursor()?;
-            let remaining = rt.max_results.saturating_sub(rt.hits.len());
-            if remaining == 0 {
-                rt.paging = Paging::Capped;
-                return None;
-            }
-            rt.paging = Paging::Loading;
-            Some((
+            // Re-resolve the range so a relative window re-anchors to "now".
+            let (gte, lte) = rt.timeframe.bounds();
+            rt.gte = gte;
+            rt.lte = lte;
+            rt.total_hits = TotalHits::Loading;
+            rt.generation += 1;
+            (
                 rt.connection_id.clone(),
-                rt.target.clone(),
-                es::SearchParams {
-                    query_string: rt.query_string.clone(),
-                    timestamp_field: rt.timestamp_field.clone(),
-                    gte: rt.gte.clone(),
-                    lte: rt.lte.clone(),
-                    sort: rt.effective_sort(),
-                    size: remaining.min(rt.fetch_size),
-                    search_after: Some(cursor),
-                },
-            ))
+                rt.generation,
+                rt.query(),
+                rt.limits(),
+            )
         }) else {
             return Task::none();
         };
 
-        let Some(conn) = self.connection(&conn_id) else {
+        // Scroll-perf harness: take the Hits from a saved `_search` response on
+        // disk instead of from a cluster, so a run is byte-identical every time
+        // and needs no Elasticsearch. See `src/perf.rs`.
+        if let Some(path) = perf::fixture_path() {
+            let run = es::Run::fixture(path, perf::hits_repeat());
+            return first_page(run_id, generation, run);
+        }
+
+        let Some(client) = self.client_for(&conn_id) else {
+            let Some(conn) = self.connection(&conn_id) else {
+                return Task::none();
+            };
+            let name = conn.name.clone();
+            self.secret_prompt = Some(SecretPrompt {
+                connection_id: conn_id,
+                connection_name: name,
+                value: String::new(),
+                then: PendingAction::RunSearch { run_id },
+            });
             return Task::none();
         };
-        let Some(endpoint) = self.endpoint_for(conn) else {
+
+        let total = {
+            let (client, query) = (client.clone(), query.clone());
+            Task::perform(async move { client.total(&query).await }, move |result| {
+                Message::TotalHitsLoaded {
+                    run_id,
+                    generation,
+                    result,
+                }
+            })
+        };
+        Task::batch([
+            total,
+            first_page(run_id, generation, es::Run::live(client, query, limits)),
+        ])
+    }
+
+    /// Fetches the next Page of a Result Tab's Run. A no-op unless the tab has
+    /// a Run to advance — which it has not while a Page is already in flight.
+    fn load_more(&mut self, run_id: u64) -> Task<Message> {
+        let Some((generation, run)) = self.result_mut(run_id).and_then(|rt| {
+            let run = rt.run.take()?;
+            rt.paging = Paging::Loading;
+            Some((rt.generation, run))
+        }) else {
             return Task::none();
         };
-        Task::perform(es::search(endpoint, target, params), move |result| {
-            Message::PageLoaded {
-                run_id,
-                result,
-                append: true,
-            }
+
+        Task::perform(run.next_page(), move |advance| Message::PageLoaded {
+            run_id,
+            generation,
+            advance: Box::new(advance),
+            append: true,
         })
     }
 
@@ -4270,46 +4244,51 @@ fn modal_card_sized<'a>(content: Element<'a, Message>, width: f32) -> Element<'a
 
 /// Folds a fetched Page into a Result Tab: replacing Hits on a first run,
 /// appending on a scroll-driven load-more, and settling the paging state.
-fn apply_page(rt: &mut ResultTab, result: Result<es::Page, String>, append: bool) {
-    if !append {
-        rt.refreshing = false;
-    }
-    match result {
-        Ok(page) => {
-            let got = page.hits.len();
-            if append {
-                // Existing positions keep their Hit; new ones are absent from
-                // the cache until first rendered — no reset needed.
-                rt.hits.extend(page.hits);
-            } else {
-                rt.hits = page.hits;
-                rt.reset_line_cache();
-            }
+/// Kicks off a Run's first Page.
+fn first_page(run_id: u64, generation: u64, run: es::Run) -> Task<Message> {
+    Task::perform(run.next_page(), move |advance| Message::PageLoaded {
+        run_id,
+        generation,
+        advance: Box::new(advance),
+        append: false,
+    })
+}
 
-            if !append {
-                rt.state = if rt.hits.is_empty() {
-                    RunState::Empty
-                } else {
-                    RunState::Loaded
-                };
-            }
-            rt.paging = if rt.hits.len() >= rt.max_results {
-                Paging::Capped
-            } else if got < rt.fetch_size {
-                Paging::Exhausted
-            } else {
-                Paging::Idle
-            };
+fn apply_page(rt: &mut ResultTab, advance: es::Advance, append: bool) {
+    let es::Advance { run, hits, state } = advance;
+    rt.run = Some(run);
+
+    if let es::State::Failed(err) = state {
+        if append {
+            // Leave already-loaded Hits untouched; offer a retry.
+            rt.paging = Paging::Failed(err);
+        } else {
+            rt.refreshing = false;
+            rt.state = RunState::Error(err.to_string());
         }
-        Err(err) => {
-            if append {
-                // Leave already-loaded Hits untouched; offer a retry.
-                rt.paging = Paging::Failed(err);
-            } else {
-                rt.state = RunState::Error(err);
-            }
-        }
+        return;
     }
+
+    if append {
+        // Existing positions keep their Hit; new ones are absent from the
+        // cache until first rendered — no reset needed.
+        rt.hits.extend(hits);
+    } else {
+        rt.refreshing = false;
+        rt.hits = hits;
+        rt.reset_line_cache();
+        rt.state = if rt.hits.is_empty() {
+            RunState::Empty
+        } else {
+            RunState::Loaded
+        };
+    }
+
+    rt.paging = match state {
+        es::State::Exhausted => Paging::Exhausted,
+        es::State::Capped => Paging::Capped,
+        _ => Paging::Idle,
+    };
 }
 
 fn meta<'a>(value: &str) -> Element<'a, Message> {

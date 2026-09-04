@@ -58,6 +58,22 @@ with one Page and appends more as the user scrolls, each one an independent
 `search_after` call past the last Hit's sort values.
 _Avoid_: batch, chunk, scroll
 
+**Run**:
+One execution of a Saved Search against its Connection: the sequence of Pages
+from the first `_search` through each `search_after` continuation, up to Max
+Results. A Run owns the cursor, the size of the next Page, and the decision to
+stop — a Result Tab holds one and asks it for Pages. Editing the query string,
+Timeframe, Target or sort, or hitting Refresh, starts a new Run.
+_Avoid_: query execution, fetch, job, session
+
+**Client**:
+A connected cluster, inside the `es` module: one Connection's URL and
+credentials plus the HTTP client that reaches them, so every call to that
+cluster shares a connection pool. Not a synonym for Connection — a Connection
+is what the user configures and Log Lens persists; a Client is what it becomes
+once the secret is resolved and it is being talked to.
+_Avoid_: cluster, endpoint, handle
+
 **Max Results**:
 The maximum number of Hits a Result Tab will load (10,000 by default, set in the
 Settings window). On reaching it the tab stops paging and tells the user to
