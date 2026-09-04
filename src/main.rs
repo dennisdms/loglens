@@ -1168,14 +1168,14 @@ impl LogLens {
                     if rt.target_panel_open {
                         rt.tf.open = false;
                     } else {
-                        rt.target_draft = rt.target.clone();
+                        rt.target_draft = rt.search.target.clone();
                     }
                 }
             }
             Message::ResultTargetPanelDismiss(run_id) => {
                 if let Some(rt) = self.result_mut(run_id) {
                     rt.target_panel_open = false;
-                    rt.target_draft = rt.target.clone();
+                    rt.target_draft = rt.search.target.clone();
                 }
             }
             Message::ResultTargetPicked(run_id, v) => {
@@ -1197,38 +1197,29 @@ impl LogLens {
                 }
             }
             Message::ResultQuerySubmit(run_id) => {
-                let changed = self
+                let edited = self
                     .result_mut(run_id)
                     .map(|rt| {
-                        let changed = rt.query_string != rt.query_draft;
-                        rt.query_string = rt.query_draft.clone();
-                        changed
+                        let draft = rt.query_draft.clone();
+                        rt.search.set_query_string(draft)
                     })
-                    .unwrap_or(false);
-                if changed {
-                    self.sync_saved_from_result(run_id);
-                    return self.start_run(run_id);
-                }
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::ResultTimeframeChoice(run_id, choice) => match choice.to_timeframe() {
                 Some(timeframe) => {
-                    let changed = self
+                    let edited = self
                         .result_mut(run_id)
                         .map(|rt| {
                             rt.tf.open = false;
-                            let changed = rt.timeframe != timeframe;
-                            rt.timeframe = timeframe;
-                            changed
+                            rt.search.set_timeframe(timeframe)
                         })
-                        .unwrap_or(false);
-                    if changed {
-                        self.sync_saved_from_result(run_id);
-                        return self.start_run(run_id);
-                    }
+                        .unwrap_or_default();
+                    return self.apply_edit(run_id, edited);
                 }
                 None => {
                     if let Some(rt) = self.result_mut(run_id) {
-                        let current = rt.timeframe.clone();
+                        let current = rt.search.timeframe.clone();
                         rt.tf.seed(&current);
                     }
                 }
@@ -1259,20 +1250,15 @@ impl LogLens {
                 }
             }
             Message::ResultTfApply(run_id) => {
-                let changed = self
+                let edited = self
                     .result_mut(run_id)
                     .map(|rt| {
                         let timeframe = rt.tf.to_timeframe();
                         rt.tf.open = false;
-                        let changed = rt.timeframe != timeframe;
-                        rt.timeframe = timeframe;
-                        changed
+                        rt.search.set_timeframe(timeframe)
                     })
-                    .unwrap_or(false);
-                if changed {
-                    self.sync_saved_from_result(run_id);
-                    return self.start_run(run_id);
-                }
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::ResultTfCancel(run_id) => {
                 if let Some(rt) = self.result_mut(run_id) {
@@ -1281,14 +1267,15 @@ impl LogLens {
             }
             Message::ResultFieldsLoaded { run_id, result } => {
                 if let Ok(caps) = result {
-                    let resolved = self.result_mut(run_id).map(|rt| {
-                        rt.all_fields = caps.all;
-                        rt.sortable_fields = caps.sortable;
-                        rt.resolve_template()
-                    });
-                    if resolved == Some(true) {
-                        self.sync_saved_from_result(run_id);
-                    }
+                    let edited = self
+                        .result_mut(run_id)
+                        .map(|rt| {
+                            rt.all_fields = caps.all;
+                            rt.sortable_fields = caps.sortable;
+                            rt.resolve_template()
+                        })
+                        .unwrap_or_default();
+                    return self.apply_edit(run_id, edited);
                 }
             }
             Message::ResultColumnDraft(run_id, v) => {
@@ -1297,31 +1284,41 @@ impl LogLens {
                 }
             }
             Message::ResultColumnAdd(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    let draft = rt.column_draft.clone();
-                    rt.add_column(&draft);
-                }
-                self.sync_saved_from_result(run_id);
+                let edited = self
+                    .result_mut(run_id)
+                    .map(|rt| {
+                        let draft = rt.column_draft.clone();
+                        rt.add_column_from_draft(&draft)
+                    })
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::ResultColumnAddField(run_id, field) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.add_column(&field);
-                }
-                self.sync_saved_from_result(run_id);
+                let edited = self
+                    .result_mut(run_id)
+                    .map(|rt| rt.add_column_from_draft(&field))
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::ResultColumnRemove(run_id, i) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.remove_column(i);
-                    rt.header_menu = None;
-                }
-                self.sync_saved_from_result(run_id);
+                let edited = self
+                    .result_mut(run_id)
+                    .map(|rt| {
+                        rt.header_menu = None;
+                        rt.search.remove_column(i)
+                    })
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::ResultColumnMove(run_id, i, delta) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.move_column(i, delta);
-                    rt.header_menu = None;
-                }
-                self.sync_saved_from_result(run_id);
+                let edited = self
+                    .result_mut(run_id)
+                    .map(|rt| {
+                        rt.header_menu = None;
+                        rt.search.move_column(i, delta)
+                    })
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::ResultHeaderMenu(run_id, index) => {
                 if let Some(rt) = self.result_mut(run_id) {
@@ -1348,77 +1345,58 @@ impl LogLens {
                 }
             }
             Message::ResultSortSet(run_id, field, desc) => {
-                let changed = self
+                let edited = self
                     .result_mut(run_id)
                     .map(|rt| {
                         rt.header_menu = None;
-                        rt.set_sort_dir(&field, desc)
+                        rt.search.set_sort_dir(&field, desc)
                     })
-                    .unwrap_or(false);
-                if changed {
-                    self.sync_saved_from_result(run_id);
-                    return self.start_run(run_id);
-                }
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::ResultSortRemove(run_id, field) => {
-                let changed = self
+                let edited = self
                     .result_mut(run_id)
                     .map(|rt| {
                         rt.header_menu = None;
-                        rt.remove_sort(&field)
+                        rt.search.remove_sort(&field)
                     })
-                    .unwrap_or(false);
-                if changed {
-                    self.sync_saved_from_result(run_id);
-                    return self.start_run(run_id);
-                }
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::ResultSortMove(run_id, index, delta) => {
-                let changed = self
+                let edited = self
                     .result_mut(run_id)
-                    .map(|rt| rt.move_sort(index, delta))
-                    .unwrap_or(false);
-                if changed {
-                    self.sync_saved_from_result(run_id);
-                    return self.start_run(run_id);
-                }
+                    .map(|rt| rt.search.move_sort(index, delta))
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::ResultSortClear(run_id) => {
-                let changed = self
+                let edited = self
                     .result_mut(run_id)
-                    .map(|rt| rt.clear_sort())
-                    .unwrap_or(false);
-                if changed {
-                    self.sync_saved_from_result(run_id);
-                    return self.start_run(run_id);
-                }
+                    .map(|rt| rt.search.clear_sort())
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
 
             Message::ResultLayoutMode(run_id, mode) => {
-                let changed = self
+                // Entering raw text mode for the first time also resolves the
+                // template, which is a second edit to persist — hence the `|`.
+                let edited = self
                     .result_mut(run_id)
-                    .map(|rt| {
-                        let changed = rt.mode != mode;
-                        rt.mode = mode;
-                        rt.resolve_template();
-                        changed
-                    })
-                    .unwrap_or(false);
-                // Switching display mode never needs a new Elasticsearch query —
-                // only a re-render, which happens automatically. Persist so the
-                // choice survives a restart.
-                if changed {
-                    self.sync_saved_from_result(run_id);
-                }
+                    .map(|rt| rt.search.set_mode(mode) | rt.resolve_template())
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::ResultWrap(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.wrap = !rt.wrap;
-                    // The next `prepare_heights` sees the `WrapCtx` change and
-                    // rebuilds the row-height model; a one-off render pass
-                    // measures every line the first time wrap turns on.
-                }
-                self.sync_saved_from_result(run_id);
+                // The next `prepare_heights` sees the `WrapCtx` change and
+                // rebuilds the row-height model; a one-off render pass measures
+                // every line the first time wrap turns on.
+                let edited = self
+                    .result_mut(run_id)
+                    .map(|rt| rt.search.toggle_wrap())
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::ResultHitExpand(run_id, index) => {
                 if let Some(rt) = self.result_mut(run_id) {
@@ -1431,13 +1409,11 @@ impl LogLens {
                 }
             }
             Message::ResultTemplateSubmit(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.template = rt.template_draft.trim().to_string();
-                    // An emptied template falls back to the computed default.
-                    rt.resolve_template();
-                    rt.template_draft = rt.template.clone();
-                }
-                self.sync_saved_from_result(run_id);
+                let edited = self
+                    .result_mut(run_id)
+                    .map(|rt| rt.commit_template())
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::OpenFormat(run_id) => {
                 if let Some(rt) = self.result_mut(run_id) {
@@ -1445,17 +1421,18 @@ impl LogLens {
                 }
             }
             Message::CloseFormat(run_id) => {
-                if let Some(rt) = self.result_mut(run_id) {
-                    rt.template = rt.template_draft.trim().to_string();
-                    rt.resolve_template();
-                    rt.template_draft = rt.template.clone();
-                    rt.format_open = false;
-                }
-                self.sync_saved_from_result(run_id);
+                let edited = self
+                    .result_mut(run_id)
+                    .map(|rt| {
+                        rt.format_open = false;
+                        rt.commit_template()
+                    })
+                    .unwrap_or_default();
+                return self.apply_edit(run_id, edited);
             }
             Message::FormatCancel(run_id) => {
                 if let Some(rt) = self.result_mut(run_id) {
-                    rt.template_draft = rt.template.clone();
+                    rt.template_draft = rt.search.template.clone();
                     rt.format_open = false;
                 }
             }
@@ -1499,11 +1476,11 @@ impl LogLens {
                             rt.total_hits = TotalHits::Known(rt.hits.len() as u64);
                         }
                         if let Some(mode) = perf::force_mode() {
-                            rt.mode = mode;
+                            rt.search.mode = mode;
                             rt.resolve_template();
                         }
                         if perf::force_wrap() {
-                            rt.wrap = true;
+                            rt.search.wrap = true;
                         }
                     }
                     if let Some(perf) = self.perf.as_mut() {
@@ -1627,7 +1604,7 @@ impl LogLens {
                     rt.tf.open = false;
                     if rt.target_panel_open {
                         rt.target_panel_open = false;
-                        rt.target_draft = rt.target.clone();
+                        rt.target_draft = rt.search.target.clone();
                     }
                 }
             }
@@ -2245,48 +2222,36 @@ impl LogLens {
         })
     }
 
-    /// Writes a Result Tab's live Target / query string / timeframe / Column /
-    /// sort choices back onto its Saved Search and persists the config.
+    /// Carries out what an edit to a Result Tab's Live Search obliged: writing
+    /// the Saved Search back to the config, and starting a fresh Run when the
+    /// change is one the cluster cares about.
+    fn apply_edit(&mut self, run_id: u64, edited: search::Edited) -> Task<Message> {
+        if edited.persist {
+            self.sync_saved_from_result(run_id);
+        }
+        if edited.rerun {
+            self.start_run(run_id)
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Writes a Result Tab's Live Search back onto its Saved Search and
+    /// persists the config.
     fn sync_saved_from_result(&mut self, run_id: u64) {
-        let Some((
-            conn_id,
-            saved_id,
-            target,
-            query_string,
-            timeframe,
-            columns,
-            sort,
-            mode,
-            wrap,
-            template,
-        )) = self.result_mut(run_id).map(|rt| {
+        let Some((conn_id, saved_id, live)) = self.result_mut(run_id).map(|rt| {
             (
                 rt.connection_id.clone(),
                 rt.saved_id.clone(),
-                rt.target.clone(),
-                rt.query_string.clone(),
-                rt.timeframe.clone(),
-                rt.columns.clone(),
-                rt.sort.clone(),
-                rt.mode,
-                rt.wrap,
-                rt.template.clone(),
+                rt.search.clone(),
             )
-        })
-        else {
+        }) else {
             return;
         };
         if let Some(conn) = self.config.connections.iter_mut().find(|c| c.id == conn_id)
             && let Some(saved) = conn.searches.iter_mut().find(|s| s.id == saved_id)
         {
-            saved.target = target;
-            saved.query_string = query_string;
-            saved.timeframe = timeframe;
-            saved.columns = columns;
-            saved.sort = sort;
-            saved.mode = mode;
-            saved.wrap = wrap;
-            saved.template = template;
+            live.write_back(saved);
         }
         if let Err(err) = config::save(&self.config) {
             self.status = Some(format!("Could not save config: {err}"));
@@ -2305,8 +2270,8 @@ impl LogLens {
         };
         rt.target_panel_open = false;
         let draft = rt.target_draft.trim().to_string();
-        if draft.is_empty() || draft == rt.target {
-            rt.target_draft = rt.target.clone();
+        if draft.is_empty() || draft == rt.search.target {
+            rt.target_draft = rt.search.target.clone();
             rt.target_probe = None;
             rt.target_error = None;
             return Task::none();
@@ -2329,7 +2294,7 @@ impl LogLens {
             None => {
                 if let Some(rt) = self.result_mut(run_id) {
                     rt.target_probe = None;
-                    rt.target_draft = rt.target.clone();
+                    rt.target_draft = rt.search.target.clone();
                 }
                 Task::none()
             }
@@ -2359,26 +2324,24 @@ impl LogLens {
         let caps = match result {
             Ok(caps) => caps,
             Err(es::Error::NoSuchTarget(_)) => {
-                rt.target_draft = rt.target.clone();
+                rt.target_draft = rt.search.target.clone();
                 rt.target_error =
                     Some(format!("Target \u{201c}{candidate}\u{201d} does not exist"));
                 return Task::none();
             }
             Err(err) => {
-                rt.target_draft = rt.target.clone();
+                rt.target_draft = rt.search.target.clone();
                 rt.target_error = Some(format!("Target \u{201c}{candidate}\u{201d}: {err}"));
                 return Task::none();
             }
         };
 
-        rt.target = candidate.clone();
-        rt.target_draft = candidate;
+        rt.target_draft = candidate.clone();
         rt.target_error = None;
         rt.all_fields = caps.all;
         rt.sortable_fields = caps.sortable;
-        rt.resolve_template();
-        self.sync_saved_from_result(run_id);
-        self.start_run(run_id)
+        let edited = rt.search.set_target(candidate) | rt.resolve_template();
+        self.apply_edit(run_id, edited)
     }
 
     fn save_search_form(&mut self) -> Task<Message> {
@@ -2509,23 +2472,8 @@ impl LogLens {
                 let target = saved.target.clone();
                 let run_id = match self.open_tabs.get_mut(idx) {
                     Some(Tab::Result(rt)) => {
-                        let target_changed = rt.target != saved.target;
-                        rt.saved_name = saved.name.clone();
-                        rt.target = saved.target.clone();
-                        rt.target_draft = saved.target.clone();
-                        rt.target_probe = None;
-                        rt.target_error = None;
-                        rt.target_panel_open = false;
-                        rt.query_string = saved.query_string.clone();
-                        rt.query_draft = saved.query_string.clone();
-                        rt.timestamp_field = saved.timestamp_field.clone();
-                        rt.columns = saved.columns.clone();
-                        rt.sort = saved.sort.clone();
-                        rt.mode = saved.mode;
-                        rt.template = saved.template.clone();
-                        rt.template_draft = saved.template.clone();
-                        rt.timeframe = saved.timeframe.clone();
-                        rt.tf = TimeframeDraft::from_timeframe(&saved.timeframe);
+                        let target_changed = rt.search.target != saved.target;
+                        rt.adopt(search::Live::from_saved(&saved));
                         rt.gte = gte;
                         rt.lte = lte;
                         match caps {
@@ -2577,26 +2525,20 @@ impl LogLens {
             run_id,
             connection_id: conn_id.clone(),
             saved_id,
-            saved_name: saved.name.clone(),
-            target: saved.target.clone(),
+            search: search::Live::from_saved(&saved),
             target_draft: saved.target.clone(),
             target_probe: None,
             target_error: None,
             target_options: Vec::new(),
             targets_loading: true,
             target_panel_open: false,
-            query_string: saved.query_string.clone(),
             query_draft: saved.query_string.clone(),
-            timestamp_field: saved.timestamp_field.clone(),
-            columns: saved.columns.clone(),
             column_draft: String::new(),
             col_widths: HashMap::new(),
-            sort: saved.sort.clone(),
             sort_panel_open: false,
             header_menu: None,
             all_fields,
             sortable_fields,
-            timeframe: saved.timeframe.clone(),
             tf: TimeframeDraft::from_timeframe(&saved.timeframe),
             gte,
             lte,
@@ -2617,9 +2559,6 @@ impl LogLens {
             utc: self.config.utc_timestamps,
             max_results: self.config.es.max_results,
             fetch_size: self.config.es.fetch_size,
-            mode: saved.mode,
-            wrap: saved.wrap,
-            template: saved.template.clone(),
             template_draft: saved.template.clone(),
             format_open: false,
             line_cache: Default::default(),
@@ -2630,7 +2569,7 @@ impl LogLens {
         // lands (see that handler).
         tab.resolve_template();
         let need_fields = tab.all_fields.is_empty();
-        let target = tab.target.clone();
+        let target = tab.search.target.clone();
 
         match replace {
             Some(i) if i < self.open_tabs.len() => {
@@ -2692,7 +2631,7 @@ impl LogLens {
                 rt.scroll_y = 0.0;
             }
             // Re-resolve the range so a relative window re-anchors to "now".
-            let (gte, lte) = rt.timeframe.bounds();
+            let (gte, lte) = rt.search.timeframe.bounds();
             rt.gte = gte;
             rt.lte = lte;
             rt.total_hits = TotalHits::Loading;
@@ -2845,7 +2784,7 @@ impl LogLens {
         }
         if let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t))
             && tab.format_open
-            && tab.mode == line::LayoutMode::RawText
+            && tab.search.mode == line::LayoutMode::RawText
         {
             layers.push(results_view::format_modal(tab));
         }
@@ -3576,6 +3515,7 @@ impl LogLens {
         let run_id = tab.run_id;
 
         let selected = tab
+            .search
             .timeframe
             .matches_preset()
             .unwrap_or(TimeframeChoice::Custom);

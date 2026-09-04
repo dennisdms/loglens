@@ -1,7 +1,7 @@
-//! State for the Search settings surface: the structural fields of a Saved
-//! Search (name, Target, timestamp field) that live outside the Search bar.
-//! Shown as a form tab when creating a Saved Search and as a modal when
-//! editing an existing one.
+//! The Search settings surface: the structural fields of a Saved Search (name,
+//! Target, timestamp field) that live outside the Search bar. Shown as a form
+//! tab when creating a Saved Search and as a modal when editing an existing
+//! one.
 
 use crate::config::{self, SavedSearch, SortKey, Timeframe};
 use crate::es::FieldCaps;

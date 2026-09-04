@@ -66,6 +66,16 @@ stop — a Result Tab holds one and asks it for Pages. Editing the query string,
 Timeframe, Target or sort, or hitting Refresh, starts a new Run.
 _Avoid_: query execution, fetch, job, session
 
+**Live Search**:
+The Saved Search a Result Tab is currently showing — the runtime copy the
+Search bar edits, written back to the persisted Saved Search after every
+change. Holds a Saved Search's content and none of its identity. An edit to it
+reports what it obliges: changing a Column, the Layout, Wrap or the template is
+persisted only, while changing the Target, query string, Timeframe or sort also
+starts a new Run. The name and timestamp field are the Search settings' to
+change, so a Live Search carries them but never writes them back.
+_Avoid_: draft, working copy, params, search state
+
 **Client**:
 A connected cluster, inside the `es` module: one Connection's URL and
 credentials plus the HTTP client that reaches them, so every call to that

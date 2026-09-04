@@ -22,7 +22,7 @@ impl Tab {
                     form.name.clone()
                 }
             }
-            Tab::Result(tab) => tab.saved_name.clone(),
+            Tab::Result(tab) => tab.search.name.clone(),
         }
     }
 }

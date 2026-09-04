@@ -40,7 +40,7 @@ pub(crate) fn result_view<'a>(
     wrap_row_cap: Option<usize>,
 ) -> Element<'a, Message> {
     let hits_view = || -> Element<'a, Message> {
-        match tab.mode {
+        match tab.search.mode {
             line::LayoutMode::Table => {
                 hit_table(tab, header_hover, grip_hover, column_drag, wrap_row_cap)
             }
@@ -155,7 +155,7 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     let sort_btn = button(
         row![
             icon_box(&icons::SORT_FIELDS, style::TEXT),
-            text(format!("{}", tab.sort.len()))
+            text(format!("{}", tab.search.sort.len()))
                 .size(14.0)
                 .color(style::TEXT),
         ]
@@ -171,7 +171,7 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     // "Format" button while in Text mode — Format edits the raw-text
     // template, so it is meaningless (and hidden) in Table mode. The shared
     // bordered surface ties the two together as one control.
-    let is_raw = tab.mode == line::LayoutMode::RawText;
+    let is_raw = tab.search.mode == line::LayoutMode::RawText;
     let (mode_icon, mode_label, next_mode) = if is_raw {
         (&icons::RAW_TEXT, "Text", line::LayoutMode::Table)
     } else {
@@ -187,18 +187,22 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
 
     // Wrap toggle: long Hit text onto multiple visual rows instead of
     // truncating (Table) / scrolling sideways (Text).
-    let wrap_btn = button(text("Wrap").size(12.0).color(if tab.wrap {
+    let wrap_btn = button(text("Wrap").size(12.0).color(if tab.search.wrap {
         style::TEXT
     } else {
         style::TEXT_DIM
     }))
     .on_press(Message::ResultWrap(run_id))
     .padding(Padding::new(5.0).left(9.0).right(9.0))
-    .style(style::icon_button(tab.wrap));
+    .style(style::icon_button(tab.search.wrap));
     group = group.push(
         tooltip(
             wrap_btn,
-            tip(if tab.wrap { "Wrap: on" } else { "Wrap: off" }),
+            tip(if tab.search.wrap {
+                "Wrap: on"
+            } else {
+                "Wrap: off"
+            }),
             tooltip::Position::Bottom,
         )
         .gap(4.0),
@@ -243,91 +247,93 @@ fn hit_table<'a>(
     wrap_row_cap: Option<usize>,
 ) -> Element<'a, Message> {
     let run_id = tab.run_id;
-    let last = tab.columns.len().saturating_sub(1);
+    let last = tab.search.columns.len().saturating_sub(1);
 
-    let multi_sort = tab.sort.len() > 1;
-    let header = row(tab
-        .columns
-        .iter()
-        .enumerate()
-        .map(|(i, col)| -> Element<'_, Message> {
-            let mut label_row = row![text(col.clone()).size(12.0).color(style::TEXT_DIM)]
-                .spacing(3.0)
-                .align_y(iced::Alignment::Center);
-            if let Some(rank) = tab.sort_index(col) {
-                let arrow = if tab.sort[rank].desc {
-                    "\u{25be}"
-                } else {
-                    "\u{25b4}"
-                };
-                label_row = label_row.push(text(arrow).size(10.0).color(style::TEXT));
-                if multi_sort {
-                    label_row = label_row.push(
-                        text(format!("{}", rank + 1))
-                            .size(9.0)
-                            .color(style::TEXT_DIM),
-                    );
-                }
-            }
-            let label = container(label_row)
-                .width(Fill)
-                .clip(true)
-                .padding(Padding::new(4.0).left(6.0));
-
-            // A "\u{22ee}" affordance that opens this Column's settings menu
-            // (add / remove / reorder / sort). Like the resize grip, it only shows while
-            // the pointer is over the header (or the menu is open); a
-            // fixed-width slot keeps the header from reflowing on hover.
-            let show_dots = header_hover == Some(i) || tab.header_menu == Some(i);
-            let dots: Element<'_, Message> = if show_dots {
-                button(text("\u{22ee}").size(12.0).color(style::TEXT_DIM))
-                    .on_press(Message::ResultHeaderMenu(run_id, i))
-                    .padding(Padding::new(0.0).left(2.0).right(2.0))
-                    .style(style::bare_button())
-                    .into()
-            } else {
-                space().width(12.0).into()
-            };
-            let dots = container(dots).width(Length::Fixed(14.0));
-
-            // The last Column flexes to fill the pane, so it has no edge to
-            // drag; every other Column gets a right-edge resize grip.
-            let inner: Element<'_, Message> = if i == last {
-                container(row![label, dots].align_y(iced::Alignment::Center))
-                    .width(Fill)
-                    .into()
-            } else {
-                // The hairline shows while the pointer is anywhere over this
-                // Column's header (or its own grip, or it is being dragged) —
-                // and only for that Column.
-                let lit = grip_hover == Some(i)
-                    || header_hover == Some(i)
-                    || matches!(column_drag, Some(d) if d.run_id == run_id && d.index == i);
-                let line = container(space().width(2.0).height(14.0)).style(move |_| {
-                    style::panel(if lit {
-                        style::TEXT_DIM
+    let multi_sort = tab.search.sort.len() > 1;
+    let header =
+        row(tab
+            .search
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, col)| -> Element<'_, Message> {
+                let mut label_row = row![text(col.clone()).size(12.0).color(style::TEXT_DIM)]
+                    .spacing(3.0)
+                    .align_y(iced::Alignment::Center);
+                if let Some(rank) = tab.search.sort_index(col) {
+                    let arrow = if tab.search.sort[rank].desc {
+                        "\u{25be}"
                     } else {
-                        Color::TRANSPARENT
-                    })
-                });
-                let grip =
-                    mouse_area(container(line).padding(Padding::new(0.0).left(4.0).right(4.0)))
-                        .interaction(iced::mouse::Interaction::ResizingColumn)
-                        .on_enter(Message::GripHover(Some(i)))
-                        .on_exit(Message::GripHover(None))
-                        .on_press(Message::ColumnDragStart(run_id, i));
+                        "\u{25b4}"
+                    };
+                    label_row = label_row.push(text(arrow).size(10.0).color(style::TEXT));
+                    if multi_sort {
+                        label_row = label_row.push(
+                            text(format!("{}", rank + 1))
+                                .size(9.0)
+                                .color(style::TEXT_DIM),
+                        );
+                    }
+                }
+                let label = container(label_row)
+                    .width(Fill)
+                    .clip(true)
+                    .padding(Padding::new(4.0).left(6.0));
 
-                container(row![label, dots, grip].align_y(iced::Alignment::Center))
-                    .width(Length::Fixed(tab.col_width(col)))
+                // A "\u{22ee}" affordance that opens this Column's settings menu
+                // (add / remove / reorder / sort). Like the resize grip, it only shows while
+                // the pointer is over the header (or the menu is open); a
+                // fixed-width slot keeps the header from reflowing on hover.
+                let show_dots = header_hover == Some(i) || tab.header_menu == Some(i);
+                let dots: Element<'_, Message> = if show_dots {
+                    button(text("\u{22ee}").size(12.0).color(style::TEXT_DIM))
+                        .on_press(Message::ResultHeaderMenu(run_id, i))
+                        .padding(Padding::new(0.0).left(2.0).right(2.0))
+                        .style(style::bare_button())
+                        .into()
+                } else {
+                    space().width(12.0).into()
+                };
+                let dots = container(dots).width(Length::Fixed(14.0));
+
+                // The last Column flexes to fill the pane, so it has no edge to
+                // drag; every other Column gets a right-edge resize grip.
+                let inner: Element<'_, Message> = if i == last {
+                    container(row![label, dots].align_y(iced::Alignment::Center))
+                        .width(Fill)
+                        .into()
+                } else {
+                    // The hairline shows while the pointer is anywhere over this
+                    // Column's header (or its own grip, or it is being dragged) —
+                    // and only for that Column.
+                    let lit = grip_hover == Some(i)
+                        || header_hover == Some(i)
+                        || matches!(column_drag, Some(d) if d.run_id == run_id && d.index == i);
+                    let line = container(space().width(2.0).height(14.0)).style(move |_| {
+                        style::panel(if lit {
+                            style::TEXT_DIM
+                        } else {
+                            Color::TRANSPARENT
+                        })
+                    });
+                    let grip =
+                        mouse_area(container(line).padding(Padding::new(0.0).left(4.0).right(4.0)))
+                            .interaction(iced::mouse::Interaction::ResizingColumn)
+                            .on_enter(Message::GripHover(Some(i)))
+                            .on_exit(Message::GripHover(None))
+                            .on_press(Message::ColumnDragStart(run_id, i));
+
+                    container(row![label, dots, grip].align_y(iced::Alignment::Center))
+                        .width(Length::Fixed(tab.col_width(col)))
+                        .into()
+                };
+
+                mouse_area(inner)
+                    .on_enter(Message::HeaderHover(Some(i)))
+                    .on_exit(Message::HeaderHover(None))
                     .into()
-            };
-
-            mouse_area(inner)
-                .on_enter(Message::HeaderHover(Some(i)))
-                .on_exit(Message::HeaderHover(None))
-                .into()
-        }))
-    .spacing(8.0);
+            }))
+        .spacing(8.0);
 
     // Only build widgets for the slice around the viewport; pad the rest
     // with spacers so the scrollbar still spans every loaded Hit.
@@ -364,32 +370,34 @@ fn hit_table<'a>(
         let row_h = lines.row_height(index);
         let rendered = lines.line(index);
 
-        let cells = row(tab
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(i, col)| -> Element<'_, Message> {
-                let wraps = wrap_on && i == last;
-                let (width, budget, wrapping) = if wraps {
-                    (
-                        Length::Fixed(fill_w),
-                        disp.max(1) as f32 * fill_w,
-                        Wrapping::Glyph,
-                    )
-                } else if i == last {
-                    (Length::Fill, FILL_COLUMN_MAX_W, Wrapping::None)
-                } else {
-                    let w = tab.col_width(col);
-                    (Length::Fixed(w), w, Wrapping::None)
-                };
-                container(part_widget(&rendered.parts[i], Some(budget), wrapping))
-                    .width(width)
-                    .padding(Padding::new(3.0).left(6.0))
-                    .clip(!wraps)
-                    .into()
-            }))
-        .spacing(8.0)
-        .align_y(iced::Alignment::Start);
+        let cells =
+            row(tab
+                .search
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(i, col)| -> Element<'_, Message> {
+                    let wraps = wrap_on && i == last;
+                    let (width, budget, wrapping) = if wraps {
+                        (
+                            Length::Fixed(fill_w),
+                            disp.max(1) as f32 * fill_w,
+                            Wrapping::Glyph,
+                        )
+                    } else if i == last {
+                        (Length::Fill, FILL_COLUMN_MAX_W, Wrapping::None)
+                    } else {
+                        let w = tab.col_width(col);
+                        (Length::Fixed(w), w, Wrapping::None)
+                    };
+                    container(part_widget(&rendered.parts[i], Some(budget), wrapping))
+                        .width(width)
+                        .padding(Padding::new(3.0).left(6.0))
+                        .clip(!wraps)
+                        .into()
+                }))
+            .spacing(8.0)
+            .align_y(iced::Alignment::Start);
 
         let mut stack = column![cells];
         if let Some(strip) = affordance_strip(run_id, index, affordance) {
@@ -452,7 +460,7 @@ fn hit_table<'a>(
         stacked = stacked.push(footer);
     }
 
-    let Some(menu_col) = tab.header_menu.filter(|i| *i < tab.columns.len()) else {
+    let Some(menu_col) = tab.header_menu.filter(|i| *i < tab.search.columns.len()) else {
         return stacked.into();
     };
     iced::widget::stack(vec![stacked.into(), header_menu_overlay(tab, menu_col)]).into()
@@ -623,9 +631,9 @@ fn raw_row_slice(
 
 fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Message> {
     let run_id = tab.run_id;
-    let field = tab.columns[index].clone();
-    let last = tab.columns.len().saturating_sub(1);
-    let sorted = tab.sort_index(&field).is_some();
+    let field = tab.search.columns[index].clone();
+    let last = tab.search.columns.len().saturating_sub(1);
+    let sorted = tab.search.sort_index(&field).is_some();
 
     const MENU_W: f32 = 200.0;
 
@@ -692,7 +700,7 @@ fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Mess
     let available: Vec<String> = tab
         .all_fields
         .iter()
-        .filter(|f| !tab.columns.iter().any(|c| c == *f))
+        .filter(|f| !tab.search.columns.iter().any(|c| c == *f))
         .cloned()
         .collect();
     let add_ctl: Element<'_, Message> = if !available.is_empty() {
@@ -773,7 +781,7 @@ fn header_menu_overlay<'a>(tab: &'a ResultTab, index: usize) -> Element<'a, Mess
     } else {
         let mut right_edge = 6.0;
         for i in 0..=index {
-            right_edge += tab.col_width(&tab.columns[i]) + 8.0;
+            right_edge += tab.col_width(&tab.search.columns[i]) + 8.0;
         }
         let left = (right_edge - MENU_W).max(6.0);
         container(card).padding(Padding::new(0.0).left(left)).into()
@@ -973,7 +981,7 @@ pub(crate) fn format_modal<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     let template = {
         let draft = tab.template_draft.trim();
         if draft.is_empty() {
-            tab.template.clone()
+            tab.search.template.clone()
         } else {
             draft.to_string()
         }
@@ -982,7 +990,7 @@ pub(crate) fn format_modal<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         mode: line::LayoutMode::RawText,
         columns: Vec::new(),
         template,
-        timestamp_field: tab.timestamp_field.clone(),
+        timestamp_field: tab.search.timestamp_field.clone(),
         utc: tab.utc,
     };
     let preview: Element<'_, Message> = if tab.hits.is_empty() {
@@ -1042,10 +1050,10 @@ pub(crate) fn format_modal<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
 /// action. Floated by `LogLens::sort_fields_popover_overlay`.
 pub(crate) fn sort_fields_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     let run_id = tab.run_id;
-    let last = tab.sort.len().saturating_sub(1);
+    let last = tab.search.sort.len().saturating_sub(1);
 
     let mut rows = column![].spacing(4.0);
-    for (i, key) in tab.sort.iter().enumerate() {
+    for (i, key) in tab.search.sort.iter().enumerate() {
         let field = key.field.clone();
 
         let remove = button(text("\u{00d7}").size(12.0).color(style::TEXT_DIM))
@@ -1057,7 +1065,7 @@ pub(crate) fn sort_fields_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message
             .width(Length::Fixed(220.0))
             .clip(true);
 
-        let is_time = key.field == tab.timestamp_field;
+        let is_time = key.field == tab.search.timestamp_field;
         let (asc_label, desc_label) = if is_time {
             ("Old\u{2013}New", "New\u{2013}Old")
         } else {
@@ -1097,7 +1105,7 @@ pub(crate) fn sort_fields_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message
             .align_y(iced::Alignment::Center),
         );
     }
-    if tab.sort.is_empty() {
+    if tab.search.sort.is_empty() {
         rows = rows.push(
             text("No sort fields \u{2014} Hits fall back to the timestamp field, newest first.")
                 .size(11.0)
@@ -1112,7 +1120,7 @@ pub(crate) fn sort_fields_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message
     };
     let available: Vec<String> = pool
         .iter()
-        .filter(|f| tab.sort_index(f).is_none())
+        .filter(|f| tab.search.sort_index(f).is_none())
         .cloned()
         .collect();
     let picker: Element<'_, Message> = if available.is_empty() {
@@ -1133,7 +1141,7 @@ pub(crate) fn sort_fields_popover<'a>(tab: &'a ResultTab) -> Element<'a, Message
     let mut footer = row![picker, space().width(Fill)]
         .spacing(8.0)
         .align_y(iced::Alignment::Center);
-    if !tab.sort.is_empty() {
+    if !tab.search.sort.is_empty() {
         footer = footer.push(
             button(text("Clear sorting").size(11.0).color(style::ACCENT))
                 .on_press(Message::ResultSortClear(run_id))
