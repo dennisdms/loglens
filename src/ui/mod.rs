@@ -10,6 +10,8 @@
 
 pub(crate) mod chrome;
 pub(crate) mod results;
+pub(crate) mod search_bar;
+pub(crate) mod tree;
 
 use iced::widget::svg::Handle;
 use iced::widget::{button, container, mouse_area, opaque, row, svg, text};

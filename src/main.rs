@@ -26,10 +26,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use iced::widget::scrollable::{AbsoluteOffset, RelativeOffset};
-use iced::widget::svg::Handle;
 use iced::widget::{
-    Id, button, checkbox, column, container, mouse_area, operation, pick_list, radio, row, rule,
-    scrollable, space, stack, svg, text, text_editor, text_input,
+    Id, button, checkbox, column, container, operation, radio, row, rule, scrollable, space, stack,
+    text, text_editor, text_input,
 };
 use iced::window;
 use iced::{Border, Color, Element, Fill, Length, Padding, Point, Size, Subscription, Task, Theme};
@@ -941,6 +940,20 @@ impl LogLens {
     /// — may have changed.
     fn forget_client(&mut self, conn_id: &str) {
         self.clients.remove(conn_id);
+    }
+
+    /// The active tab, when it is a Result Tab.
+    ///
+    /// Most of the chrome is a function of exactly this: the Search bar, the
+    /// options strip, their three overlays, the info bar's Hit-count readout,
+    /// and the Format modal all read one `ResultTab` and nothing else in
+    /// `LogLens`. Written once here so those surfaces can be free functions
+    /// over a `&ResultTab` instead of methods reaching back through `&self`.
+    fn active_result(&self) -> Option<&ResultTab> {
+        match self.active_tab.and_then(|t| self.open_tabs.get(t))? {
+            Tab::Result(tab) => Some(tab),
+            Tab::SearchForm(_) => None,
+        }
     }
 
     fn result_mut(&mut self, run_id: u64) -> Option<&mut ResultTab> {
@@ -2699,8 +2712,9 @@ impl LogLens {
         // area. The two optional strips only appear while a Result Tab is
         // active.
         let mut right: Vec<Element<'_, Message>> = Vec::new();
-        let search_bar = self.search_bar();
-        let options_bar = self.options_bar();
+        let active = self.active_result();
+        let search_bar = active.map(ui::search_bar::search_bar);
+        let options_bar = active.and_then(ui::search_bar::options_bar);
         let (has_search_bar, has_options_bar) = (search_bar.is_some(), options_bar.is_some());
         if let Some(search_bar) = search_bar {
             right.push(search_bar);
@@ -2715,7 +2729,11 @@ impl LogLens {
         right.push(self.main_area());
 
         let body = row![
-            self.sidebar(),
+            ui::tree::sidebar(
+                &self.config.connections,
+                &self.expanded,
+                self.active_result().map(|rt| rt.saved_id.as_str()),
+            ),
             rule::vertical(1.0),
             column(right).width(Fill),
         ]
@@ -2753,16 +2771,19 @@ impl LogLens {
         if let Some(menu) = self.help_menu_overlay(&metrics) {
             layers.push(menu);
         }
-        if let Some(menu) = self.tree_menu_overlay() {
+        if let Some(menu) = ui::tree::menu_overlay(self.tree_menu.as_ref(), self.tree_menu_at) {
             layers.push(menu);
         }
-        if let Some(popover) = self.sort_fields_popover_overlay(&metrics) {
+        if let Some(popover) = active.and_then(|tab| ui::search_bar::sort_overlay(tab, &metrics)) {
             layers.push(popover);
         }
-        if let Some(popover) = self.timeframe_popover_overlay(&metrics) {
+        if let Some(popover) =
+            active.and_then(|tab| ui::search_bar::timeframe_overlay(tab, &metrics))
+        {
             layers.push(popover);
         }
-        if let Some(dropdown) = self.target_suggestions_overlay(&metrics) {
+        if let Some(dropdown) = active.and_then(|tab| ui::search_bar::target_overlay(tab, &metrics))
+        {
             layers.push(dropdown);
         }
         if let Some(form) = &self.connection_form {
@@ -2771,7 +2792,7 @@ impl LogLens {
         if let Some(form) = &self.search_settings {
             layers.push(self.search_settings_modal(form));
         }
-        if let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t))
+        if let Some(tab) = active
             && tab.format_open
             && tab.search.mode == line::LayoutMode::RawText
         {
@@ -2837,7 +2858,7 @@ impl LogLens {
     /// the right.
     fn info_bar(&self) -> Element<'_, Message> {
         let mut items: Vec<Element<'_, Message>> = Vec::new();
-        if let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) {
+        if let Some(tab) = self.active_result() {
             items.push(self.hit_count_readout(tab));
             if let Some(err) = &tab.target_error {
                 items.push(space().width(Fill).into());
@@ -2877,167 +2898,6 @@ impl LogLens {
             }
             TotalHits::Failed => meta(&format!("Loaded {loaded} hits")),
         }
-    }
-
-    fn sidebar(&self) -> Element<'_, Message> {
-        let panel =
-            container(scrollable(column![self.es_section()].spacing(1.0).width(Fill)).height(Fill))
-                .style(|_| style::panel(PANEL))
-                .width(chrome::SIDEBAR_W)
-                .height(Fill)
-                .padding(6.0);
-
-        mouse_area(panel).on_move(Message::SidebarCursor).into()
-    }
-
-    /// The `Elasticsearch` tree root: its Connections plus a "＋" affordance.
-    fn es_section(&self) -> Element<'_, Message> {
-        let open = self.expanded.contains(ES_ROOT);
-        let marker = if open { "\u{25be}" } else { "\u{25b8}" };
-
-        let header = row![
-            button(
-                row![
-                    text(marker).size(11.0).color(TEXT_DIM),
-                    text("Elasticsearch").size(13.0),
-                ]
-                .spacing(6.0),
-            )
-            .on_press(Message::ToggleFolder(ES_ROOT.to_string()))
-            .width(Fill)
-            .padding(Padding::new(4.0).left(6.0).right(4.0))
-            .style(style::picker_row(false)),
-            button(text("\u{ff0b}").size(13.0).color(TEXT_DIM))
-                .on_press(Message::NewConnection)
-                .padding(Padding::new(4.0).left(6.0).right(6.0))
-                .style(style::bare_button()),
-        ]
-        .align_y(iced::Alignment::Center);
-
-        let mut rows: Vec<Element<'_, Message>> = vec![header.into()];
-        if open {
-            if self.config.connections.is_empty() {
-                rows.push(
-                    container(
-                        text("No connections yet — click ＋ to add one")
-                            .size(12.0)
-                            .color(TEXT_DIM),
-                    )
-                    .padding(Padding::new(4.0).left(26.0).right(4.0))
-                    .into(),
-                );
-            } else {
-                for conn in &self.config.connections {
-                    rows.push(self.connection_node(conn));
-                }
-            }
-        }
-        column(rows).spacing(1.0).width(Fill).into()
-    }
-
-    fn connection_node<'a>(&'a self, conn: &'a Connection) -> Element<'a, Message> {
-        let open = self.expanded.contains(&conn.id);
-        let marker = if open { "\u{25be}" } else { "\u{25b8}" };
-
-        let header = mouse_area(
-            row![
-                button(
-                    row![
-                        text(marker).size(11.0).color(TEXT_DIM),
-                        text(conn.name.clone()).size(13.0),
-                    ]
-                    .spacing(6.0),
-                )
-                .on_press(Message::ToggleFolder(conn.id.clone()))
-                .width(Fill)
-                .padding(Padding::new(4.0).left(20.0).right(4.0))
-                .style(style::picker_row(false)),
-                button(text("\u{ff0b}").size(12.0).color(TEXT_DIM))
-                    .on_press(Message::NewSearch(conn.id.clone()))
-                    .padding(Padding::new(4.0).left(6.0).right(6.0))
-                    .style(style::bare_button()),
-            ]
-            .align_y(iced::Alignment::Center),
-        )
-        .on_right_press(Message::TreeMenuToggle(TreeMenu::Connection(
-            conn.id.clone(),
-        )));
-
-        let mut rows: Vec<Element<'a, Message>> = vec![header.into()];
-        if open {
-            if conn.searches.is_empty() {
-                rows.push(
-                    container(
-                        text("No saved searches — click ＋")
-                            .size(11.0)
-                            .color(TEXT_DIM),
-                    )
-                    .padding(Padding::new(3.0).left(40.0))
-                    .into(),
-                );
-            } else {
-                for saved in &conn.searches {
-                    let active = matches!(
-                        self.active_tab.and_then(|t| self.open_tabs.get(t)),
-                        Some(Tab::Result(rt)) if rt.saved_id == saved.id
-                    );
-                    let menu_target = TreeMenu::Search {
-                        connection: conn.id.clone(),
-                        search: saved.id.clone(),
-                    };
-                    rows.push(
-                        mouse_area(
-                            button(text(saved.name.clone()).size(13.0))
-                                .on_press(Message::OpenSavedSearch {
-                                    connection: conn.id.clone(),
-                                    search: saved.id.clone(),
-                                })
-                                .width(Fill)
-                                .padding(Padding::new(4.0).left(40.0).right(4.0))
-                                .style(style::picker_row(active)),
-                        )
-                        .on_right_press(Message::TreeMenuToggle(menu_target))
-                        .into(),
-                    );
-                }
-            }
-        }
-        column(rows).spacing(1.0).width(Fill).into()
-    }
-
-    /// The floating right-click dropdown for the open `tree_menu`, anchored at
-    /// the pointer as a stack layer so it never reflows the tree.
-    fn tree_menu_overlay(&self) -> Option<Element<'_, Message>> {
-        let (edit, delete) = match self.tree_menu.as_ref()? {
-            TreeMenu::Connection(id) => (
-                Message::EditConnection(id.clone()),
-                Message::RequestDeleteConnection(id.clone()),
-            ),
-            TreeMenu::Search { connection, search } => (
-                Message::EditSearch {
-                    connection: connection.clone(),
-                    search: search.clone(),
-                },
-                Message::DeleteSearch {
-                    connection: connection.clone(),
-                    search: search.clone(),
-                },
-            ),
-        };
-
-        // Anchored to the cursor rather than to the chrome, but kept inside
-        // the sidebar it belongs to.
-        let x = self
-            .tree_menu_at
-            .x
-            .clamp(2.0, chrome::SIDEBAR_W - TREE_MENU_OUTER_W);
-        let y = self.tree_menu_at.y.max(2.0);
-
-        Some(anchored(
-            tree_menu_block(edit, delete),
-            Anchor::Left { x, y },
-            Message::TreeMenuDismiss,
-        ))
     }
 
     fn tab_bar(&self) -> Element<'_, Message> {
@@ -3484,195 +3344,6 @@ impl LogLens {
             .into()
     }
 
-    /// The options strip shown below the Search bar while a Result Tab is
-    /// active, directly above the tab strip: the live Column + sort controls
-    /// moved out of the Result Tab. Hidden for Search form tabs and when no tab
-    /// is open.
-    fn options_bar(&self) -> Option<Element<'_, Message>> {
-        let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
-            return None;
-        };
-        if !tab.strips_visible() {
-            return None;
-        }
-
-        // The "Sort fields" popover is *not* pushed inline here — it floats as a
-        // stack layer (`sort_fields_popover_overlay`) so opening it never reflows
-        // the strips or table below.
-        Some(ui::results::result_sort_bar(tab))
-    }
-
-    /// The Search bar shown at the top of the right column, above the options
-    /// strip and tab strip, while a Result Tab is active: the index/datastream
-    /// target, query string, timeframe and a Refresh control, in that order.
-    /// The loaded-Hit count lives in the bottom info bar. Hidden for Search
-    /// form tabs and when no tab is open.
-    fn search_bar(&self) -> Option<Element<'_, Message>> {
-        let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
-            return None;
-        };
-        let run_id = tab.run_id;
-
-        let selected = tab
-            .search
-            .timeframe
-            .matches_preset()
-            .unwrap_or(TimeframeChoice::Custom);
-        let timeframe_ctl = pick_list(&TimeframeChoice::ALL[..], Some(selected), move |choice| {
-            Message::ResultTimeframeChoice(run_id, choice)
-        })
-        .text_size(12.0)
-        .padding(4.0);
-
-        // The Target is edited inline here, Kibana-style: typing opens a
-        // suggestion dropdown (`target_suggestions_overlay`) and the caret
-        // button toggles it; a pick or Enter re-points the tab. Free text
-        // (patterns like `logs-*`) commits on Enter without appearing in the
-        // list.
-        let target_ctl = row![
-            text_input("index or data stream", &tab.target_draft)
-                .on_input(move |v| Message::ResultTargetDraft(run_id, v))
-                .on_submit(Message::ResultTargetSubmit(run_id))
-                .size(12.0)
-                .padding(4.0)
-                .width(Length::Fixed(160.0)),
-            button(text("\u{25be}").size(9.0).color(TEXT_DIM))
-                .on_press(Message::ResultTargetPanelToggle(run_id))
-                .padding(Padding::new(4.0).left(6.0).right(6.0))
-                .style(style::picker_row(tab.target_panel_open)),
-        ]
-        .spacing(2.0)
-        .align_y(iced::Alignment::Center);
-
-        let row1 = container(
-            row![
-                target_ctl,
-                text_input("Lucene Query", &tab.query_draft)
-                    .on_input(move |v| Message::ResultQueryDraft(run_id, v))
-                    .on_submit(Message::ResultQuerySubmit(run_id))
-                    .size(12.0)
-                    .padding(4.0)
-                    .width(Fill),
-                timeframe_ctl,
-                button(
-                    svg(Handle::clone(&icons::REFRESH))
-                        .width(Length::Fixed(chrome::SEARCH_ICON))
-                        .height(Length::Fixed(chrome::SEARCH_ICON))
-                        .style(|_theme, _status| svg::Style { color: Some(TEXT) }),
-                )
-                .on_press(Message::RefreshResult(run_id))
-                .padding(
-                    Padding::new(chrome::SEARCH_BAR_BTN_PAD_Y)
-                        .left(9.0)
-                        .right(9.0)
-                )
-                .style(style::icon_button(false)),
-            ]
-            .spacing(12.0)
-            .align_y(iced::Alignment::Center),
-        )
-        .style(|_| style::panel(PANEL))
-        .width(Fill)
-        // As with the Menu bar, `chrome::SEARCH_BAR_H` is derived from these
-        // constants: the timeframe popover and the Target dropdown are
-        // anchored under this row.
-        .padding(
-            Padding::new(chrome::SEARCH_BAR_PAD_Y)
-                .left(chrome::CONTENT_PAD_LEFT)
-                .right(chrome::CONTENT_PAD_RIGHT),
-        );
-
-        // The raw-text template is edited in the "Format" modal (opened from the
-        // options strip), not here — the Search bar stays a single row.
-        Some(row1.into())
-    }
-
-    /// The floating "Custom\u{2026}" timeframe editor, anchored under the Search
-    /// bar's timeframe control as a stack layer so it never reflows the strips
-    /// or main area below it (the options strip sits below the Search bar now).
-    /// Mirrors the sidebar right-click menu: a click anywhere outside dismisses
-    /// it.
-    fn timeframe_popover_overlay(&self, metrics: &Chrome) -> Option<Element<'_, Message>> {
-        let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
-            return None;
-        };
-        if !tab.tf.open {
-            return None;
-        }
-        let run_id = tab.run_id;
-
-        const CARD_W: f32 = 480.0;
-
-        let card = container(ui::results::timeframe_popover(tab)).width(Length::Fixed(CARD_W));
-
-        Some(anchored(
-            card.into(),
-            // Under the Search bar's timeframe control, at the right of the row.
-            Anchor::Right {
-                inset: chrome::CONTENT_PAD_RIGHT,
-                y: metrics.below_search_bar,
-            },
-            Message::ResultTfCancel(run_id),
-        ))
-    }
-
-    /// The Search bar's Target suggestion dropdown, floated as a stack layer
-    /// under the Target input so it never reflows the strips or table below.
-    /// Anchored with the same top offset as the timeframe popover; a click
-    /// anywhere outside dismisses it.
-    fn target_suggestions_overlay(&self, metrics: &Chrome) -> Option<Element<'_, Message>> {
-        let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
-            return None;
-        };
-        if !tab.target_panel_open {
-            return None;
-        }
-        let run_id = tab.run_id;
-
-        const CARD_W: f32 = 240.0;
-
-        let body: Element<'_, Message> = if tab.targets_loading {
-            text("Loading indices\u{2026}")
-                .size(11.0)
-                .color(TEXT_DIM)
-                .into()
-        } else {
-            let matches = tab.target_matches();
-            if matches.is_empty() {
-                text("No matching indices")
-                    .size(11.0)
-                    .color(TEXT_DIM)
-                    .into()
-            } else {
-                let mut opts = column![].spacing(1.0);
-                for name in matches {
-                    opts = opts.push(
-                        button(text(name.clone()).size(12.0))
-                            .on_press(Message::ResultTargetPicked(run_id, name.clone()))
-                            .width(Fill)
-                            .padding(Padding::new(3.0).left(8.0))
-                            .style(style::picker_row(false)),
-                    );
-                }
-                opts.into()
-            }
-        };
-
-        let card = container(container(body).padding(4.0))
-            .style(|_| style::panel(PANEL))
-            .width(Length::Fixed(CARD_W));
-
-        Some(anchored(
-            card.into(),
-            // Under the Target input, the leftmost control in the Search bar.
-            Anchor::Left {
-                x: chrome::CONTENT_LEFT,
-                y: metrics.below_search_bar,
-            },
-            Message::ResultTargetPanelDismiss(run_id),
-        ))
-    }
-
     // --- Search settings (create form + edit modal) ------------------
 
     /// The structural fields shared by the new-Saved-Search form and the Search
@@ -3832,43 +3503,6 @@ impl LogLens {
         );
 
         modal_card(card.into())
-    }
-
-    // --- Result tab view -----------------------------------------------
-    //
-    // The Hit table, raw text mode, Hit detail panel, header menu, Sort
-    // fields / Custom timeframe popover content, and the Format modal all
-    // live in `ui::results` now — they only ever needed a `ResultTab` plus a
-    // few transient hover fields, never the rest of `LogLens`.
-
-    /// The floating "Sort fields" editor, anchored under the options strip's
-    /// "Sort fields" button as a stack layer so it never reflows the strips or
-    /// main area below it. A click anywhere outside dismisses it.
-    fn sort_fields_popover_overlay(&self, metrics: &Chrome) -> Option<Element<'_, Message>> {
-        let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
-            return None;
-        };
-        if !tab.sort_panel_open {
-            return None;
-        }
-        if !tab.strips_visible() {
-            return None;
-        }
-        let run_id = tab.run_id;
-
-        const CARD_W: f32 = 460.0;
-
-        let card = container(ui::results::sort_fields_popover(tab)).width(Length::Fixed(CARD_W));
-
-        Some(anchored(
-            card.into(),
-            // Under the "Sort fields" button, the leftmost control in the strip.
-            Anchor::Left {
-                x: chrome::CONTENT_LEFT,
-                y: metrics.below_options_bar,
-            },
-            Message::ResultSortPanelDismiss(run_id),
-        ))
     }
 
     // --- Modals ------------------------------------------------------
@@ -4077,32 +3711,6 @@ fn update_check_task(trigger: update::Trigger) -> Task<Message> {
         trigger,
         result,
     })
-}
-
-/// The floating Edit / Delete dropdown opened by right-clicking a tree row.
-/// Inner width of the tree right-click menu.
-const TREE_MENU_W: f32 = 130.0;
-/// Its width on screen: iced expands a `Fixed` size by the container's padding,
-/// so the popup surface is this much wider than the block inside it.
-const TREE_MENU_OUTER_W: f32 = TREE_MENU_W + chrome::MENU_POPUP_PAD * 2.0;
-
-fn tree_menu_block<'a>(edit: Message, delete: Message) -> Element<'a, Message> {
-    chrome::menu_popup(
-        column![
-            button(text("Edit").size(12.0).color(TEXT))
-                .on_press(edit)
-                .width(Fill)
-                .padding(Padding::new(4.0).left(10.0).right(10.0))
-                .style(style::picker_row(false)),
-            button(text("Delete").size(12.0).color(ERR_RED))
-                .on_press(delete)
-                .width(Fill)
-                .padding(Padding::new(4.0).left(10.0).right(10.0))
-                .style(style::picker_row(false)),
-        ]
-        .spacing(1.0),
-        TREE_MENU_W,
-    )
 }
 
 fn non_empty(s: &str) -> Option<&str> {
