@@ -8,6 +8,7 @@
 //! This module holds the vocabulary they share: the card a modal sits in, a
 //! field label, a number written the way a person reads one.
 
+pub(crate) mod chrome;
 pub(crate) mod results;
 
 use iced::widget::svg::Handle;

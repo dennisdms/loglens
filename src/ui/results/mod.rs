@@ -23,6 +23,7 @@ use crate::line;
 use crate::results::{ResultTab, RunState};
 use crate::style::{self, ERR_RED};
 use crate::ui::centered;
+use crate::ui::chrome;
 use crate::{ColumnDrag, Message, icons};
 use raw_text::raw_text_view;
 use table::hit_table;
@@ -137,7 +138,7 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
                 .height(Length::Fixed(16.0))
                 .style(move |_theme, _status| svg::Style { color: Some(color) }),
         )
-        .center_y(Length::Fixed(18.0))
+        .center_y(Length::Fixed(chrome::OPTIONS_ICON_BOX_H))
     };
 
     // A dropdown-style tooltip bubble shared by every button in the strip.
@@ -158,7 +159,7 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         .align_y(iced::Alignment::Center),
     )
     .on_press(Message::ResultSortPanel(run_id))
-    .padding(Padding::new(5.0).left(9.0).right(9.0))
+    .padding(Padding::new(chrome::OPTIONS_BTN_PAD_Y).left(9.0).right(9.0))
     .style(style::icon_button(tab.sort_panel_open));
     let sort_ctl = tooltip(sort_btn, tip("Sort fields"), tooltip::Position::Bottom).gap(4.0);
 
@@ -174,7 +175,7 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     };
     let mode_btn = button(icon_box(mode_icon, style::TEXT))
         .on_press(Message::ResultLayoutMode(run_id, next_mode))
-        .padding(Padding::new(5.0).left(9.0).right(9.0))
+        .padding(Padding::new(chrome::OPTIONS_BTN_PAD_Y).left(9.0).right(9.0))
         .style(style::icon_button(false));
     let mut group = row![tooltip(mode_btn, tip(mode_label), tooltip::Position::Bottom).gap(4.0)]
         .spacing(6.0)
@@ -188,7 +189,7 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
         style::TEXT_DIM
     }))
     .on_press(Message::ResultWrap(run_id))
-    .padding(Padding::new(5.0).left(9.0).right(9.0))
+    .padding(Padding::new(chrome::OPTIONS_BTN_PAD_Y).left(9.0).right(9.0))
     .style(style::icon_button(tab.search.wrap));
     group = group.push(
         tooltip(
@@ -206,13 +207,13 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     if is_raw {
         let format_btn = button(icon_box(&icons::FORMAT, style::TEXT))
             .on_press(Message::OpenFormat(run_id))
-            .padding(Padding::new(5.0).left(9.0).right(9.0))
+            .padding(Padding::new(chrome::OPTIONS_BTN_PAD_Y).left(9.0).right(9.0))
             .style(style::icon_button(tab.format_open));
         group = group.push(tooltip(format_btn, tip("Format"), tooltip::Position::Bottom).gap(4.0));
     }
 
     let layout_group = container(group)
-        .padding(3.0)
+        .padding(chrome::OPTIONS_GROUP_PAD)
         .style(|_| style::options_group());
 
     let controls = row![sort_ctl, layout_group, space().width(Fill)]
@@ -222,6 +223,13 @@ pub(crate) fn result_sort_bar<'a>(tab: &'a ResultTab) -> Element<'a, Message> {
     container(controls)
         .style(|_| style::panel(style::PANEL))
         .width(Fill)
-        .padding(Padding::new(4.0).left(12.0).right(12.0))
+        // `chrome::OPTIONS_BAR_H` is derived from these constants, so that the
+        // Sort fields popover can be anchored under this strip without being
+        // able to measure it. See `ui::chrome`.
+        .padding(
+            Padding::new(chrome::OPTIONS_BAR_PAD_Y)
+                .left(chrome::CONTENT_PAD_LEFT)
+                .right(12.0),
+        )
         .into()
 }

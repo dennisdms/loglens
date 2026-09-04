@@ -41,30 +41,13 @@ use results::{Paging, ResultTab, RunState, TimeframeDraft, TotalHits};
 use search::{Fields, SearchForm};
 use style::{ACCENT, BG, ERR_RED, OK_GREEN, PANEL, PANEL_ALT, TEXT, TEXT_DIM};
 use tab::Tab;
+use ui::chrome::{self, Anchor, Chrome, anchored, menu_anchor_x};
 use ui::{centered, error_pill, field_label, meta, modal_card, thousands};
 
 /// Pseudo tree-node name for the Elasticsearch root, tracked in the `expanded`
 /// set like a folder. The control char keeps it from colliding with a real
 /// Connection name.
 const ES_ROOT: &str = "\u{1}Elasticsearch";
-
-/// Menu bar geometry, shared by the bar and by every dropdown anchored under
-/// it. A dropdown is a free-floating overlay layer over the whole window and
-/// has no way to ask where its label ended up, so the two have to agree on one
-/// set of numbers instead.
-const MENU_BAR_PAD_LEFT: f32 = 8.0;
-/// The width every Menu bar label occupies, whether or not its text fills it.
-const MENU_LABEL_W: f32 = 46.0;
-/// Gap between two Menu bar labels.
-const MENU_LABEL_GAP: f32 = 12.0;
-/// Distance from the top of the window to the underside of the Menu bar, which
-/// is where a dropdown starts.
-const MENU_BAR_H: f32 = 26.0;
-
-/// The x offset of the `index`-th Menu bar label, for anchoring its dropdown.
-fn menu_anchor_x(index: usize) -> f32 {
-    MENU_BAR_PAD_LEFT + index as f32 * (MENU_LABEL_W + MENU_LABEL_GAP)
-}
 
 /// The display name, as `--version` and `--help` print it. The binary is
 /// `loglens`; this is what a human is shown.
@@ -2716,11 +2699,14 @@ impl LogLens {
         // area. The two optional strips only appear while a Result Tab is
         // active.
         let mut right: Vec<Element<'_, Message>> = Vec::new();
-        if let Some(search_bar) = self.search_bar() {
+        let search_bar = self.search_bar();
+        let options_bar = self.options_bar();
+        let (has_search_bar, has_options_bar) = (search_bar.is_some(), options_bar.is_some());
+        if let Some(search_bar) = search_bar {
             right.push(search_bar);
             right.push(rule::horizontal(1.0).into());
         }
-        if let Some(options_bar) = self.options_bar() {
+        if let Some(options_bar) = options_bar {
             right.push(options_bar);
             right.push(rule::horizontal(1.0).into());
         }
@@ -2737,40 +2723,46 @@ impl LogLens {
 
         // Built as a Vec rather than a `column!` so the Update banner and the
         // rule beneath it appear together or not at all.
-        let mut chrome: Vec<Element<'_, Message>> =
+        let mut frame: Vec<Element<'_, Message>> =
             vec![self.menu_bar(), rule::horizontal(1.0).into()];
-        if let Some(banner) = self.update_banner() {
-            chrome.push(banner);
-            chrome.push(rule::horizontal(1.0).into());
+        let mut banner_h = None;
+        if let Some((banner, height)) = self.update_banner() {
+            frame.push(banner);
+            frame.push(rule::horizontal(1.0).into());
+            banner_h = Some(height);
         }
-        chrome.push(container(body).width(Fill).height(Fill).into());
-        chrome.push(self.status_bar());
-        chrome.push(rule::horizontal(1.0).into());
-        chrome.push(self.info_bar());
+        frame.push(container(body).width(Fill).height(Fill).into());
+        frame.push(self.status_bar());
+        frame.push(rule::horizontal(1.0).into());
+        frame.push(self.info_bar());
 
-        let base: Element<'_, Message> = container(column(chrome))
+        // Everything above is the fixed chrome; every overlay below is a layer
+        // over the whole window that has to be told where that chrome ended.
+        let metrics = Chrome::new(banner_h, has_search_bar, has_options_bar);
+
+        let base: Element<'_, Message> = container(column(frame))
             .style(|_| style::panel(BG))
             .width(Fill)
             .height(Fill)
             .into();
 
         let mut layers: Vec<Element<'_, Message>> = vec![base];
-        if let Some(menu) = self.file_menu_overlay() {
+        if let Some(menu) = self.file_menu_overlay(&metrics) {
             layers.push(menu);
         }
-        if let Some(menu) = self.help_menu_overlay() {
+        if let Some(menu) = self.help_menu_overlay(&metrics) {
             layers.push(menu);
         }
         if let Some(menu) = self.tree_menu_overlay() {
             layers.push(menu);
         }
-        if let Some(popover) = self.sort_fields_popover_overlay() {
+        if let Some(popover) = self.sort_fields_popover_overlay(&metrics) {
             layers.push(popover);
         }
-        if let Some(popover) = self.timeframe_popover_overlay() {
+        if let Some(popover) = self.timeframe_popover_overlay(&metrics) {
             layers.push(popover);
         }
-        if let Some(dropdown) = self.target_suggestions_overlay() {
+        if let Some(dropdown) = self.target_suggestions_overlay(&metrics) {
             layers.push(dropdown);
         }
         if let Some(form) = &self.connection_form {
@@ -2891,7 +2883,7 @@ impl LogLens {
         let panel =
             container(scrollable(column![self.es_section()].spacing(1.0).width(Fill)).height(Fill))
                 .style(|_| style::panel(PANEL))
-                .width(240.0)
+                .width(chrome::SIDEBAR_W)
                 .height(Fill)
                 .padding(6.0);
 
@@ -3033,19 +3025,19 @@ impl LogLens {
             ),
         };
 
-        let x = self.tree_menu_at.x.clamp(2.0, 240.0 - 136.0);
+        // Anchored to the cursor rather than to the chrome, but kept inside
+        // the sidebar it belongs to.
+        let x = self
+            .tree_menu_at
+            .x
+            .clamp(2.0, chrome::SIDEBAR_W - TREE_MENU_OUTER_W);
         let y = self.tree_menu_at.y.max(2.0);
-        let anchored = container(tree_menu_block(edit, delete))
-            .width(Fill)
-            .height(Fill)
-            .padding(Padding::new(0.0).left(x).top(y));
 
-        Some(
-            mouse_area(anchored)
-                .on_press(Message::TreeMenuDismiss)
-                .on_right_press(Message::TreeMenuDismiss)
-                .into(),
-        )
+        Some(anchored(
+            tree_menu_block(edit, delete),
+            Anchor::Left { x, y },
+            Message::TreeMenuDismiss,
+        ))
     }
 
     fn tab_bar(&self) -> Element<'_, Message> {
@@ -3116,22 +3108,29 @@ impl LogLens {
                 menu_bar_label("File", self.file_menu_open, Message::FileMenuToggle),
                 // Inert, so it is rendered as dimmed text in a cell of the same
                 // width rather than as a button that does nothing when pressed.
-                container(text("View").size(13.0).color(TEXT_DIM))
-                    .width(Length::Fixed(MENU_LABEL_W))
+                container(text("View").size(chrome::MENU_LABEL_SIZE).color(TEXT_DIM))
+                    .width(Length::Fixed(chrome::MENU_LABEL_W))
                     .center_x(Fill),
                 menu_bar_label("Help", self.help_menu_open, Message::HelpMenuToggle),
             ]
-            .spacing(MENU_LABEL_GAP)
+            .spacing(chrome::MENU_LABEL_GAP)
             .align_y(iced::Alignment::Center),
         )
         .style(|_| style::panel(PANEL_ALT))
         .width(Fill)
-        .padding(Padding::new(4.0).left(MENU_BAR_PAD_LEFT).right(12.0))
+        // Height comes out of these constants, and `chrome::MENU_BAR_H` is
+        // derived from the same ones — the dropdowns anchored under this bar
+        // have no way to measure where it actually ended. See `ui::chrome`.
+        .padding(
+            Padding::new(chrome::MENU_BAR_PAD_Y)
+                .left(chrome::MENU_BAR_PAD_LEFT)
+                .right(12.0),
+        )
         .into()
     }
 
     /// The floating "Help" dropdown, anchored under its Menu bar label.
-    fn help_menu_overlay(&self) -> Option<Element<'_, Message>> {
+    fn help_menu_overlay(&self, metrics: &Chrome) -> Option<Element<'_, Message>> {
         if !self.help_menu_open {
             return None;
         }
@@ -3156,7 +3155,7 @@ impl LogLens {
         .padding(Padding::new(4.0).left(10.0).right(10.0))
         .style(style::picker_row(false));
 
-        let block = container(
+        let block = chrome::menu_popup(
             column![
                 check,
                 button(text("About").size(12.0).color(TEXT))
@@ -3166,23 +3165,18 @@ impl LogLens {
                     .style(style::picker_row(false)),
             ]
             .spacing(1.0),
-        )
-        .width(178.0)
-        .padding(3.0)
-        .style(|_| style::menu_popup());
+            178.0,
+        );
 
-        let anchored = container(block)
-            .width(Fill)
-            .height(Fill)
+        Some(anchored(
+            block,
             // Index 2: the bar reads File, View, Help.
-            .padding(Padding::new(0.0).left(menu_anchor_x(2)).top(MENU_BAR_H));
-
-        Some(
-            mouse_area(anchored)
-                .on_press(Message::HelpMenuDismiss)
-                .on_right_press(Message::HelpMenuDismiss)
-                .into(),
-        )
+            Anchor::Left {
+                x: menu_anchor_x(2),
+                y: metrics.below_menu_bar,
+            },
+            Message::HelpMenuDismiss,
+        ))
     }
 
     /// The Update banner: a strip directly below the Menu bar naming the newer
@@ -3201,21 +3195,31 @@ impl LogLens {
     /// button: running the installer from a copy on a USB stick would install a
     /// second one into `%LOCALAPPDATA%` while the user carried on running this
     /// one, so the honest offer is the download.
-    fn update_banner(&self) -> Option<Element<'_, Message>> {
+    /// Returns the banner and the height it was built to occupy — the one
+    /// piece of chrome that cannot be a constant, since it is there or not
+    /// depending on whether a Release was found, and two different heights
+    /// depending on whether that Release carried notes. Everything anchored
+    /// below it is displaced by exactly this, so it is reported rather than
+    /// guessed at from the outside. See [`ui::chrome::Chrome`].
+    fn update_banner(&self) -> Option<(Element<'_, Message>, f32)> {
         let release = self.new_release.as_ref()?;
 
         let mut left = column![
             text(format!("{APP_NAME} {} is available.", release.version))
-                .size(13.0)
+                .size(chrome::BANNER_TITLE_SIZE)
                 .color(Color::WHITE),
         ]
-        .spacing(4.0);
+        .spacing(chrome::BANNER_SPACING);
 
         let notes = release.notes.trim();
-        if !notes.is_empty() {
+        let height = if notes.is_empty() {
+            chrome::BANNER_H_BARE
+        } else {
             // GitHub's generated notes are markdown of no fixed length, shown
-            // as the plain text they are. Bounded and scrollable so a long
-            // changelog cannot push the tab strip off the bottom of the window.
+            // as the plain text they are. Given a fixed height — not merely a
+            // maximum — so that a long changelog neither pushes the tab strip
+            // off the bottom of the window nor moves the overlays anchored
+            // under this banner. Longer notes scroll within it.
             left = left.push(
                 container(scrollable(text(notes.to_string()).size(12.0).color(
                     Color {
@@ -3223,9 +3227,10 @@ impl LogLens {
                         ..Color::WHITE
                     },
                 )))
-                .max_height(72.0),
+                .height(Length::Fixed(chrome::BANNER_NOTES_H)),
             );
-        }
+            chrome::BANNER_H_NOTES
+        };
 
         let portable = self.flavour.installed_exe().is_none();
         if portable {
@@ -3295,7 +3300,7 @@ impl LogLens {
             );
         }
 
-        Some(
+        Some((
             container(
                 row![
                     left.width(Fill),
@@ -3311,9 +3316,10 @@ impl LogLens {
             )
             .style(|_| style::panel(ACCENT))
             .width(Fill)
-            .padding(Padding::new(8.0).left(12.0).right(8.0))
+            .padding(Padding::new(chrome::BANNER_PAD_Y).left(12.0).right(8.0))
             .into(),
-        )
+            height,
+        ))
     }
 
     /// The About dialog: what this build is, where it came from, and where it
@@ -3362,32 +3368,28 @@ impl LogLens {
     }
 
     /// The floating "File" dropdown, anchored under its Menu bar label.
-    fn file_menu_overlay(&self) -> Option<Element<'_, Message>> {
+    fn file_menu_overlay(&self, metrics: &Chrome) -> Option<Element<'_, Message>> {
         if !self.file_menu_open {
             return None;
         }
-        let block = container(
+        let block = chrome::menu_popup(
             button(text("Settings").size(12.0).color(TEXT))
                 .on_press(Message::OpenSettings)
                 .width(Fill)
                 .padding(Padding::new(4.0).left(10.0).right(10.0))
                 .style(style::picker_row(false)),
-        )
-        .width(150.0)
-        .padding(3.0)
-        .style(|_| style::menu_popup());
+            150.0,
+        );
 
-        let anchored = container(block)
-            .width(Fill)
-            .height(Fill)
-            .padding(Padding::new(0.0).left(menu_anchor_x(0)).top(MENU_BAR_H));
-
-        Some(
-            mouse_area(anchored)
-                .on_press(Message::FileMenuDismiss)
-                .on_right_press(Message::FileMenuDismiss)
-                .into(),
-        )
+        Some(anchored(
+            block,
+            // Index 0: the bar reads File, View, Help.
+            Anchor::Left {
+                x: menu_anchor_x(0),
+                y: metrics.below_menu_bar,
+            },
+            Message::FileMenuDismiss,
+        ))
     }
 
     /// The Settings window body: a single Elasticsearch page with the two fetch
@@ -3554,12 +3556,16 @@ impl LogLens {
                 timeframe_ctl,
                 button(
                     svg(Handle::clone(&icons::REFRESH))
-                        .width(Length::Fixed(16.0))
-                        .height(Length::Fixed(16.0))
+                        .width(Length::Fixed(chrome::SEARCH_ICON))
+                        .height(Length::Fixed(chrome::SEARCH_ICON))
                         .style(|_theme, _status| svg::Style { color: Some(TEXT) }),
                 )
                 .on_press(Message::RefreshResult(run_id))
-                .padding(Padding::new(5.0).left(9.0).right(9.0))
+                .padding(
+                    Padding::new(chrome::SEARCH_BAR_BTN_PAD_Y)
+                        .left(9.0)
+                        .right(9.0)
+                )
                 .style(style::icon_button(false)),
             ]
             .spacing(12.0)
@@ -3567,7 +3573,14 @@ impl LogLens {
         )
         .style(|_| style::panel(PANEL))
         .width(Fill)
-        .padding(Padding::new(6.0).left(12.0).right(12.0));
+        // As with the Menu bar, `chrome::SEARCH_BAR_H` is derived from these
+        // constants: the timeframe popover and the Target dropdown are
+        // anchored under this row.
+        .padding(
+            Padding::new(chrome::SEARCH_BAR_PAD_Y)
+                .left(chrome::CONTENT_PAD_LEFT)
+                .right(chrome::CONTENT_PAD_RIGHT),
+        );
 
         // The raw-text template is edited in the "Format" modal (opened from the
         // options strip), not here — the Search bar stays a single row.
@@ -3579,7 +3592,7 @@ impl LogLens {
     /// or main area below it (the options strip sits below the Search bar now).
     /// Mirrors the sidebar right-click menu: a click anywhere outside dismisses
     /// it.
-    fn timeframe_popover_overlay(&self) -> Option<Element<'_, Message>> {
+    fn timeframe_popover_overlay(&self, metrics: &Chrome) -> Option<Element<'_, Message>> {
         let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
             return None;
         };
@@ -3589,32 +3602,25 @@ impl LogLens {
         let run_id = tab.run_id;
 
         const CARD_W: f32 = 480.0;
-        // Distance from the top of the window down to just below the Search bar
-        // row, matching the right column's layout in `view`: the Menu bar, then
-        // the Search bar row (the options strip sits below it). Each figure
-        // includes its trailing 1px rule.
-        let top = 25.0 + 40.0;
 
         let card = container(ui::results::timeframe_popover(tab)).width(Length::Fixed(CARD_W));
-        let anchored = container(column![
-            space().height(top),
-            row![space().width(Fill), card, space().width(12.0)],
-        ])
-        .width(Fill)
-        .height(Fill);
 
-        Some(
-            mouse_area(anchored)
-                .on_press(Message::ResultTfCancel(run_id))
-                .into(),
-        )
+        Some(anchored(
+            card.into(),
+            // Under the Search bar's timeframe control, at the right of the row.
+            Anchor::Right {
+                inset: chrome::CONTENT_PAD_RIGHT,
+                y: metrics.below_search_bar,
+            },
+            Message::ResultTfCancel(run_id),
+        ))
     }
 
     /// The Search bar's Target suggestion dropdown, floated as a stack layer
     /// under the Target input so it never reflows the strips or table below.
     /// Anchored with the same top offset as the timeframe popover; a click
     /// anywhere outside dismisses it.
-    fn target_suggestions_overlay(&self) -> Option<Element<'_, Message>> {
+    fn target_suggestions_overlay(&self, metrics: &Chrome) -> Option<Element<'_, Message>> {
         let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
             return None;
         };
@@ -3624,8 +3630,6 @@ impl LogLens {
         let run_id = tab.run_id;
 
         const CARD_W: f32 = 240.0;
-        // Matches `timeframe_popover_overlay`: Menu bar, then the Search bar row.
-        let top = 25.0 + 40.0;
 
         let body: Element<'_, Message> = if tab.targets_loading {
             text("Loading indices\u{2026}")
@@ -3657,20 +3661,16 @@ impl LogLens {
         let card = container(container(body).padding(4.0))
             .style(|_| style::panel(PANEL))
             .width(Length::Fixed(CARD_W));
-        // Left edge of the Target input: sidebar (240) + its rule (1) + the
-        // Search bar row's left padding (12).
-        let anchored = container(column![
-            space().height(top),
-            row![space().width(253.0), card, space().width(Fill)],
-        ])
-        .width(Fill)
-        .height(Fill);
 
-        Some(
-            mouse_area(anchored)
-                .on_press(Message::ResultTargetPanelDismiss(run_id))
-                .into(),
-        )
+        Some(anchored(
+            card.into(),
+            // Under the Target input, the leftmost control in the Search bar.
+            Anchor::Left {
+                x: chrome::CONTENT_LEFT,
+                y: metrics.below_search_bar,
+            },
+            Message::ResultTargetPanelDismiss(run_id),
+        ))
     }
 
     // --- Search settings (create form + edit modal) ------------------
@@ -3844,7 +3844,7 @@ impl LogLens {
     /// The floating "Sort fields" editor, anchored under the options strip's
     /// "Sort fields" button as a stack layer so it never reflows the strips or
     /// main area below it. A click anywhere outside dismisses it.
-    fn sort_fields_popover_overlay(&self) -> Option<Element<'_, Message>> {
+    fn sort_fields_popover_overlay(&self, metrics: &Chrome) -> Option<Element<'_, Message>> {
         let Some(Tab::Result(tab)) = self.active_tab.and_then(|t| self.open_tabs.get(t)) else {
             return None;
         };
@@ -3857,27 +3857,18 @@ impl LogLens {
         let run_id = tab.run_id;
 
         const CARD_W: f32 = 460.0;
-        // Just below the options strip: the Menu bar (25) + its rule, then the
-        // Search bar row (40), then the options strip row (29) including its
-        // trailing 1px rule.
-        let top = 25.0 + 40.0 + 29.0;
-        // Left edge of the "Sort fields" button: sidebar (240) + its rule (1) +
-        // the options strip row's left padding (12).
-        let left = 253.0;
 
         let card = container(ui::results::sort_fields_popover(tab)).width(Length::Fixed(CARD_W));
-        let anchored = container(column![
-            space().height(top),
-            row![space().width(left), card, space().width(Fill)],
-        ])
-        .width(Fill)
-        .height(Fill);
 
-        Some(
-            mouse_area(anchored)
-                .on_press(Message::ResultSortPanelDismiss(run_id))
-                .into(),
-        )
+        Some(anchored(
+            card.into(),
+            // Under the "Sort fields" button, the leftmost control in the strip.
+            Anchor::Left {
+                x: chrome::CONTENT_LEFT,
+                y: metrics.below_options_bar,
+            },
+            Message::ResultSortPanelDismiss(run_id),
+        ))
     }
 
     // --- Modals ------------------------------------------------------
@@ -4065,12 +4056,18 @@ impl LogLens {
 /// One Menu bar label that opens a dropdown, in a cell of the shared width so
 /// [`menu_anchor_x`] can place that dropdown underneath it.
 fn menu_bar_label<'a>(label: &'a str, open: bool, toggle: Message) -> Element<'a, Message> {
-    button(text(label).size(13.0).color(TEXT).width(Fill).center())
-        .on_press(toggle)
-        .width(Length::Fixed(MENU_LABEL_W))
-        .padding(Padding::new(2.0))
-        .style(style::picker_row(open))
-        .into()
+    button(
+        text(label)
+            .size(chrome::MENU_LABEL_SIZE)
+            .color(TEXT)
+            .width(Fill)
+            .center(),
+    )
+    .on_press(toggle)
+    .width(Length::Fixed(chrome::MENU_LABEL_W))
+    .padding(Padding::new(chrome::MENU_LABEL_PAD))
+    .style(style::picker_row(open))
+    .into()
 }
 
 /// Runs one Update check, tagging the result with why it ran so that
@@ -4083,8 +4080,14 @@ fn update_check_task(trigger: update::Trigger) -> Task<Message> {
 }
 
 /// The floating Edit / Delete dropdown opened by right-clicking a tree row.
+/// Inner width of the tree right-click menu.
+const TREE_MENU_W: f32 = 130.0;
+/// Its width on screen: iced expands a `Fixed` size by the container's padding,
+/// so the popup surface is this much wider than the block inside it.
+const TREE_MENU_OUTER_W: f32 = TREE_MENU_W + chrome::MENU_POPUP_PAD * 2.0;
+
 fn tree_menu_block<'a>(edit: Message, delete: Message) -> Element<'a, Message> {
-    container(
+    chrome::menu_popup(
         column![
             button(text("Edit").size(12.0).color(TEXT))
                 .on_press(edit)
@@ -4098,11 +4101,8 @@ fn tree_menu_block<'a>(edit: Message, delete: Message) -> Element<'a, Message> {
                 .style(style::picker_row(false)),
         ]
         .spacing(1.0),
+        TREE_MENU_W,
     )
-    .width(130.0)
-    .padding(3.0)
-    .style(|_| style::menu_popup())
-    .into()
 }
 
 fn non_empty(s: &str) -> Option<&str> {
